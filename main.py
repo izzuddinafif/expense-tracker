@@ -130,7 +130,7 @@ async def main() -> None:
             )
             return
 
-        if text.lower() == "/setup" and step not in ("start", "await_name", "migrated"):
+        if text.lower() in ("/setup", "setup", "/config", "config") and step not in ("start", "await_name", "migrated"):
             # Allow /setup to restart from any non-initial step
             await db.set_user_setup_step(user_id, "await_name")
             await msg.answer(
