@@ -55,11 +55,11 @@ def load_config() -> Config:
         months_ds="151c2adf-8454-83f6-b6e3-81f471896e43",
         years_ds="bb6c2adf-8454-82d7-9b50-8136332ea54e",
         recurring_ds="49bc2adf-8454-82fa-a3be-81d6729d0bae",
-        assets_ds="86993dea-618a-473a-9b6d-4a271a16a26e",
+        assets_ds="251aa197-84a2-480c-96b5-38f6e8cb5d77",
         income_ds="8d6c2adf-8454-8207-99a9-81e13431dc30",
-        income_subcategories_ds="c68c2adf-8454-82ff-8e2e-87c05e2a7975",
-        income_months_ds="a43c2adf-8454-82e2-a361-87fd09bfb425",
-        income_years_ds="d9fc2adf-8454-8228-b2b2-076d532572b9",
+        income_subcategories_ds="ca4c2adf-8454-83bc-bb02-81fcc02735fe",
+        income_months_ds="151c2adf-8454-83f6-b6e3-81f471896e43",
+        income_years_ds="bb6c2adf-8454-82d7-9b50-8136332ea54e",
         # Add your Telegram user IDs here
         users={
             981749333: "Afif",
