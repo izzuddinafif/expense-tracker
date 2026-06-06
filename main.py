@@ -14,7 +14,7 @@ from aiogram.types import (
 from config import load_config
 from db import Database
 from models import NotionCache, ExpenseEntry, IncomeEntry, EmailTransaction
-from notion import NotionClient
+from notion import NotionClient, _url_to_id
 from agent import Agent
 from email_watcher import EmailWatcher
 
@@ -35,6 +35,43 @@ def make_income_confirm_keyboard(user_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="✅ Simpan", callback_data=f"income_confirm:{user_id}"),
         InlineKeyboardButton(text="❌ Batal", callback_data=f"income_cancel:{user_id}"),
     ]])
+
+
+def make_category_keyboard(page_id: str, cache: NotionCache) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(
+            text=cat,
+            callback_data=f"cat_pick:{page_id}:{i}",
+        )]
+        for i, cat in enumerate(cache.category_subcategories)
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def make_subcategory_keyboard(
+    page_id: str, cat_index: int, cache: NotionCache
+) -> InlineKeyboardMarkup:
+    cats = list(cache.category_subcategories.keys())
+    if cat_index >= len(cats):
+        return InlineKeyboardMarkup(inline_keyboard=[])
+    cat_name = cats[cat_index]
+    subcats = cache.category_subcategories[cat_name]
+    rows = [subcats[i:i + 2] for i in range(0, len(subcats), 2)]
+    buttons = []
+    offset = 0
+    for row in rows:
+        row_buttons = []
+        for si, s in enumerate(row):
+            row_buttons.append(InlineKeyboardButton(
+                text=s,
+                callback_data=f"subcat_pick:{page_id}:{cat_index}:{offset + si}",
+            ))
+        buttons.append(row_buttons)
+        offset += len(row)
+    buttons.append([
+        InlineKeyboardButton(text="⬅️ Kembali", callback_data=f"cat_back:{page_id}")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 async def main() -> None:
@@ -393,8 +430,16 @@ async def main() -> None:
         try:
             url = await notion.log_expense(entry, owner, cache)
             await db.clear_pending_expense(user_id)
+            page_id = _url_to_id(url)
             await status_msg.edit_text(
-                f"✅ Tersimpan! [Lihat di Notion]({url})", parse_mode="Markdown"
+                f"✅ Tersimpan! [Lihat di Notion]({url})",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="🏷 Ganti kategori",
+                        callback_data=f"cat_back:{page_id}",
+                    )
+                ]]),
             )
         except Exception as e:
             log.error(f"Notion write failed: {e}")
@@ -470,6 +515,54 @@ async def main() -> None:
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("Dibatalkan.")
         await callback.message.answer("Dibatalkan ❌")
+
+    @dp.callback_query(F.data.startswith("cat_pick:"))
+    async def handle_cat_pick(callback: CallbackQuery) -> None:
+        _, page_id, cat_idx_str = callback.data.split(":", 2)
+        cat_index = int(cat_idx_str)
+        await callback.message.edit_reply_markup(
+            reply_markup=make_subcategory_keyboard(page_id, cat_index, cache)
+        )
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith("cat_back:"))
+    async def handle_cat_back(callback: CallbackQuery) -> None:
+        _, page_id = callback.data.split(":", 1)
+        await callback.message.edit_reply_markup(
+            reply_markup=make_category_keyboard(page_id, cache)
+        )
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith("subcat_pick:"))
+    async def handle_subcat_pick(callback: CallbackQuery) -> None:
+        _, page_id, cat_idx_str, subcat_idx_str = callback.data.split(":", 3)
+        cat_index = int(cat_idx_str)
+        subcat_index = int(subcat_idx_str)
+
+        cats = list(cache.category_subcategories.keys())
+        if cat_index >= len(cats):
+            await callback.answer("❌ Data tidak ditemukan.")
+            return
+        cat_name = cats[cat_index]
+        subcats = cache.category_subcategories[cat_name]
+        if subcat_index >= len(subcats):
+            await callback.answer("❌ Data tidak ditemukan.")
+            return
+        subcat_name = subcats[subcat_index]
+
+        try:
+            await notion.update_expense_subcategory(page_id, subcat_name, cache)
+        except Exception as e:
+            log.error(f"update_expense_subcategory failed: {e}")
+            await callback.answer("❌ Gagal mengubah kategori.")
+            return
+
+        await callback.message.edit_text(
+            callback.message.text + f"\n\n✅ Kategori diubah: *{subcat_name}*",
+            parse_mode="Markdown",
+            reply_markup=None,
+        )
+        await callback.answer("Tersimpan!")
 
     # ── Startup ───────────────────────────────────────────────────────────────
     try:

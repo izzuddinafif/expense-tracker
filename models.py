@@ -56,6 +56,9 @@ class NotionCache:
     income_months: dict[str, str] = field(default_factory=dict)
     income_years: dict[str, str] = field(default_factory=dict)
 
+    # Category → list of subcategory names (for two-level picker)
+    category_subcategories: dict[str, list[str]] = field(default_factory=dict)
+
     # amount in IDR (rounded to int) → {name, page_url, subcategory, account}
     # Loaded from the "Recurring Payment" Notion database (Active entries only)
     # Keyed by int to avoid float equality issues (e.g. 49999.99999 != 50000.0)

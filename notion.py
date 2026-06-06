@@ -154,6 +154,25 @@ class NotionClient:
             self._load_recurring(cache.subcategories, cache.accounts),
         )
 
+        # Build category → subcategory mapping
+        subcat_id_to_name = {
+            _url_to_id(url): name for name, url in cache.subcategories.items()
+        }
+        cat_pages = await self._query_db(self._config.categories_ds)
+        for p in cat_pages:
+            cat_name = self._extract_title(p)
+            subcat_ids = [
+                r["id"]
+                for r in p["properties"].get("Sub-categories", {}).get("relation", [])
+            ]
+            subcats = [
+                subcat_id_to_name[sid]
+                for sid in subcat_ids
+                if sid in subcat_id_to_name
+            ]
+            if subcats:
+                cache.category_subcategories[cat_name] = subcats
+
         return cache
 
     async def log_expense(
@@ -278,6 +297,50 @@ class NotionClient:
             "https://api.notion.com/v1/pages", json=payload,
         )
         return data["url"]
+
+    async def _notion_patch(self, url: str, json: dict) -> dict:
+        """PATCH a Notion page with retry logic (same as _notion_post)."""
+        last_resp = None
+        last_exc = None
+        delay = 1.0
+        for attempt in range(3):
+            try:
+                resp = await self._http.patch(url, headers=self._headers, json=json)
+            except httpx.TransportError as e:
+                last_exc = e
+                log.warning(f"Notion transport error (attempt {attempt + 1}): {e}")
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
+            if resp.status_code < 500 and resp.status_code != 429:
+                resp.raise_for_status()
+                return resp.json()
+            last_resp = resp
+            retry_after = float(resp.headers.get("Retry-After", delay))
+            await asyncio.sleep(retry_after)
+            delay *= 2
+        if last_exc:
+            raise last_exc
+        last_resp.raise_for_status()
+        return last_resp.json()
+
+    async def update_expense_subcategory(
+        self, page_id: str, subcategory_name: str, cache: NotionCache
+    ) -> None:
+        match = cache.closest_subcategory(subcategory_name)
+        if not match:
+            raise ValueError(f"Subcategory not found: {subcategory_name}")
+        _, subcat_url = match
+        await self._notion_patch(
+            f"https://api.notion.com/v1/pages/{page_id}",
+            {
+                "properties": {
+                    "Expenses Sub-categories": {
+                        "relation": [{"id": _url_to_id(subcat_url)}]
+                    }
+                }
+            },
+        )
 
     async def fetch_expenses(self, owner: str) -> list[dict]:
         """Fetch expenses for a given owner, filtered on the Notion side."""
