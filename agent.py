@@ -1,0 +1,317 @@
+import asyncio
+import base64
+import json
+import logging
+from openai import AsyncOpenAI, APIError, APITimeoutError, APIConnectionError, RateLimitError
+from config import Config
+from models import ExpenseEntry, QueryIntent, EmailTransaction, NotionCache, ConversationState
+
+log = logging.getLogger(__name__)
+
+# Max attempts for API calls (1 initial + 2 retries)
+_API_MAX_ATTEMPTS = 3
+# Max attempts for JSON parse (1 initial + 1 fix-JSON retry)
+_JSON_MAX_ATTEMPTS = 2
+
+
+EXTRACT_SYSTEM = """You are a receipt/expense extraction assistant.
+Given an image or text description of an expense, extract the details and respond ONLY with valid JSON.
+No markdown, no explanation, just JSON.
+
+JSON schema:
+{
+  "description": "merchant name or short description",
+  "amount": 0.0,
+  "date": "YYYY-MM-DD",
+  "subcategory": "best matching subcategory from the list",
+  "account": "best matching account from the list",
+  "confidence": 0.95
+}
+
+Rules:
+- amount must be a number in IDR (no currency symbols)
+- date defaults to today if not visible: {today}
+- subcategory and account must be chosen from the provided lists
+- confidence: 1.0 = all fields clearly visible, 0.5 = some fields guessed
+"""
+
+QUERY_SYSTEM = """You are a personal finance assistant.
+The user is asking about their expenses. Answer concisely based on the expense data provided.
+Format amounts as IDR with thousand separators (e.g. Rp 50.000).
+Be direct and helpful. If data is insufficient, say so.
+"""
+
+INTENT_SYSTEM = """Classify the user message as one of:
+- "query": user is asking about their spending/expenses
+- "log_text": user is describing an expense in text (no image)
+- "unknown": unclear
+
+Respond ONLY with JSON: {"type": "query|log_text|unknown", "text": "<original message>"}
+"""
+
+EMAIL_PARSE_SYSTEM = """You are a bank email parser for an Indonesian user named IZZUDDIN AHMAD AFIF.
+Parse the bank notification email and return ONLY valid JSON (no markdown, no explanation).
+
+USER'S OWN ACCOUNTS (for self-transfer detection):
+- Mandiri ****1854 (full: 1400025491854)
+- BSI/BYOND ****9400
+- Jago SDC 500904947426 / pocket 503874467003
+
+KNOWN EMAIL TYPES AND KEY FIELDS:
+1. Mandiri "Pembayaran Berhasil!" → QRIS expense. Fields: Penerima=merchant, Nominal Transaksi=amount, Sumber Dana=source account
+2. Mandiri "Transfer Berhasil" → transfer. Fields: Penerima=recipient name+bank, Jumlah Transfer=amount. Self-transfer if Penerima name = IZZUDDIN AHMAD AFIF
+3. Mandiri "Transfer Tidak Berhasil" → SKIP (failed)
+4. Jago "Kamu telah melakukan transfer💸" → transfer. Fields: Ke=recipient name+bank, Jumlah=amount, Tanggal transaksi=date. Self-transfer if Ke name = IZZUDDIN AHMAD AFIF
+5. Jago "Kamu telah membayar ke [merchant]💸" → QRIS expense. Merchant in subject and Ke field. Fields: Jumlah=amount, Tanggal Transaksi=date
+6. Jago "Kamu melakukan transaksi menggunakan kartu debit Jago" → expense (no merchant known). Use description "Jago debit card transaction". Extract amount from body text.
+7. BSI "Transaksi Pembayaran QRIS MPM Kamu Berhasil" → QRIS expense. Fields: Nama Merchant=merchant, Nominal Transaksi=amount, Tanggal=date, Rekening Sumber=source account
+8. BSI "Notifikasi Transaksi Transfer" → transfer. Fields: Rekening Penerima=recipient name+bank, Nominal Transfer=amount. Self-transfer if Rekening Penerima name = IZZUDDIN AHMAD AFIF
+
+TRANSACTION TYPES:
+- "expense": payment to merchant or third party (QRIS, debit card, transfer to someone else)
+- "self_transfer": money moved between user's own accounts
+- "skip": failed/declined transaction OR any email that is not a completed transaction
+
+DATE PARSING (Indonesian months):
+Jan=January, Feb=February, Mar=March, Apr=April, Mei=May, Jun=June,
+Jul=July, Agu=August, Sep=September, Okt=October, Nov=November, Des=December
+Examples: "4 Jun 2026" → "2026-06-04", "17 Mei 2026" → "2026-05-17", "31 May 2026" → "2026-05-31"
+If date is missing, use today: {today}
+
+AMOUNT PARSING (Indonesian format — period=thousands, comma=decimal):
+"Rp 13.000,00" → 13000.0 | "Rp100.000" → 100000.0 | "Rp373.136" → 373136.0 | "Rp 30.000" → 30000.0
+
+ACCOUNT MAPPING:
+- "****1854" or Mandiri source → pick closest to "Mandiri" from accounts list
+- "****9400" or BSI/BYOND source → pick closest to "BSI" from accounts list
+- SDC / Jago source → pick closest to "Jago" from accounts list
+
+Available subcategories: {subcategories}
+Available accounts: {accounts}
+
+JSON response schema:
+{{
+  "type": "expense|self_transfer|skip",
+  "description": "merchant or recipient name",
+  "amount": 0.0,
+  "admin_fee": 0.0,
+  "date": "YYYY-MM-DD",
+  "subcategory": "best match from list",
+  "account": "best match from list",
+  "recipient_name": "",
+  "recipient_bank": "",
+  "skip_reason": ""
+}}
+"""
+
+
+def _strip_fences(raw: str) -> str:
+    """Strip markdown code fences that some models add around JSON."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.split("```")[0]
+    return raw.strip()
+
+
+class Agent:
+    def __init__(self, config: Config) -> None:
+        self._client = AsyncOpenAI(
+            api_key=config.openrouter_api_key,
+            base_url=config.openrouter_base_url,
+        )
+        self._config = config
+
+    # ── Retry helpers ──────────────────────────────────────────────────────────
+
+    async def _call(self, **kwargs) -> str:
+        """
+        Call the chat completions API with exponential-backoff retry on
+        transient errors (network, timeout, 429, 5xx).
+        Returns the raw content string.
+        """
+        delay = 1.0
+        last_exc: Exception | None = None
+
+        for attempt in range(_API_MAX_ATTEMPTS):
+            try:
+                resp = await self._client.chat.completions.create(**kwargs)
+                return resp.choices[0].message.content or ""
+            except (APITimeoutError, APIConnectionError) as e:
+                last_exc = e
+                log.warning(f"API network error (attempt {attempt + 1}): {e}")
+            except RateLimitError as e:
+                last_exc = e
+                log.warning(f"Rate limited (attempt {attempt + 1}): {e}")
+            except APIError as e:
+                # Retry on 5xx server errors only
+                if e.status_code and e.status_code >= 500:
+                    last_exc = e
+                    log.warning(f"OpenRouter 5xx (attempt {attempt + 1}): {e}")
+                else:
+                    raise  # 4xx (bad request etc.) — don't retry
+
+            if attempt < _API_MAX_ATTEMPTS - 1:
+                await asyncio.sleep(delay)
+                delay *= 2  # exponential backoff: 1s, 2s
+
+        raise last_exc  # all attempts exhausted
+
+    async def _call_json(self, model_cls: type, messages: list[dict], **kwargs) -> object:
+        """
+        Call the API and parse the response as JSON into model_cls.
+        On JSON parse failure, sends a fix-JSON follow-up once before giving up.
+        """
+        raw = await self._call(messages=messages, **kwargs)
+        raw = _strip_fences(raw)
+
+        for attempt in range(_JSON_MAX_ATTEMPTS):
+            try:
+                data = json.loads(raw)
+                return model_cls(**data)
+            except (json.JSONDecodeError, ValueError, TypeError) as e:
+                if attempt < _JSON_MAX_ATTEMPTS - 1:
+                    log.warning(f"JSON parse failed, retrying with fix prompt: {e}")
+                    fix_messages = messages + [
+                        {"role": "assistant", "content": raw},
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Your response was not valid JSON. Error: {e}\n"
+                                "Please respond with ONLY valid JSON, no markdown, "
+                                "no explanation."
+                            ),
+                        },
+                    ]
+                    raw = await self._call(messages=fix_messages, **kwargs)
+                    raw = _strip_fences(raw)
+                else:
+                    log.error(f"JSON parse failed after fix attempt. Raw: {raw[:200]}")
+                    raise
+
+    # ── Public methods ─────────────────────────────────────────────────────────
+
+    async def extract_from_image(
+        self,
+        image_bytes: bytes,
+        cache: NotionCache,
+        today: str,
+    ) -> ExpenseEntry:
+        subcats = ", ".join(cache.subcategories.keys())
+        accounts = ", ".join(cache.accounts.keys())
+        system = EXTRACT_SYSTEM.replace("{today}", today)
+
+        messages = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Available subcategories: {subcats}\nAvailable accounts: {accounts}\n\nExtract the expense from this receipt:",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64.b64encode(image_bytes).decode()}"
+                        },
+                    },
+                ],
+            },
+        ]
+        return await self._call_json(
+            ExpenseEntry, messages, model=self._config.vision_model
+        )
+
+    async def extract_from_text(
+        self,
+        text: str,
+        cache: NotionCache,
+        today: str,
+    ) -> ExpenseEntry:
+        subcats = ", ".join(cache.subcategories.keys())
+        accounts = ", ".join(cache.accounts.keys())
+        system = EXTRACT_SYSTEM.replace("{today}", today)
+
+        messages = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": f"Available subcategories: {subcats}\nAvailable accounts: {accounts}\n\nExtract expense from: {text}",
+            },
+        ]
+        return await self._call_json(
+            ExpenseEntry, messages, model=self._config.query_model
+        )
+
+    async def detect_intent(self, text: str) -> QueryIntent:
+        messages = [
+            {"role": "system", "content": INTENT_SYSTEM},
+            {"role": "user", "content": text},
+        ]
+        return await self._call_json(
+            QueryIntent, messages, model=self._config.query_model
+        )
+
+    async def answer_query(
+        self,
+        question: str,
+        expenses: list[dict],
+        owner: str,
+        state: ConversationState,
+    ) -> str:
+        expenses_text = json.dumps(expenses, indent=2)
+        state.history.append({"role": "user", "content": question})
+
+        messages = [
+            {
+                "role": "system",
+                "content": f"{QUERY_SYSTEM}\n\n{owner}'s expense data:\n{expenses_text}",
+            },
+            *state.history,
+        ]
+
+        # answer_query returns plain text, not JSON — use _call directly
+        answer = await self._call(model=self._config.query_model, messages=messages)
+        if not answer:
+            answer = "Sorry, I couldn't process that."
+
+        state.history.append({"role": "assistant", "content": answer})
+        if len(state.history) > 20:
+            state.history = state.history[-20:]
+
+        return answer
+
+    async def parse_bank_email(
+        self,
+        subject: str,
+        body: str,
+        sender: str,
+        cache: NotionCache,
+        today: str,
+    ) -> EmailTransaction:
+        subcats = ", ".join(cache.subcategories.keys())
+        accounts = ", ".join(cache.accounts.keys())
+        system = (
+            EMAIL_PARSE_SYSTEM
+            .replace("{today}", today)
+            .replace("{subcategories}", subcats)
+            .replace("{accounts}", accounts)
+        )
+
+        messages = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": (
+                    f"From: {sender}\n"
+                    f"Subject: {subject}\n\n"
+                    f"Body:\n{body[:3000]}"
+                ),
+            },
+        ]
+        return await self._call_json(
+            EmailTransaction, messages, model=self._config.query_model
+        )
