@@ -207,6 +207,24 @@ class NotionClient:
             })
         return result
 
+    async def fetch_assets(self) -> list[dict]:
+        """Fetch all entries from the Assets database."""
+        pages = await self._query_db(self._config.assets_ds)
+        result = []
+        for p in pages:
+            props = p["properties"]
+            name = self._extract_title(p)
+            result.append({
+                "name": name,
+                "type": props.get("Type", {}).get("select", {}).get("name", ""),
+                "quantity": props.get("Quantity", {}).get("number"),
+                "unit": "".join(t["plain_text"] for t in props.get("Unit", {}).get("rich_text", [])),
+                "value_idr": props.get("Value IDR", {}).get("number"),
+                "last_updated": (props.get("Last Updated", {}).get("date") or {}).get("start", ""),
+                "notes": "".join(t["plain_text"] for t in props.get("Notes", {}).get("rich_text", [])),
+            })
+        return result
+
 
 def _url_to_id(url: str) -> str:
     """Extract Notion page ID (with dashes) from a URL or bare ID."""

@@ -262,15 +262,16 @@ class Agent:
         expenses: list[dict],
         owner: str,
         history: list[dict],
+        assets: list[dict] | None = None,
     ) -> tuple[str, list[dict]]:
         expenses_text = json.dumps(expenses, indent=2)
+        system = f"{QUERY_SYSTEM}\n\n{owner}'s expense data:\n{expenses_text}"
+        if assets:
+            system += f"\n\n{owner}'s assets:\n{json.dumps(assets, indent=2)}"
         history.append({"role": "user", "content": question})
 
         messages = [
-            {
-                "role": "system",
-                "content": f"{QUERY_SYSTEM}\n\n{owner}'s expense data:\n{expenses_text}",
-            },
+            {"role": "system", "content": system},
             *history,
         ]
 

@@ -49,6 +49,7 @@ SKIP_SUBJECT_KEYWORDS = [
 ]
 
 IMAP_HOST = "imap.gmail.com"
+LOOKBACK_DAYS = 1    # only scan today's and yesterday's emails
 
 # Description the AI returns for Jago debit card emails (no merchant info)
 JAGO_DEBIT_DESCRIPTION = "jago debit card transaction"
@@ -149,8 +150,12 @@ class EmailWatcher:
             imap.login(self._config.gmail_address, self._config.gmail_app_password)
             imap.select("INBOX")
 
+            # Only fetch emails from the last LOOKBACK_DAYS days
+            from datetime import timedelta
+            since = (date.today() - timedelta(days=LOOKBACK_DAYS)).strftime("%d-%b-%Y")
+
             for sender in BANK_SENDERS:
-                typ, data = imap.uid("search", None, f'FROM "{sender}"')
+                typ, data = imap.uid("search", None, f'FROM "{sender}" SINCE {since}')
                 if typ != "OK" or not data[0]:
                     continue
 

@@ -107,10 +107,34 @@ async def main() -> None:
             "💬 *Text expense* — describe it naturally: `Nasi goreng 25k cash`\n"
             "❓ *Spending query* — ask anything: `How much did I spend this week?`\n\n"
             "Commands:\n"
+            "/networth — show your assets summary\n"
             "/refresh — reload categories and recurring payments from Notion\n"
             "/help — show this message",
             parse_mode="Markdown",
         )
+
+    @dp.message(Command("networth"))
+    async def handle_networth(msg: Message) -> None:
+        owner = get_owner(msg.from_user.id)
+        if not owner:
+            return
+        try:
+            assets = await notion.fetch_assets()
+            if not assets:
+                await msg.answer("No assets found. Add them to the Assets database in Notion.")
+                return
+            total = sum(a["value_idr"] for a in assets if a["value_idr"])
+            lines = ["💼 *Assets*\n"]
+            for a in assets:
+                val = f"Rp {a['value_idr']:,.0f}" if a["value_idr"] else "_(no value set)_"
+                qty = f"{a['quantity']:g} {a['unit']}" if a["quantity"] else ""
+                lines.append(f"• *{a['name']}*{' — ' + qty if qty else ''}: {val}")
+            if total:
+                lines.append(f"\n💰 *Total: Rp {total:,.0f}*")
+            await msg.answer("\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            log.error(f"/networth failed: {e}")
+            await msg.answer(f"❌ Couldn't fetch assets.\n`{type(e).__name__}: {str(e)[:80]}`", parse_mode="Markdown")
 
     @dp.message(Command("refresh"))
     async def handle_refresh(msg: Message) -> None:
@@ -217,9 +241,12 @@ async def main() -> None:
         if intent.type == "query":
             await msg.answer("🔎 Fetching your expenses...")
             try:
-                expenses = await notion.fetch_expenses(owner)
+                expenses, assets = await asyncio.gather(
+                    notion.fetch_expenses(owner),
+                    notion.fetch_assets(),
+                )
                 history = await db.get_history(user_id)
-                answer, history = await agent.answer_query(text, expenses, owner, history)
+                answer, history = await agent.answer_query(text, expenses, owner, history, assets=assets)
                 await db.append_history(user_id, "user", text)
                 await db.append_history(user_id, "assistant", answer)
                 await msg.answer(answer)
