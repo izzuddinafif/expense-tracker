@@ -378,6 +378,38 @@ class Agent:
         except Exception:
             return []
 
+    async def check_duplicate(
+        self, existing: list[str], new_description: str, amount: float, date: str
+    ) -> bool:
+        descriptions_str = "\n".join(f"- {d}" for d in existing)
+        messages = [
+            {"role": "system", "content": (
+                "You are a duplicate detection assistant. "
+                "Given an existing expense and a new one with the same amount and date, "
+                "determine if they are the same purchase (duplicate). "
+                "Return JSON: {\"is_duplicate\": true/false}. "
+                "If descriptions are very similar or one is a rephrasing of the other, it's a duplicate. "
+                "No explanation."
+            )},
+            {"role": "user", "content": (
+                f"Amount: Rp {amount:,.0f}\n"
+                f"Date: {date}\n\n"
+                f"Existing expenses (same amount + date):\n{descriptions_str}\n\n"
+                f"New expense: {new_description}\n\n"
+                "Return {\"is_duplicate\": true} if this is likely the same transaction."
+            )},
+        ]
+        raw = await self._call(
+            model=self._config.query_model,
+            messages=messages,
+            temperature=0,
+        )
+        try:
+            result = json.loads(_strip_fences(raw))
+            return bool(result.get("is_duplicate", False))
+        except Exception:
+            return False
+
     async def parse_bank_email(
         self,
         subject: str,

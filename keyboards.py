@@ -6,8 +6,19 @@ from models import NotionCache
 def make_confirm_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Simpan", callback_data=f"confirm:{user_id}"),
+        InlineKeyboardButton(text="✏️ Edit", callback_data=f"edit:{user_id}"),
         InlineKeyboardButton(text="❌ Batal", callback_data=f"cancel:{user_id}"),
     ]])
+
+
+def make_edit_field_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📝 Deskripsi", callback_data=f"edit_desc:{user_id}")],
+        [InlineKeyboardButton(text="💰 Jumlah", callback_data=f"edit_amount:{user_id}")],
+        [InlineKeyboardButton(text="📅 Tanggal", callback_data=f"edit_date:{user_id}")],
+        [InlineKeyboardButton(text="🏷 Kategori", callback_data=f"edit_cat:{user_id}")],
+        [InlineKeyboardButton(text="❌ Batal edit", callback_data=f"cancel:{user_id}")],
+    ])
 
 
 def make_income_confirm_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -25,6 +36,7 @@ def make_category_keyboard(page_id: str, cache: NotionCache) -> InlineKeyboardMa
         )]
         for i, cat in enumerate(cache.category_subcategories)
     ]
+    buttons.append([InlineKeyboardButton(text="❌ Batal", callback_data=f"cat_cancel:{page_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -79,6 +91,7 @@ def make_recommended_category_keyboard(
         text="Lainnya →",
         callback_data=f"cat_all:{page_id}",
     )])
+    buttons.append([InlineKeyboardButton(text="❌ Batal", callback_data=f"cat_cancel:{page_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -86,6 +99,9 @@ def make_change_category_button(page_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(
             text="🏷 Ganti kategori",
-            callback_data=f"cat_back:{page_id}",
+            callback_data=f"cat_change:{page_id}",
         )
     ]])
+
+
+

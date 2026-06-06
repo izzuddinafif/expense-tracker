@@ -163,7 +163,7 @@ class NotionClient:
             cat_name = self._extract_title(p)
             subcat_ids = [
                 r["id"]
-                for r in p["properties"].get("Sub-categories", {}).get("relation", [])
+                for r in p["properties"].get("🥡 Sub-categories", {}).get("relation", [])
             ]
             subcats = [
                 subcat_id_to_name[sid]
@@ -342,12 +342,64 @@ class NotionClient:
             },
         )
 
-    async def fetch_expenses(self, owner: str) -> list[dict]:
+    async def fetch_duplicates(
+        self, owner: str, amount: float, date: str
+    ) -> list[str]:
+        """Find existing expenses with the same amount + date + owner."""
+        payload = {
+            "filter": {
+                "and": [
+                    {"property": "Description", "title": {"contains": f"[{owner}]"}},
+                    {"property": "Amount", "number": {"equals": amount}},
+                    {"property": "Date of Expense", "date": {"equals": date}},
+                ]
+            }
+        }
+        pages = await self._query_db(self._config.expenses_ds, extra_payload=payload)
+        result = []
+        for p in pages:
+            title_prop = p["properties"].get("Description", {})
+            title = "".join(t["plain_text"] for t in title_prop.get("title", []))
+            result.append(title.replace(f"[{owner}] ", ""))
+        return result
+
+    async def fetch_expenses(self, owner: str, cache: NotionCache | None = None) -> list[dict]:
         """Fetch expenses for a given owner, filtered on the Notion side."""
         payload = {
             "filter": {
                 "property": "Description",
                 "title": {"contains": f"[{owner}]"},
+            }
+        }
+        pages = await self._query_db(self._config.expenses_ds, extra_payload=payload)
+        sub_id_to_name = {_url_to_id(url): name for name, url in (cache.subcategories.items() if cache else {})}
+        result = []
+        for p in pages:
+            title_prop = p["properties"].get("Description", {})
+            title = "".join(t["plain_text"] for t in title_prop.get("title", []))
+            amount = p["properties"].get("Amount", {}).get("number", 0)
+            date_prop = p["properties"].get("Date of Expense", {}).get("date") or {}
+            sub_rel = p["properties"].get("Expenses Sub-categories", {}).get("relation", [])
+            sub_name = ""
+            if sub_rel:
+                sid = sub_rel[0]["id"]
+                sub_name = sub_id_to_name.get(sid, "")
+            result.append({
+                "description": title.replace(f"[{owner}] ", ""),
+                "amount": amount,
+                "date": date_prop.get("start", ""),
+                "subcategory": sub_name,
+                "url": p["url"],
+            })
+        return result
+
+    async def search_expenses(self, owner: str, keyword: str) -> list[dict]:
+        payload = {
+            "filter": {
+                "and": [
+                    {"property": "Description", "title": {"contains": f"[{owner}]"}},
+                    {"property": "Description", "title": {"contains": keyword}},
+                ]
             }
         }
         pages = await self._query_db(self._config.expenses_ds, extra_payload=payload)
@@ -357,10 +409,12 @@ class NotionClient:
             title = "".join(t["plain_text"] for t in title_prop.get("title", []))
             amount = p["properties"].get("Amount", {}).get("number", 0)
             date_prop = p["properties"].get("Date of Expense", {}).get("date") or {}
+            sub_rel = p["properties"].get("Expenses Sub-categories", {}).get("relation", [])
             result.append({
                 "description": title.replace(f"[{owner}] ", ""),
                 "amount": amount,
                 "date": date_prop.get("start", ""),
+                "url": p["url"],
             })
         return result
 

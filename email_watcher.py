@@ -130,6 +130,7 @@ class EmailWatcher:
         owner_telegram_id: int | None = None,
         owner_name: str = "Afif",
         alert_fn=None,
+        page_desc: dict[str, str] | None = None,
     ):
         self._config = config
         self._db = db
@@ -140,6 +141,7 @@ class EmailWatcher:
         self._owner_id = owner_telegram_id
         self._owner_name = owner_name
         self._alert_fn = alert_fn
+        self._page_desc = page_desc or {}
         self._imap: imaplib.IMAP4_SSL | None = None
         self._last_imap_error: str | None = None
         self._notion_fail_streak: int = 0
@@ -250,6 +252,28 @@ class EmailWatcher:
                 text_body = decoded
 
         return html_to_text(html_body) if html_body else text_body.strip()
+
+    async def _check_budget_alert(self, entry: ExpenseEntry) -> None:
+        try:
+            cache = self._cache_getter()
+            budgets = await self._notion.fetch_budgets(cache)
+            for b in budgets:
+                if entry.subcategory not in b["subcategories"]:
+                    continue
+                pct = b["percentage"]
+                if pct >= 100:
+                    await self._alert(
+                        f"🔴 *Budget Alert!* Anggaran *{b['name']}* sudah terlampaui!\n"
+                        f"Rp {b['spent']:,.0f} / Rp {b['budget']:,.0f} ({pct:.0f}%)"
+                    )
+                elif pct >= 80:
+                    await self._alert(
+                        f"🟡 *Budget Alert!* Anggaran *{b['name']}* hampir habis.\n"
+                        f"Rp {b['spent']:,.0f} / Rp {b['budget']:,.0f} ({pct:.0f}%)"
+                    )
+                break
+        except Exception as e:
+            log.warning(f"Budget alert check failed: {e}")
 
     # ── Notification helpers ────────────────────────────────────────────────────
 
@@ -371,6 +395,8 @@ class EmailWatcher:
                             recurring_page_url=recurring["page_url"],
                         )
                         page_id = _url_to_id(url)
+                        self._page_desc[page_id] = entry.description
+                        asyncio.create_task(self._check_budget_alert(entry))
                         log.info(
                             f"[email→Notion] Recurring: {entry.description} "
                             f"Rp {tx.amount:,.0f}"
@@ -403,6 +429,8 @@ class EmailWatcher:
                     )
                     url = await self._notion.log_expense(entry, owner, cache)
                     page_id = _url_to_id(url)
+                    self._page_desc[page_id] = entry.description
+                    asyncio.create_task(self._check_budget_alert(entry))
                     subcat_match = cache.closest_subcategory(tx.subcategory)
                     log.info(
                         f"[email→Notion] {tx.description} "
@@ -452,6 +480,7 @@ class EmailWatcher:
                     )
                     url = await self._notion.log_expense(fee_entry, owner, cache)
                     fee_page_id = _url_to_id(url)
+                    self._page_desc[fee_page_id] = fee_entry.description
                     log.info(f"[email→Notion] Admin fee Rp {tx.admin_fee:,.0f} logged")
                     await self._notify_with_markup(
                         f"📧 *Transfer sendiri* Rp {tx.amount:,.0f} → {dest}\n"
