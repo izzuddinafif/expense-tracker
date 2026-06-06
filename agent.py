@@ -134,10 +134,13 @@ def _strip_fences(raw: str) -> str:
     """Strip markdown code fences that some models add around JSON."""
     raw = raw.strip()
     if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.split("```")[0]
+        # Drop the opening fence line (e.g. "```json\n" or "```\n")
+        first_newline = raw.find("\n")
+        if first_newline != -1:
+            raw = raw[first_newline + 1:]
+        # Drop trailing fence
+        if raw.endswith("```"):
+            raw = raw[:-3]
     return raw.strip()
 
 
@@ -302,6 +305,8 @@ class Agent:
             QueryIntent, messages, model=self._config.query_model
         )
 
+    _MAX_EXPENSES_IN_PROMPT = 200
+
     async def answer_query(
         self,
         question: str,
@@ -310,6 +315,8 @@ class Agent:
         history: list[dict],
         assets: list[dict] | None = None,
     ) -> tuple[str, list[dict]]:
+        if len(expenses) > self._MAX_EXPENSES_IN_PROMPT:
+            expenses = expenses[-self._MAX_EXPENSES_IN_PROMPT:]
         expenses_text = json.dumps(expenses, indent=2)
         system = f"{QUERY_SYSTEM}\n\n{owner}'s expense data:\n{expenses_text}"
         if assets:

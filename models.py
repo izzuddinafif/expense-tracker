@@ -84,8 +84,11 @@ def _fuzzy_match(name: str, options: dict[str, str]) -> tuple[str, str] | None:
     for k, v in options.items():
         if k.lower() == name_lower:
             return k, v
-    # partial match fallback
-    for k, v in options.items():
-        if name_lower in k.lower() or k.lower() in name_lower:
-            return k, v
+    # among partial matches prefer the longest key (most specific)
+    candidates = [
+        (k, v) for k, v in options.items()
+        if name_lower in k.lower() or k.lower() in name_lower
+    ]
+    if candidates:
+        return max(candidates, key=lambda kv: len(kv[0]))
     return None

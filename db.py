@@ -71,6 +71,8 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS idx_conv_user
                 ON conversation_history(user_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_debit_user
+                ON pending_debit_queue(user_id);
         """)
         await self._conn.commit()
 
@@ -244,6 +246,12 @@ class Database:
         await self._conn.execute(
             "INSERT INTO conversation_history (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
             (user_id, role, content, datetime.now(timezone.utc).isoformat()),
+        )
+        # Keep at most 100 rows per user to prevent unbounded table growth
+        await self._conn.execute(
+            "DELETE FROM conversation_history WHERE user_id = ? AND id NOT IN "
+            "(SELECT id FROM conversation_history WHERE user_id = ? ORDER BY id DESC LIMIT 100)",
+            (user_id, user_id),
         )
         await self._conn.commit()
 

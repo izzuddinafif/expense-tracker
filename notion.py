@@ -1,3 +1,4 @@
+import asyncio
 import httpx
 from config import Config
 from models import NotionCache, ExpenseEntry, IncomeEntry, _fuzzy_match
@@ -100,15 +101,25 @@ class NotionClient:
             pages = await self._query_db(ds_id)
             return {self._extract_title(p): p["url"] for p in pages}
 
-        cache.subcategories = await _load(self._config.subcategories_ds)
-        cache.accounts = await _load(self._config.accounts_ds)
-        cache.months = await _load(self._config.months_ds)
-        cache.years = await _load(self._config.years_ds)
-        cache.income_subcategories = await _load(self._config.income_subcategories_ds)
-        cache.income_months = await _load(self._config.income_months_ds)
-        cache.income_years = await _load(self._config.income_years_ds)
-        cache.recurring_payments = await self._load_recurring(
-            cache.subcategories, cache.accounts
+        # subcategories and accounts must be ready before _load_recurring
+        cache.subcategories, cache.accounts = await asyncio.gather(
+            _load(self._config.subcategories_ds),
+            _load(self._config.accounts_ds),
+        )
+        (
+            cache.months,
+            cache.years,
+            cache.income_subcategories,
+            cache.income_months,
+            cache.income_years,
+            cache.recurring_payments,
+        ) = await asyncio.gather(
+            _load(self._config.months_ds),
+            _load(self._config.years_ds),
+            _load(self._config.income_subcategories_ds),
+            _load(self._config.income_months_ds),
+            _load(self._config.income_years_ds),
+            self._load_recurring(cache.subcategories, cache.accounts),
         )
 
         return cache
@@ -126,13 +137,7 @@ class NotionClient:
         If recurring_page_url is provided, the expense is linked to that
         Recurring Payment entry via the 'Linked Recurring Payment' relation.
         """
-        date_parts = entry.date.split("-")
-        year_str = date_parts[0]
-        month_names = [
-            "January", "February", "March", "April", "May", "June",
-            "July", "August", "September", "October", "November", "December",
-        ]
-        month_str = month_names[int(date_parts[1]) - 1]
+        year_str, month_str = _parse_date(entry.date)
 
         subcategory_match = cache.closest_subcategory(entry.subcategory)
         account_match = cache.closest_account(entry.account)
@@ -197,13 +202,7 @@ class NotionClient:
         cache: NotionCache,
     ) -> str:
         """Create a new income entry in Notion. Returns the page URL."""
-        date_parts = entry.date.split("-")
-        year_str = date_parts[0]
-        month_names = [
-            "January", "February", "March", "April", "May", "June",
-            "July", "August", "September", "October", "November", "December",
-        ]
-        month_str = month_names[int(date_parts[1]) - 1]
+        year_str, month_str = _parse_date(entry.date)
 
         subcategory_match = cache.closest_income_subcategory(entry.subcategory)
         account_match = cache.closest_account(entry.account)
@@ -295,6 +294,26 @@ class NotionClient:
                 "notes": "".join(t["plain_text"] for t in props.get("Notes", {}).get("rich_text", [])),
             })
         return result
+
+
+_MONTH_NAMES = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+
+
+def _parse_date(date_str: str) -> tuple[str, str]:
+    """Parse an ISO date string and return (year_str, month_name).
+
+    Raises ValueError on malformed input so callers can surface it early.
+    """
+    parts = date_str.split("-")
+    if len(parts) != 3:
+        raise ValueError(f"Expected YYYY-MM-DD, got {date_str!r}")
+    month_idx = int(parts[1]) - 1
+    if not 0 <= month_idx <= 11:
+        raise ValueError(f"Month out of range in date {date_str!r}")
+    return parts[0], _MONTH_NAMES[month_idx]
 
 
 def _url_to_id(url: str) -> str:

@@ -245,23 +245,37 @@ class EmailWatcher:
         else:
             await self._notify(text)
 
-    async def _ask_debit_merchant(self, tx: EmailTransaction) -> None:
+    async def _ask_debit_merchant(self, tx: EmailTransaction) -> bool:
         """
         For a Jago debit card tx with no merchant info:
         - if no tx is currently pending, promote this one and notify
         - if a tx is already pending, queue it
+
+        Returns True if the transaction was successfully handled (notified or queued).
+        Returns False if Telegram notification failed for a newly-promoted tx,
+        so the caller can avoid marking the email as processed.
         """
         if self._owner_id is None:
-            return
+            return False
 
         current = await self._db.get_pending_email_expense(self._owner_id)
         if current is None:
             await self._db.set_pending_email_expense(self._owner_id, tx)
-            await self._notify(
-                f"💳 *Jago debit card* — Rp {tx.amount:,.0f}\n"
-                f"📅 {tx.date}  🏦 {tx.account}\n\n"
-                f"Beli apa? Balas dengan nama merchant/deskripsi."
-            )
+            if self._bot:
+                try:
+                    await self._bot.send_message(
+                        self._owner_id,
+                        f"💳 *Jago debit card* — Rp {tx.amount:,.0f}\n"
+                        f"📅 {tx.date}  🏦 {tx.account}\n\n"
+                        f"Beli apa? Balas dengan nama merchant/deskripsi.\n"
+                        f"_(Ketik *batal* untuk lewati)_",
+                        parse_mode="Markdown",
+                    )
+                except Exception as e:
+                    log.error(f"Telegram notify failed for Jago debit follow-up: {e}")
+                    await self._db.clear_pending_email_expense(self._owner_id)
+                    return False
+            return True
         else:
             await self._db.push_debit(self._owner_id, tx)
             depth = await self._db.debit_queue_depth(self._owner_id)
@@ -269,6 +283,7 @@ class EmailWatcher:
                 f"[email] Queued Jago debit card Rp {tx.amount:,.0f} "
                 f"(queue depth: {depth})"
             )
+            return True
 
     # ── Email processing ────────────────────────────────────────────────────────
 
@@ -335,7 +350,9 @@ class EmailWatcher:
                             f"[email] Jago debit card Rp {tx.amount:,.0f} "
                             f"— asking user for merchant"
                         )
-                        await self._ask_debit_merchant(tx)
+                        handled = await self._ask_debit_merchant(tx)
+                        if not handled:
+                            return  # notify failed — don't mark processed, retry next cycle
 
                 else:
                     entry = ExpenseEntry(
@@ -395,12 +412,11 @@ class EmailWatcher:
         except Exception as e:
             log.error(f"Failed to log email [{uid}] to Notion: {e}")
             self._notion_fail_streak += 1
-            if self._notion_fail_streak == 3:
+            if self._notion_fail_streak == 3 or self._notion_fail_streak % 5 == 0:
                 await self._alert(
                     f"⚠️ *Email watcher: Notion write failing*\n"
                     f"Failed {self._notion_fail_streak}x in a row.\n"
-                    f"`{type(e).__name__}: {str(e)[:120]}`\n"
-                    f"_Will retry, but not alert again until it recovers._"
+                    f"`{type(e).__name__}: {str(e)[:120]}`"
                 )
             return  # don't mark processed — retry next cycle
 
