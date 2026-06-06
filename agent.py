@@ -198,6 +198,11 @@ class Agent:
         On JSON parse failure, sends a fix-JSON follow-up once before giving up.
         """
         raw = await self._call(messages=messages, **kwargs)
+        if not raw.strip():
+            raise ValueError(
+                "Model returned empty response — check that VISION_MODEL supports image input "
+                "and that the model is not rate-limited."
+            )
         raw = _strip_fences(raw)
 
         for attempt in range(_JSON_MAX_ATTEMPTS):

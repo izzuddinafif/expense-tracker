@@ -101,13 +101,14 @@ async def main() -> None:
             await msg.answer("Maaf, kamu tidak punya akses ke bot ini.")
             return
         await msg.answer(
-            f"Halo {owner}! 👋\n\n"
+            f"Halo {owner}\\! 👋\n\n"
             "Kirim ke saya:\n"
-            "📸 **Foto struk** → otomatis ekstrak & catat\n"
-            "💬 **Teks** kayak `Nasi goreng 25k cash` → langsung dicatat\n"
-            "❓ **Pertanyaan** kayak `Berapa pengeluaran bulan ini?` → dijawab\n"
-            "💰 **Pemasukan** kayak `Gaji bulanan masuk 3 juta` → dicatat\n\n"
-            "Ketik /help untuk bantuan lengkap."
+            "📸 *Foto struk* → otomatis ekstrak & catat\n"
+            "💬 *Teks* kayak `Nasi goreng 25k cash` → langsung dicatat\n"
+            "❓ *Pertanyaan* kayak `Berapa pengeluaran bulan ini?` → dijawab\n"
+            "💰 *Pemasukan* kayak `Gaji bulanan masuk 3 juta` → dicatat\n\n"
+            "Ketik /help untuk bantuan lengkap\\.",
+            parse_mode="MarkdownV2",
         )
 
     @dp.message(Command("help"))
