@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
@@ -453,35 +453,112 @@ async def main() -> None:
         user_notion, user_cache = result
         user = await db.get_user(user_id)
         owner = user.owner_name
+
         await msg.answer("📊 Mengambil data pengeluaran...")
-        try:
-            expenses = await user_notion.fetch_expenses(owner, user_cache)
-        except Exception as e:
-            log.error(f"/stats failed: {e}")
-            await msg.answer(f"❌ Gagal ambil data.\n`{type(e).__name__}: {str(e)[:80]}`", parse_mode="Markdown")
+
+        expenses, budgets = await asyncio.gather(
+            user_notion.fetch_expenses(owner, user_cache),
+            user_notion.fetch_budgets(user_cache),
+            return_exceptions=True,
+        )
+        if isinstance(expenses, Exception):
+            log.error(f"/stats fetch_expenses failed: {expenses}")
+            await msg.answer(f"❌ Gagal ambil data.\n`{type(expenses).__name__}: {str(expenses)[:80]}`", parse_mode="Markdown")
             return
+        if isinstance(budgets, Exception):
+            log.warning(f"/stats fetch_budgets failed (skipping budget section): {budgets}")
+            budgets = None
+
         now = datetime.now()
         month_str = now.strftime("%Y-%m")
+        last_month_str = (now.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+
         month_expenses = [e for e in expenses if e["date"].startswith(month_str)]
         if not month_expenses:
-            await msg.answer(f"📊 *Ringkasan Bulan Ini*\n\nBelum ada pengeluaran untuk bulan ini.", parse_mode="Markdown")
+            await msg.answer("📊 Belum ada pengeluaran untuk bulan ini.")
             return
+
         total = sum(e["amount"] for e in month_expenses)
+        count = len(month_expenses)
+
+        # ── Trend line ───────────────────────────────────────────────────────
+        last_month_expenses = [e for e in expenses if e["date"].startswith(last_month_str)]
+        trend_line = None
+        if last_month_expenses:
+            last_total = sum(e["amount"] for e in last_month_expenses)
+            if last_total > 0:
+                delta_pct = (total - last_total) / last_total * 100
+                sign = "+" if delta_pct >= 0 else ""
+                trend_line = f"📈 vs bulan lalu: {sign}{delta_pct:.0f}% (Rp {last_total:,.0f})"
+
+        # ── Daily average + projection ───────────────────────────────────────
+        days_elapsed = now.day
+        days_in_month = (now.replace(month=now.month % 12 + 1, day=1) - timedelta(days=1)).day
+        daily_avg = total / days_elapsed
+        projected = daily_avg * days_in_month
+
+        # ── Top categories ───────────────────────────────────────────────────
         cat_totals: dict[str, float] = {}
         for e in month_expenses:
             sub = e.get("subcategory", "-")
             cat_totals[sub] = cat_totals.get(sub, 0) + e["amount"]
         sorted_cats = sorted(cat_totals.items(), key=lambda x: -x[1])
-        lines = [f"📊 *Ringkasan Bulan Ini* ({month_str})\n"]
-        lines.append(f"💰 *Total:* Rp {total:,.0f}")
-        lines.append(f"📋 *Jumlah:* {count} transaksi\n")
-        lines.append("*Per Kategori:*")
-        for cat, amt in sorted_cats[:5]:
+        medals = ["🥇", "🥈", "🥉"]
+        top3 = sorted_cats[:3]
+        rest = sorted_cats[3:]
+        rest_total = sum(v for _, v in rest) if rest else 0
+
+        # ── Biggest transaction ──────────────────────────────────────────────
+        biggest = max(month_expenses, key=lambda e: e["amount"])
+        big_date_parts = biggest["date"].split("-")
+        months_id = ["", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
+        big_day = int(big_date_parts[2])
+        big_month = months_id[int(big_date_parts[1])]
+        biggest_line = f"💸 Terbesar: Rp {biggest['amount']:,.0f} — {biggest.get('description', '-')} ({big_day} {big_month})"
+
+        # ── Build message ────────────────────────────────────────────────────
+        month_names = ["", "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+                       "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
+        lines = [f"📊 *Ringkasan {month_names[now.month]} {now.year}*\n"]
+        lines.append(f"💰 Total: Rp {total:,.0f}")
+        if trend_line:
+            lines.append(trend_line)
+        lines.append(f"📋 Transaksi: {count}  •  Rata-rata/hari: Rp {daily_avg:,.0f}")
+        lines.append(f"🔮 Proyeksi akhir bulan: Rp ~{projected:,.0f}")
+
+        lines.append("")
+        lines.append("Top kategori:")
+        for i, (cat, amt) in enumerate(top3):
             pct = amt / total * 100
-            lines.append(f"  • {cat}: Rp {amt:,.0f} ({pct:.0f}%)")
-        if len(sorted_cats) > 5:
-            others = sum(v for _, v in sorted_cats[5:])
-            lines.append(f"  • Lainnya: Rp {others:,.0f}")
+            lines.append(f"  {medals[i]} {cat}: Rp {amt:,.0f} ({pct:.0f}%)")
+        if rest:
+            pct = rest_total / total * 100
+            lines.append(f"  • Lainnya: Rp {rest_total:,.0f} ({pct:.0f}%)")
+
+        lines.append("")
+        lines.append(biggest_line)
+
+        # ── Budget comparison ────────────────────────────────────────────────
+        if budgets:
+            lines.append("")
+            lines.append("📊 vs Anggaran:")
+            for b in budgets:
+                if b["budget"] <= 0:
+                    continue
+                spent = b["spent"]
+                budget = b["budget"]
+                pct = b["percentage"]
+                if pct >= 100:
+                    emoji = "🔴"
+                    warn = " ⚠️"
+                elif pct >= 80:
+                    emoji = "🟡"
+                    warn = ""
+                else:
+                    emoji = "🟢"
+                    warn = ""
+                lines.append(f"  {emoji} {b['name']}: Rp {spent:,.0f} / {budget:,.0f} ({pct:.0f}%{warn})")
+
         await msg.answer("\n".join(lines), parse_mode="Markdown")
 
     @dp.message(F.photo)
