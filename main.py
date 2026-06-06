@@ -317,7 +317,7 @@ async def main() -> None:
             "Tanya soal keuangan kamu, saya jawab pakai data Notion.\n"
             "Contoh: `Berapa yang aku habiskan minggu ini?`\n\n"
             "📋 *Perintah khusus*\n"
-            "/networth — lihat ringkasan aset\n"
+            "/networth — lihat ringkasan aset *(butuh database Assets)*\n"
             "/budget — cek status anggaran bulanan\n"
             "/search <kata kunci> — cari pengeluaran\n"
             "/stats — ringkasan pengeluaran bulan ini\n"
@@ -338,13 +338,21 @@ async def main() -> None:
             await msg.answer("Ketik /setup untuk menghubungkan Notion workspace kamu.")
             return
         user_notion, _ = result
+        user = await db.get_user(user_id)
+        if not user.assets_ds:
+            await msg.answer(
+                "💼 *Net Worth* — fitur ini belum tersedia.\n\n"
+                "Kamu perlu database *Assets* di Notion untuk menggunakan fitur ini.",
+                parse_mode="Markdown",
+            )
+            return
         try:
             assets = await user_notion.fetch_assets()
             if not assets:
                 await msg.answer(
                     "💼 *Net Worth*\n\n"
                     "Belum ada aset.\n"
-                    "Buat database *Assets* di Notion, lalu share ke integration.",
+                    "Tambahkan data aset di database *Assets* Notion kamu.",
                     parse_mode="Markdown",
                 )
                 return
