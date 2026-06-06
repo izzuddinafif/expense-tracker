@@ -54,6 +54,34 @@ def make_subcategory_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def make_recommended_category_keyboard(
+    page_id: str,
+    recommended: list[str],
+    cache: NotionCache,
+) -> InlineKeyboardMarkup | None:
+    """Return keyboard with recommended categories + 'Lainnya →' button.
+
+    Returns None if no recommended names survived validation against the
+    actual category list — callers should fall back to the full picker.
+    """
+    cats = list(cache.category_subcategories.keys())
+    buttons = []
+    for cat in recommended:
+        if cat in cats:
+            i = cats.index(cat)
+            buttons.append([InlineKeyboardButton(
+                text=cat,
+                callback_data=f"cat_pick:{page_id}:{i}",
+            )])
+    if not buttons:
+        return None
+    buttons.append([InlineKeyboardButton(
+        text="Lainnya →",
+        callback_data=f"cat_all:{page_id}",
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 def make_change_category_button(page_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(

@@ -19,6 +19,7 @@ from keyboards import (
     make_category_keyboard,
     make_subcategory_keyboard,
     make_change_category_button,
+    make_recommended_category_keyboard,
 )
 from models import NotionCache, ExpenseEntry, IncomeEntry, EmailTransaction
 from notion import NotionClient, _url_to_id
@@ -387,10 +388,16 @@ async def main() -> None:
             url = await notion.log_expense(entry, owner, cache)
             await db.clear_pending_expense(user_id)
             page_id = _url_to_id(url)
+            all_cats = list(cache.category_subcategories.keys())
+            recommended = await agent.suggest_categories(entry.description, all_cats)
+            markup = (
+                make_recommended_category_keyboard(page_id, recommended, cache)
+                or make_change_category_button(page_id)
+            )
             await status_msg.edit_text(
                 f"✅ Tersimpan! [Lihat di Notion]({url})",
                 parse_mode="Markdown",
-                reply_markup=make_change_category_button(page_id),
+                reply_markup=markup,
             )
         except Exception as e:
             log.error(f"Notion write failed: {e}")
@@ -478,6 +485,14 @@ async def main() -> None:
 
     @dp.callback_query(F.data.startswith("cat_back:"))
     async def handle_cat_back(callback: CallbackQuery) -> None:
+        _, page_id = callback.data.split(":", 1)
+        await callback.message.edit_reply_markup(
+            reply_markup=make_category_keyboard(page_id, cache)
+        )
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith("cat_all:"))
+    async def handle_cat_all(callback: CallbackQuery) -> None:
         _, page_id = callback.data.split(":", 1)
         await callback.message.edit_reply_markup(
             reply_markup=make_category_keyboard(page_id, cache)

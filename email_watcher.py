@@ -28,7 +28,7 @@ from html.parser import HTMLParser
 from typing import Callable
 
 from db import Database
-from keyboards import make_category_keyboard, make_change_category_button
+from keyboards import make_category_keyboard, make_change_category_button, make_recommended_category_keyboard
 from models import ExpenseEntry, EmailTransaction, NotionCache
 from notion import _url_to_id
 
@@ -409,6 +409,12 @@ class EmailWatcher:
                         f"Rp {tx.amount:,.0f} [{tx.subcategory}]"
                     )
                     if subcat_match is None:
+                        all_cats = list(cache.category_subcategories.keys())
+                        recommended = await self._agent.suggest_categories(tx.description, all_cats)
+                        markup = (
+                            make_recommended_category_keyboard(page_id, recommended, cache)
+                            or make_category_keyboard(page_id, cache)
+                        )
                         await self._notify_with_markup(
                             f"📧 *Otomatis tercatat dari email*\n"
                             f"📝 {tx.description}\n"
@@ -417,7 +423,7 @@ class EmailWatcher:
                             f"🏦 {tx.account}\n\n"
                             f"⚠️ Kategori tidak ditemukan, pilih kategori:\n"
                             f"[Lihat di Notion]({url})",
-                            make_category_keyboard(page_id, cache),
+                            markup,
                         )
                     else:
                         await self._notify_with_markup(

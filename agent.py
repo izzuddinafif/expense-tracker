@@ -344,6 +344,35 @@ class Agent:
 
         return answer, history
 
+    async def suggest_categories(
+        self, description: str, categories: list[str]
+    ) -> list[str]:
+        cats_str = ", ".join(categories)
+        messages = [
+            {"role": "system", "content": (
+                "You are a personal finance categorization assistant. "
+                "Given an expense description, return the 3 most likely categories "
+                "from the provided list, as a JSON array of strings. "
+                "Only use names exactly as they appear in the list. No explanation."
+            )},
+            {"role": "user", "content": (
+                f"Expense: {description}\n"
+                f"Categories: {cats_str}\n\n"
+                "Return JSON array of 3 category names, most likely first."
+            )},
+        ]
+        raw = await self._call(
+            model=self._config.query_model,
+            messages=messages,
+            temperature=0,
+        )
+        try:
+            result = json.loads(_strip_fences(raw))
+            valid = [r for r in result if r in categories]
+            return valid[:3]
+        except Exception:
+            return []
+
     async def parse_bank_email(
         self,
         subject: str,
