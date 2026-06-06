@@ -31,7 +31,8 @@ JSON schema:
 Rules:
 - amount must be a number in IDR (no currency symbols)
 - date defaults to today if not visible: {today}
-- subcategory and account must be chosen from the provided lists
+- subcategory MUST be chosen verbatim from the provided subcategory list — do not invent names
+- account must be chosen from the provided list
 - confidence: 1.0 = all fields clearly visible, 0.5 = some fields guessed
 """
 
@@ -111,7 +112,11 @@ ACCOUNT MAPPING:
 - "****9400" or BSI/BYOND source → pick closest to "BSI" from accounts list
 - SDC / Jago source → pick closest to "Jago" from accounts list
 
-Available subcategories: {subcategories}
+SUBCATEGORY RULES:
+- You MUST pick the subcategory verbatim from this list: {subcategories}
+- Do NOT invent a subcategory not in the list. If unsure, pick the closest one.
+- For food/drink purchases (QRIS to warung, jus, kafe, etc.) prefer: Coffee/Milk Tea, Cafe/Fast-food, Groceries, Fruits, Usual dine-out
+
 Available accounts: {accounts}
 
 JSON response schema:
@@ -121,7 +126,7 @@ JSON response schema:
   "amount": 0.0,
   "admin_fee": 0.0,
   "date": "YYYY-MM-DD",
-  "subcategory": "best match from list",
+  "subcategory": "exact name from subcategory list above",
   "account": "best match from list",
   "recipient_name": "",
   "recipient_bank": "",
