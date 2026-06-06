@@ -130,7 +130,7 @@ async def main() -> None:
             )
             return
 
-        if text.lower() == "/setup" and step not in ("start", "await_name"):
+        if text.lower() == "/setup" and step not in ("start", "await_name", "migrated"):
             # Allow /setup to restart from any non-initial step
             await db.set_user_setup_step(user_id, "await_name")
             await msg.answer(
@@ -200,13 +200,18 @@ async def main() -> None:
             await temp_client.aclose()
         except Exception as e:
             log.error(f"Discovery failed for user {user_id}: {e}")
+            fail_step = "await_token" if user.setup_step != "migrated" else "migrated"
             await msg.answer(
                 f"❌ Gagal menemukan database:\n`{e}`\n\n"
                 "Pastikan kamu sudah membagikan halaman template ke integration. "
-                "Ketik token lagi untuk retry, atau /setup untuk mulai ulang.",
+                + (
+                    "Ketik /start untuk coba lagi."
+                    if user.setup_step == "migrated"
+                    else "Ketik token lagi untuk retry, atau /setup untuk mulai ulang."
+                ),
                 parse_mode="Markdown",
             )
-            await db.set_user_setup_step(user_id, "await_token")
+            await db.set_user_setup_step(user_id, fail_step)
             return
 
         await db.upsert_user(user_id, setup_step="done", **db_ids)
@@ -462,8 +467,6 @@ async def main() -> None:
             await msg.answer(f"📊 *Ringkasan Bulan Ini*\n\nBelum ada pengeluaran untuk bulan ini.", parse_mode="Markdown")
             return
         total = sum(e["amount"] for e in month_expenses)
-        count = len(month_expenses)
-        avg = total / count
         cat_totals: dict[str, float] = {}
         for e in month_expenses:
             sub = e.get("subcategory", "-")
@@ -471,8 +474,7 @@ async def main() -> None:
         sorted_cats = sorted(cat_totals.items(), key=lambda x: -x[1])
         lines = [f"📊 *Ringkasan Bulan Ini* ({month_str})\n"]
         lines.append(f"💰 *Total:* Rp {total:,.0f}")
-        lines.append(f"📋 *Jumlah:* {count} transaksi")
-        lines.append(f"📊 *Rata-rata:* Rp {avg:,.0f}/transaksi\n")
+        lines.append(f"📋 *Jumlah:* {count} transaksi\n")
         lines.append("*Per Kategori:*")
         for cat, amt in sorted_cats[:5]:
             pct = amt / total * 100

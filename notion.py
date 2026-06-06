@@ -13,16 +13,15 @@ _HTTP_TIMEOUT = 30.0  # seconds
 # Map from db_ids key → expected Notion database title (from the template)
 DB_NAME_MAP = {
     "expenses_ds":              "Expenses",
-    "subcategories_ds":         "Expenses Sub-categories",
+    "subcategories_ds":         "Sub-categories",
     "accounts_ds":              "Accounts",
     "months_ds":                "Month",
     "years_ds":                 "Year",
     "recurring_ds":             "Recurring Payment",
     "assets_ds":                "Assets",
     "income_ds":                "Income",
-    "income_subcategories_ds":  "Income Sub-categories",
     "budget_ds":                "Budget",
-    "categories_ds":            "Expenses Categories",
+    "categories_ds":            "Categories",
 }
 
 
