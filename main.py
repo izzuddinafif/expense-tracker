@@ -222,6 +222,11 @@ async def main() -> None:
         # ── Jago debit card follow-up ──────────────────────────────────────────
         pending_tx = await db.get_pending_email_expense(user_id)
         if pending_tx:
+            if text.lower().strip() in ("batal", "cancel", "skip", "/cancel"):
+                await db.clear_pending_email_expense(user_id)
+                await db.clear_debit_queue(user_id)
+                await msg.answer("Debit card follow-up cancelled ❌")
+                return
             await db.clear_pending_email_expense(user_id)
             entry = ExpenseEntry(
                 description=text,
@@ -330,6 +335,9 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("confirm:"))
     async def handle_confirm(callback: CallbackQuery) -> None:
         user_id = int(callback.data.split(":")[1])
+        if callback.from_user.id != user_id:
+            await callback.answer("Not authorized.")
+            return
         owner = get_owner(user_id)
         if not owner:
             await callback.answer("Not authorized.")
@@ -361,6 +369,9 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("cancel:"))
     async def handle_cancel(callback: CallbackQuery) -> None:
         user_id = int(callback.data.split(":")[1])
+        if callback.from_user.id != user_id:
+            await callback.answer("Not authorized.")
+            return
         owner = get_owner(user_id)
         if not owner:
             await callback.answer("Not authorized.")
@@ -376,6 +387,9 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("income_confirm:"))
     async def handle_income_confirm(callback: CallbackQuery) -> None:
         user_id = int(callback.data.split(":")[1])
+        if callback.from_user.id != user_id:
+            await callback.answer("Not authorized.")
+            return
         owner = get_owner(user_id)
         if not owner:
             await callback.answer("Not authorized.")
@@ -407,6 +421,9 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("income_cancel:"))
     async def handle_income_cancel(callback: CallbackQuery) -> None:
         user_id = int(callback.data.split(":")[1])
+        if callback.from_user.id != user_id:
+            await callback.answer("Not authorized.")
+            return
         owner = get_owner(user_id)
         if not owner:
             await callback.answer("Not authorized.")
@@ -423,10 +440,13 @@ async def main() -> None:
     except Exception as e:
         log.error(f"Initial cache load failed: {e}")
 
+    target_owner = config.email_owner
     afif_id = next(
-        (uid for uid, name in config.users.items() if name == "Afif"), None
-    )
-    afif_name = config.users.get(afif_id, "Afif") if afif_id else "Afif"
+        (uid for uid, name in config.users.items() if name == target_owner), None
+    ) if target_owner else next(iter(config.users), None)
+    afif_name = config.users.get(afif_id, target_owner or "Unknown") if afif_id else (target_owner or "Unknown")
+    if afif_id is None:
+        log.warning("Email watcher: no matching user found for EMAIL_OWNER=%r — notifications disabled", target_owner)
 
     email_watcher = EmailWatcher(
         config=config,

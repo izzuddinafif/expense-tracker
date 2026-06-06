@@ -36,6 +36,10 @@ class Config:
     gmail_app_password: str  # Google App Password (not your login password)
     email_poll_interval: int = 300  # seconds between inbox checks (default 5 min)
 
+    # Name of the user who owns the Gmail inbox (must match a value in `users`).
+    # The email watcher sends Telegram follow-ups to this user.
+    email_owner: str = ""
+
     # SQLite persistent storage
     db_path: str = "data/expense_tracker.db"
 
@@ -68,5 +72,6 @@ def load_config() -> Config:
         gmail_address=os.environ["GMAIL_ADDRESS"],
         gmail_app_password=os.environ["GMAIL_APP_PASSWORD"],
         email_poll_interval=int(os.getenv("EMAIL_POLL_INTERVAL", "300")),
+        email_owner=os.getenv("EMAIL_OWNER", "Afif"),
         db_path=os.getenv("DB_PATH", "data/expense_tracker.db"),
     )
