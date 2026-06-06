@@ -1,6 +1,6 @@
 import httpx
 from config import Config
-from models import NotionCache, ExpenseEntry
+from models import NotionCache, ExpenseEntry, IncomeEntry
 
 
 NOTION_VERSION = "2022-06-28"
@@ -104,6 +104,9 @@ class NotionClient:
         cache.accounts = await _load(self._config.accounts_ds)
         cache.months = await _load(self._config.months_ds)
         cache.years = await _load(self._config.years_ds)
+        cache.income_subcategories = await _load(self._config.income_subcategories_ds)
+        cache.income_months = await _load(self._config.income_months_ds)
+        cache.income_years = await _load(self._config.income_years_ds)
         cache.recurring_payments = await self._load_recurring(
             cache.subcategories, cache.accounts
         )
@@ -173,6 +176,70 @@ class NotionClient:
 
         payload = {
             "parent": {"database_id": self._config.expenses_ds},
+            "properties": properties,
+        }
+
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            resp = await client.post(
+                "https://api.notion.com/v1/pages",
+                headers=self._headers,
+                json=payload,
+            )
+            resp.raise_for_status()
+            return resp.json()["url"]
+
+    async def log_income(
+        self,
+        entry: IncomeEntry,
+        owner: str,
+        cache: NotionCache,
+    ) -> str:
+        """Create a new income entry in Notion. Returns the page URL."""
+        date_parts = entry.date.split("-")
+        year_str = date_parts[0]
+        month_names = [
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December",
+        ]
+        month_str = month_names[int(date_parts[1]) - 1]
+
+        subcategory_match = cache.closest_income_subcategory(entry.subcategory)
+        account_match = cache.closest_account(entry.account)
+        month_url = cache.income_months.get(month_str)
+        year_url = cache.income_years.get(year_str)
+
+        properties: dict = {
+            "Description": {
+                "title": [{"text": {"content": f"[{owner}] {entry.description}"}}]
+            },
+            "Amount": {"number": entry.amount},
+            "Date of Income": {"date": {"start": entry.date}},
+        }
+
+        if subcategory_match:
+            _, sub_url = subcategory_match
+            properties["Income Sub-categories"] = {
+                "relation": [{"id": _url_to_id(sub_url)}]
+            }
+
+        if account_match:
+            _, acc_url = account_match
+            properties["Accounts"] = {
+                "relation": [{"id": _url_to_id(acc_url)}]
+            }
+
+        if month_url:
+            properties["Month"] = {
+                "relation": [{"id": _url_to_id(month_url)}]
+            }
+
+        if year_url:
+            properties["Year"] = {
+                "relation": [{"id": _url_to_id(year_url)}]
+            }
+
+        payload = {
+            "parent": {"database_id": self._config.income_ds},
             "properties": properties,
         }
 

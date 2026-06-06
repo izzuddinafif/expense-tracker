@@ -4,7 +4,7 @@ import json
 import logging
 from openai import AsyncOpenAI, APIError, APITimeoutError, APIConnectionError, RateLimitError
 from config import Config
-from models import ExpenseEntry, QueryIntent, EmailTransaction, NotionCache
+from models import ExpenseEntry, IncomeEntry, QueryIntent, EmailTransaction, NotionCache
 
 log = logging.getLogger(__name__)
 
@@ -42,11 +42,36 @@ Be direct and helpful. If data is insufficient, say so.
 """
 
 INTENT_SYSTEM = """Classify the user message as one of:
-- "query": user is asking about their spending/expenses
-- "log_text": user is describing an expense in text (no image)
+- "query": user is asking about their spending, expenses, balance, or financial data
+- "log_text": user is describing an expense / money going OUT (purchase, payment, transfer out)
+- "log_income": user is reporting money coming IN (salary, gaji, bonus, allowance, transfer masuk, etc.)
 - "unknown": unclear
 
-Respond ONLY with JSON: {"type": "query|log_text|unknown", "text": "<original message>"}
+Indonesian examples of "log_income": "gaji bulanan masuk 3 juta", "dapat bonus 500k", "uang saku masuk", "terima transfer dari kantor"
+
+Respond ONLY with JSON: {"type": "query|log_text|log_income|unknown", "text": "<original message>"}
+"""
+
+INCOME_EXTRACT_SYSTEM = """You are an income extraction assistant.
+Given a text description of income received, extract the details and respond ONLY with valid JSON.
+No markdown, no explanation, just JSON.
+
+JSON schema:
+{{
+  "description": "income source or short description (e.g. 'Gaji bulanan', 'Bonus', 'Freelance fee')",
+  "amount": 0.0,
+  "date": "YYYY-MM-DD",
+  "subcategory": "best matching income subcategory from the list",
+  "account": "best matching account from the list",
+  "confidence": 0.95
+}}
+
+Rules:
+- amount must be a number in IDR (no currency symbols). k/rb = thousand, jt/juta = million.
+- date defaults to today if not mentioned: {today}
+- subcategory and account must be chosen from the provided lists
+- For account: pick the account where the money was received (e.g. if mentioned "Jago" → Jago, "Mandiri" → Mandiri 1854)
+- confidence: 1.0 = all fields clearly stated, 0.5 = some fields guessed
 """
 
 EMAIL_PARSE_SYSTEM = """You are a bank email parser for an Indonesian user named IZZUDDIN AHMAD AFIF.
@@ -245,6 +270,27 @@ class Agent:
         ]
         return await self._call_json(
             ExpenseEntry, messages, model=self._config.query_model
+        )
+
+    async def extract_income_from_text(
+        self,
+        text: str,
+        cache: NotionCache,
+        today: str,
+    ) -> IncomeEntry:
+        subcats = ", ".join(cache.income_subcategories.keys())
+        accounts = ", ".join(cache.accounts.keys())
+        system = INCOME_EXTRACT_SYSTEM.replace("{today}", today)
+
+        messages = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": f"Available income subcategories: {subcats}\nAvailable accounts: {accounts}\n\nExtract income from: {text}",
+            },
+        ]
+        return await self._call_json(
+            IncomeEntry, messages, model=self._config.query_model
         )
 
     async def detect_intent(self, text: str) -> QueryIntent:

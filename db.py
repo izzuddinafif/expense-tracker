@@ -6,7 +6,7 @@ from typing import Any
 
 import aiosqlite
 
-from models import ExpenseEntry, EmailTransaction
+from models import ExpenseEntry, EmailTransaction, IncomeEntry
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +53,12 @@ class Database:
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id    INTEGER NOT NULL,
                 tx_json    TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS pending_income (
+                user_id    INTEGER PRIMARY KEY,
+                entry_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
 
@@ -142,6 +148,30 @@ class Database:
     async def clear_pending_expense(self, user_id: int) -> None:
         await self._conn.execute(
             "DELETE FROM pending_expenses WHERE user_id = ?", (user_id,)
+        )
+        await self._conn.commit()
+
+    # ── Pending income (one per user) ──────────────────────────────────────────
+
+    async def set_pending_income(self, user_id: int, entry: IncomeEntry) -> None:
+        await self._conn.execute(
+            "INSERT OR REPLACE INTO pending_income (user_id, entry_json, created_at) VALUES (?, ?, ?)",
+            (user_id, entry.model_dump_json(), datetime.now(timezone.utc).isoformat()),
+        )
+        await self._conn.commit()
+
+    async def get_pending_income(self, user_id: int) -> IncomeEntry | None:
+        cur = await self._conn.execute(
+            "SELECT entry_json FROM pending_income WHERE user_id = ?", (user_id,)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return IncomeEntry.model_validate_json(row["entry_json"])
+
+    async def clear_pending_income(self, user_id: int) -> None:
+        await self._conn.execute(
+            "DELETE FROM pending_income WHERE user_id = ?", (user_id,)
         )
         await self._conn.commit()
 

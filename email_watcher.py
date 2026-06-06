@@ -23,7 +23,7 @@ import email.header
 import imaplib
 import logging
 import re
-from datetime import date
+from datetime import date, timedelta
 from html.parser import HTMLParser
 from typing import Callable
 
@@ -151,7 +151,6 @@ class EmailWatcher:
             imap.select("INBOX")
 
             # Only fetch emails from the last LOOKBACK_DAYS days
-            from datetime import timedelta
             since = (date.today() - timedelta(days=LOOKBACK_DAYS)).strftime("%d-%b-%Y")
 
             for sender in BANK_SENDERS:

@@ -13,7 +13,7 @@ from aiogram.types import (
 
 from config import load_config
 from db import Database
-from models import NotionCache, ExpenseEntry
+from models import NotionCache, ExpenseEntry, IncomeEntry
 from notion import NotionClient
 from agent import Agent
 from email_watcher import EmailWatcher
@@ -27,6 +27,13 @@ def make_confirm_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Log it", callback_data=f"confirm:{user_id}"),
         InlineKeyboardButton(text="❌ Cancel", callback_data=f"cancel:{user_id}"),
+    ]])
+
+
+def make_income_confirm_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Log income", callback_data=f"income_confirm:{user_id}"),
+        InlineKeyboardButton(text="❌ Cancel", callback_data=f"income_cancel:{user_id}"),
     ]])
 
 
@@ -71,6 +78,19 @@ async def main() -> None:
             f"🏦 {acc_label}"
         )
 
+    def format_income_entry(entry: IncomeEntry) -> str:
+        sub_match = cache.closest_income_subcategory(entry.subcategory)
+        acc_match = cache.closest_account(entry.account)
+        sub_label = sub_match[0] if sub_match else f"❓ {entry.subcategory}"
+        acc_label = acc_match[0] if acc_match else f"❓ {entry.account}"
+        return (
+            f"📝 *{entry.description}*\n"
+            f"💵 Rp {entry.amount:,.0f}\n"
+            f"📅 {entry.date}\n"
+            f"🏷 {sub_label}\n"
+            f"🏦 {acc_label}"
+        )
+
     async def alert_owner(text: str) -> None:
         for uid in all_user_ids:
             try:
@@ -104,7 +124,8 @@ async def main() -> None:
         await msg.answer(
             "Here's what I can do:\n\n"
             "📸 *Receipt photo* — send a photo of a receipt and I'll extract and log the expense\n"
-            "💬 *Text expense* — describe it naturally: `Nasi goreng 25k cash`\n"
+            "💬 *Text expense* — describe it naturally: `Nasi goreng 25k jago`\n"
+            "💰 *Log income* — report money received: `Gaji bulanan masuk 3 juta ke Mandiri`\n"
             "❓ *Spending query* — ask anything: `How much did I spend this week?`\n\n"
             "Commands:\n"
             "/networth — show your assets summary\n"
@@ -145,7 +166,8 @@ async def main() -> None:
         try:
             await refresh_cache()
             await msg.answer(
-                f"✅ Done! {len(cache.subcategories)} subcategories, "
+                f"✅ Done! {len(cache.subcategories)} expense subcategories, "
+                f"{len(cache.income_subcategories)} income subcategories, "
                 f"{len(cache.accounts)} accounts, "
                 f"{len(cache.recurring_payments)} recurring payments loaded."
             )
@@ -278,6 +300,26 @@ async def main() -> None:
                 reply_markup=make_confirm_keyboard(user_id),
             )
 
+        elif intent.type == "log_income":
+            today = date.today().isoformat()
+            try:
+                income = await agent.extract_income_from_text(text, cache, today)
+            except Exception as e:
+                log.error(f"extract_income_from_text failed: {e}")
+                await msg.answer(
+                    "❌ Couldn't parse that income. Try: 'Gaji bulanan masuk 3 juta ke Jago'\n"
+                    f"`{type(e).__name__}: {str(e)[:80]}`",
+                    parse_mode="Markdown",
+                )
+                return
+
+            await db.set_pending_income(user_id, income)
+            await msg.answer(
+                f"💰 Income received! Confirm:\n\n{format_income_entry(income)}",
+                parse_mode="Markdown",
+                reply_markup=make_income_confirm_keyboard(user_id),
+            )
+
         else:
             await msg.answer(
                 "Hmm, not sure what you mean. Send a receipt photo or describe an expense."
@@ -327,6 +369,50 @@ async def main() -> None:
         await db.clear_pending_expense(user_id)
         await db.clear_pending_email_expense(user_id)
         await db.clear_debit_queue(user_id)
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Cancelled.")
+        await callback.message.answer("Cancelled ❌")
+
+    @dp.callback_query(F.data.startswith("income_confirm:"))
+    async def handle_income_confirm(callback: CallbackQuery) -> None:
+        user_id = int(callback.data.split(":")[1])
+        owner = get_owner(user_id)
+        if not owner:
+            await callback.answer("Not authorized.")
+            return
+
+        income = await db.get_pending_income(user_id)
+        if not income:
+            await callback.answer("No pending income.")
+            await callback.message.edit_reply_markup(reply_markup=None)
+            return
+
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Logging income...")
+
+        status_msg = await callback.message.answer("⏳ Logging income to Notion...")
+        try:
+            url = await notion.log_income(income, owner, cache)
+            await db.clear_pending_income(user_id)
+            await status_msg.edit_text(
+                f"✅ Income logged! [View in Notion]({url})", parse_mode="Markdown"
+            )
+        except Exception as e:
+            log.error(f"Notion income write failed: {e}")
+            await status_msg.edit_text(
+                f"❌ Failed to log income to Notion.\n`{type(e).__name__}: {str(e)[:80]}`",
+                parse_mode="Markdown",
+            )
+
+    @dp.callback_query(F.data.startswith("income_cancel:"))
+    async def handle_income_cancel(callback: CallbackQuery) -> None:
+        user_id = int(callback.data.split(":")[1])
+        owner = get_owner(user_id)
+        if not owner:
+            await callback.answer("Not authorized.")
+            return
+
+        await db.clear_pending_income(user_id)
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("Cancelled.")
         await callback.message.answer("Cancelled ❌")

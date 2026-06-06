@@ -13,8 +13,17 @@ class ExpenseEntry(BaseModel):
     confidence: float   # 0.0–1.0, how confident the model is in the extraction
 
 
+class IncomeEntry(BaseModel):
+    description: str
+    amount: float
+    date: str           # ISO format: YYYY-MM-DD
+    subcategory: str    # must match a name in NotionCache.income_subcategories
+    account: str        # must match a name in NotionCache.accounts
+    confidence: float   # 0.0–1.0
+
+
 class QueryIntent(BaseModel):
-    type: str           # "query" | "log_text" | "unknown"
+    type: str           # "query" | "log_text" | "log_income" | "unknown"
     text: str           # the original user message
 
 
@@ -42,6 +51,11 @@ class NotionCache:
     months: dict[str, str] = field(default_factory=dict)
     years: dict[str, str] = field(default_factory=dict)
 
+    # Income-specific relation caches (separate DB from expense subcategories)
+    income_subcategories: dict[str, str] = field(default_factory=dict)
+    income_months: dict[str, str] = field(default_factory=dict)
+    income_years: dict[str, str] = field(default_factory=dict)
+
     # amount in IDR (rounded to int) → {name, page_url, subcategory, account}
     # Loaded from the "Recurring Payment" Notion database (Active entries only)
     # Keyed by int to avoid float equality issues (e.g. 49999.99999 != 50000.0)
@@ -50,6 +64,9 @@ class NotionCache:
     def closest_subcategory(self, name: str) -> tuple[str, str] | None:
         """Fuzzy match subcategory name → (matched_name, page_url)."""
         return _fuzzy_match(name, self.subcategories)
+
+    def closest_income_subcategory(self, name: str) -> tuple[str, str] | None:
+        return _fuzzy_match(name, self.income_subcategories)
 
     def closest_account(self, name: str) -> tuple[str, str] | None:
         return _fuzzy_match(name, self.accounts)
@@ -72,6 +89,3 @@ def _fuzzy_match(name: str, options: dict[str, str]) -> tuple[str, str] | None:
         if name_lower in k.lower() or k.lower() in name_lower:
             return k, v
     return None
-
-
-
