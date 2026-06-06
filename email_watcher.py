@@ -28,7 +28,7 @@ from html.parser import HTMLParser
 from typing import Callable
 
 from db import Database
-from keyboards import make_category_keyboard, make_change_category_button, make_recommended_category_keyboard
+from keyboards import make_category_keyboard
 from models import ExpenseEntry, EmailTransaction, NotionCache
 from notion import _url_to_id
 
@@ -401,13 +401,12 @@ class EmailWatcher:
                             f"[email→Notion] Recurring: {entry.description} "
                             f"Rp {tx.amount:,.0f}"
                         )
-                        await self._notify_with_markup(
+                        await self._notify(
                             f"🔁 *Otomatis tercatat (rutin)*\n"
                             f"📝 {entry.description}\n"
                             f"💰 Rp {tx.amount:,.0f}\n"
                             f"📅 {tx.date}\n"
                             f"[Lihat di Notion]({url})",
-                            make_change_category_button(page_id),
                         )
                     else:
                         log.info(
@@ -437,12 +436,7 @@ class EmailWatcher:
                         f"Rp {tx.amount:,.0f} [{tx.subcategory}]"
                     )
                     if subcat_match is None:
-                        all_cats = list(cache.category_subcategories.keys())
-                        recommended = await self._agent.suggest_categories(tx.description, all_cats)
-                        markup = (
-                            make_recommended_category_keyboard(page_id, recommended, cache)
-                            or make_category_keyboard(page_id, cache)
-                        )
+                        markup = make_category_keyboard(page_id, cache)
                         await self._notify_with_markup(
                             f"📧 *Otomatis tercatat dari email*\n"
                             f"📝 {tx.description}\n"
@@ -454,7 +448,7 @@ class EmailWatcher:
                             markup,
                         )
                     else:
-                        await self._notify_with_markup(
+                        await self._notify(
                             f"📧 *Otomatis tercatat dari email*\n"
                             f"📝 {tx.description}\n"
                             f"💰 Rp {tx.amount:,.0f}\n"
@@ -462,7 +456,6 @@ class EmailWatcher:
                             f"🏷 {tx.subcategory}\n"
                             f"🏦 {tx.account}\n"
                             f"[Lihat di Notion]({url})",
-                            make_change_category_button(page_id),
                         )
 
             elif tx.type == "self_transfer":
@@ -482,11 +475,10 @@ class EmailWatcher:
                     fee_page_id = _url_to_id(url)
                     self._page_desc[fee_page_id] = fee_entry.description
                     log.info(f"[email→Notion] Admin fee Rp {tx.admin_fee:,.0f} logged")
-                    await self._notify_with_markup(
+                    await self._notify(
                         f"📧 *Transfer sendiri* Rp {tx.amount:,.0f} → {dest}\n"
                         f"Biaya admin tercatat: 💰 Rp {tx.admin_fee:,.0f}\n"
                         f"[Lihat di Notion]({url})",
-                        make_change_category_button(fee_page_id),
                     )
                 else:
                     await self._notify(

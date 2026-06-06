@@ -18,8 +18,6 @@ from keyboards import (
     make_income_confirm_keyboard,
     make_category_keyboard,
     make_subcategory_keyboard,
-    make_change_category_button,
-    make_recommended_category_keyboard,
     make_edit_field_keyboard,
 )
 from models import NotionCache, ExpenseEntry, IncomeEntry, EmailTransaction
@@ -45,8 +43,7 @@ async def main() -> None:
     agent = Agent(config)
 
     cache: NotionCache = NotionCache()
-    last_desc: dict[int, str] = {}
-    rec_markup: dict[str, InlineKeyboardMarkup] = {}
+
     pending_edit: dict[int, str] = {}
     page_desc: dict[str, str] = {}
     photo_queue: dict[int, list[str]] = {}
@@ -569,15 +566,13 @@ async def main() -> None:
         status_msg = await callback.message.answer("⏳ Menyimpan ke Notion...")
         try:
             url = await notion.log_expense(entry, owner, cache)
-            last_desc[user_id] = entry.description
             await db.clear_pending_expense(user_id)
             page_id = _url_to_id(url)
             page_desc[page_id] = entry.description
-            await status_msg.edit_text(
-                f"✅ Tersimpan! [Lihat di Notion]({url})",
-                parse_mode="Markdown",
-                reply_markup=make_change_category_button(page_id),
-            )
+        await status_msg.edit_text(
+            f"✅ Tersimpan! [Lihat di Notion]({url})",
+            parse_mode="Markdown",
+        )
             asyncio.ensure_future(_process_next_photo(user_id, owner))
         except Exception as e:
             log.error(f"Notion write failed: {e}")
@@ -805,6 +800,25 @@ async def main() -> None:
             reply_markup=make_confirm_keyboard(user_id),
         )
 
+    @dp.callback_query(F.data.startswith("edit_cancel:"))
+    async def handle_edit_cancel(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = int(callback.data.split(":")[1])
+        if callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        entry = await db.get_pending_expense(user_id)
+        if not entry:
+            await callback.answer("Tidak ada pengeluaran pending.")
+            return
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer()
+        await callback.message.answer(
+            f"Oke! Konfirmasi:\n\n{format_entry(entry)}",
+            parse_mode="Markdown",
+            reply_markup=make_confirm_keyboard(user_id),
+        )
+
     @dp.callback_query(F.data.startswith("cancel:"))
     async def handle_cancel(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
@@ -900,23 +914,6 @@ async def main() -> None:
         log.debug(f"Callback received: {callback.data}")
         _, page_id = callback.data.split(":", 1)
         markup = make_category_keyboard(page_id, cache)
-        rec_markup[page_id] = markup
-        await callback.message.edit_reply_markup(reply_markup=markup)
-        await callback.answer("Pilih kategori")
-
-    @dp.callback_query(F.data.startswith("cat_change:"))
-    async def handle_cat_change(callback: CallbackQuery) -> None:
-        log.debug(f"Callback received: {callback.data}")
-        _, page_id = callback.data.split(":", 1)
-        user_id = callback.from_user.id
-        desc = last_desc.get(user_id) or page_desc.get(page_id, "")
-        all_cats = list(cache.category_subcategories.keys())
-        markup: InlineKeyboardMarkup | None = None
-        if desc:
-            recommended = await agent.suggest_categories(desc, all_cats)
-            markup = make_recommended_category_keyboard(page_id, recommended, cache)
-        if not markup:
-            markup = make_category_keyboard(page_id, cache)
         rec_markup[page_id] = markup
         await callback.message.edit_reply_markup(reply_markup=markup)
         await callback.answer("Pilih kategori")
