@@ -16,6 +16,10 @@ class NotionClient:
             "Content-Type": "application/json",
         }
         self._config = config
+        self._http = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
 
     async def _query_db(
         self, database_id: str, *, extra_payload: dict | None = None
@@ -25,15 +29,14 @@ class NotionClient:
         results = []
         payload: dict = extra_payload.copy() if extra_payload else {}
 
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            while True:
-                resp = await client.post(url, headers=self._headers, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                results.extend(data["results"])
-                if not data.get("has_more"):
-                    break
-                payload["start_cursor"] = data["next_cursor"]
+        while True:
+            resp = await self._http.post(url, headers=self._headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            results.extend(data["results"])
+            if not data.get("has_more"):
+                break
+            payload["start_cursor"] = data["next_cursor"]
 
         return results
 
@@ -186,14 +189,13 @@ class NotionClient:
             "properties": properties,
         }
 
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            resp = await client.post(
-                "https://api.notion.com/v1/pages",
-                headers=self._headers,
-                json=payload,
-            )
-            resp.raise_for_status()
-            return resp.json()["url"]
+        resp = await self._http.post(
+            "https://api.notion.com/v1/pages",
+            headers=self._headers,
+            json=payload,
+        )
+        resp.raise_for_status()
+        return resp.json()["url"]
 
     async def log_income(
         self,
@@ -246,14 +248,13 @@ class NotionClient:
             "properties": properties,
         }
 
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            resp = await client.post(
-                "https://api.notion.com/v1/pages",
-                headers=self._headers,
-                json=payload,
-            )
-            resp.raise_for_status()
-            return resp.json()["url"]
+        resp = await self._http.post(
+            "https://api.notion.com/v1/pages",
+            headers=self._headers,
+            json=payload,
+        )
+        resp.raise_for_status()
+        return resp.json()["url"]
 
     async def fetch_expenses(self, owner: str) -> list[dict]:
         """Fetch expenses for a given owner, filtered on the Notion side."""

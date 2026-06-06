@@ -477,6 +477,7 @@ async def main() -> None:
         await dp.start_polling(bot)
     finally:
         await db.close()
+        await notion.aclose()
         log.info("Database connection closed.")
 
 
