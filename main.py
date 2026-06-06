@@ -39,6 +39,9 @@ async def main() -> None:
     db = await Database.connect(config.db_path)
     log.info(f"Database connected: {config.db_path}")
 
+    # Migrate legacy env vars to users table (one-time)
+    await db.migrate_from_env(config.notion_token, config.users)
+
     notion = NotionClient.from_config(config)
     agent = Agent(config)
 

@@ -123,6 +123,29 @@ class Database:
         except Exception as e:
             log.warning(f"Migration from {json_path} failed: {e}")
 
+    async def migrate_from_env(self, notion_token: str, users: dict[int, str]) -> None:
+        """Pre-populate users table from env vars for backward compatibility."""
+        if not notion_token or not users:
+            return
+        cur = await self._conn.execute("SELECT COUNT(*) FROM users")
+        row = await cur.fetchone()
+        if row[0] > 0:
+            return  # users already exist, skip
+
+        log.info("Migrating env vars → users table...")
+        now = datetime.now(timezone.utc).isoformat()
+        for uid, name in users.items():
+            existing = await self.get_user(uid)
+            if existing:
+                continue
+            await self._conn.execute(
+                "INSERT INTO users (telegram_id, owner_name, notion_token, setup_step, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'done', ?, ?)",
+                (uid, name, notion_token, now, now),
+            )
+        await self._conn.commit()
+        log.info(f"Migrated {len(users)} user(s) from env vars")
+
     # ── Processed emails ────────────────────────────────────────────────────────
 
     async def is_processed(self, uid: str) -> bool:
