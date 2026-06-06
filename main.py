@@ -12,7 +12,8 @@ from aiogram.types import (
 )
 
 from config import load_config
-from models import NotionCache, ConversationState, ExpenseEntry
+from db import Database
+from models import NotionCache, ExpenseEntry
 from notion import NotionClient
 from agent import Agent
 from email_watcher import EmailWatcher
@@ -34,20 +35,15 @@ async def main() -> None:
     bot = Bot(token=config.telegram_token)
     dp = Dispatcher()
 
+    db = await Database.connect(config.db_path)
+    log.info(f"Database connected: {config.db_path}")
+
     notion = NotionClient(config)
     agent = Agent(config)
 
-    # in-memory state
     cache: NotionCache = NotionCache()
-    conversations: dict[int, ConversationState] = {}
 
-    # All configured user IDs (for broadcasting critical errors)
     all_user_ids: list[int] = list(config.users.keys())
-
-    async def get_state(user_id: int) -> ConversationState:
-        if user_id not in conversations:
-            conversations[user_id] = ConversationState()
-        return conversations[user_id]
 
     async def refresh_cache() -> None:
         nonlocal cache
@@ -76,7 +72,6 @@ async def main() -> None:
         )
 
     async def alert_owner(text: str) -> None:
-        """Send a system alert to all configured users."""
         for uid in all_user_ids:
             try:
                 await bot.send_message(uid, text, parse_mode="Markdown")
@@ -142,8 +137,7 @@ async def main() -> None:
             )
             return
 
-        state = await get_state(msg.from_user.id)
-        state.pending_expense = entry
+        await db.set_pending_expense(msg.from_user.id, entry)
         confidence_emoji = "✅" if entry.confidence >= 0.8 else "⚠️"
 
         await msg.answer(
@@ -160,30 +154,30 @@ async def main() -> None:
             return
 
         text = msg.text.strip()
-        state = await get_state(msg.from_user.id)
+        user_id = msg.from_user.id
 
         # ── Jago debit card follow-up ──────────────────────────────────────────
-        if state.pending_email_expense:
-            tx = state.pending_email_expense
-            state.pending_email_expense = None
+        pending_tx = await db.get_pending_email_expense(user_id)
+        if pending_tx:
+            await db.clear_pending_email_expense(user_id)
             entry = ExpenseEntry(
                 description=text,
-                amount=tx.amount,
-                date=tx.date,
-                subcategory=tx.subcategory,
-                account=tx.account,
+                amount=pending_tx.amount,
+                date=pending_tx.date,
+                subcategory=pending_tx.subcategory,
+                account=pending_tx.account,
                 confidence=0.9,
             )
-            state.pending_expense = entry
+            await db.set_pending_expense(user_id, entry)
             await msg.answer(
                 f"Got it! Confirm:\n\n{format_entry(entry)}",
                 parse_mode="Markdown",
-                reply_markup=make_confirm_keyboard(msg.from_user.id),
+                reply_markup=make_confirm_keyboard(user_id),
             )
             # Promote next queued debit card tx (if any)
-            if state.pending_debit_queue:
-                next_tx = state.pending_debit_queue.pop(0)
-                state.pending_email_expense = next_tx
+            next_tx = await db.pop_debit(user_id)
+            if next_tx:
+                await db.set_pending_email_expense(user_id, next_tx)
                 await msg.answer(
                     f"💳 *Jago debit card* — Rp {next_tx.amount:,.0f}\n"
                     f"📅 {next_tx.date}  🏦 {next_tx.account}\n\n"
@@ -207,7 +201,10 @@ async def main() -> None:
             await msg.answer("🔎 Fetching your expenses...")
             try:
                 expenses = await notion.fetch_expenses(owner)
-                answer = await agent.answer_query(text, expenses, owner, state)
+                history = await db.get_history(user_id)
+                answer, history = await agent.answer_query(text, expenses, owner, history)
+                await db.append_history(user_id, "user", text)
+                await db.append_history(user_id, "assistant", answer)
                 await msg.answer(answer)
             except Exception as e:
                 log.error(f"query flow failed: {e}")
@@ -230,11 +227,11 @@ async def main() -> None:
                 )
                 return
 
-            state.pending_expense = entry
+            await db.set_pending_expense(user_id, entry)
             await msg.answer(
                 f"Got it! Confirm:\n\n{format_entry(entry)}",
                 parse_mode="Markdown",
-                reply_markup=make_confirm_keyboard(msg.from_user.id),
+                reply_markup=make_confirm_keyboard(user_id),
             )
 
         else:
@@ -252,20 +249,19 @@ async def main() -> None:
             await callback.answer("Not authorized.")
             return
 
-        state = await get_state(user_id)
-        entry = state.pending_expense
+        entry = await db.get_pending_expense(user_id)
         if not entry:
             await callback.answer("No pending expense.")
             await callback.message.edit_reply_markup(reply_markup=None)
             return
 
-        state.pending_expense = None
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("Logging...")
 
         status_msg = await callback.message.answer("⏳ Logging to Notion...")
         try:
             url = await notion.log_expense(entry, owner, cache)
+            await db.clear_pending_expense(user_id)
             await status_msg.edit_text(
                 f"✅ Logged! [View in Notion]({url})", parse_mode="Markdown"
             )
@@ -279,9 +275,14 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("cancel:"))
     async def handle_cancel(callback: CallbackQuery) -> None:
         user_id = int(callback.data.split(":")[1])
-        state = await get_state(user_id)
-        state.pending_expense = None
-        state.pending_email_expense = None
+        owner = get_owner(user_id)
+        if not owner:
+            await callback.answer("Not authorized.")
+            return
+
+        await db.clear_pending_expense(user_id)
+        await db.clear_pending_email_expense(user_id)
+        await db.clear_debit_queue(user_id)
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("Cancelled.")
         await callback.message.answer("Cancelled ❌")
@@ -291,28 +292,26 @@ async def main() -> None:
         await refresh_cache()
     except Exception as e:
         log.error(f"Initial cache load failed: {e}")
-        # Don't abort startup — bot can still work, user can /refresh
 
     afif_id = next(
         (uid for uid, name in config.users.items() if name == "Afif"), None
     )
-
     afif_name = config.users.get(afif_id, "Afif") if afif_id else "Afif"
+
     email_watcher = EmailWatcher(
         config=config,
+        db=db,
         notion=notion,
         agent=agent,
         cache_getter=lambda: cache,
         bot=bot,
         owner_telegram_id=afif_id,
         owner_name=afif_name,
-        conversations=conversations,
         alert_fn=alert_owner,
     )
     _watcher_task = asyncio.create_task(email_watcher.run())
     log.info("Email watcher scheduled.")
 
-    # Prevent silent task death — log critically if the watcher dies
     async def _watch_over(task: asyncio.Task) -> None:
         try:
             await task
@@ -324,7 +323,11 @@ async def main() -> None:
     )
 
     log.info("Bot starting...")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await db.close()
+        log.info("Database connection closed.")
 
 
 if __name__ == "__main__":

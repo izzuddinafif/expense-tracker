@@ -74,11 +74,4 @@ def _fuzzy_match(name: str, options: dict[str, str]) -> tuple[str, str] | None:
     return None
 
 
-# ── Per-user conversation state ───────────────────────────────────────────────
 
-@dataclass
-class ConversationState:
-    history: list[dict] = field(default_factory=list)
-    pending_expense: ExpenseEntry | None = None           # awaiting inline keyboard confirmation
-    pending_email_expense: "EmailTransaction | None" = None  # Jago debit card needs merchant name (current item)
-    pending_debit_queue: list["EmailTransaction"] = field(default_factory=list)  # queued Jago debit cards

@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
@@ -31,6 +31,9 @@ class Config:
     gmail_app_password: str  # Google App Password (not your login password)
     email_poll_interval: int = 300  # seconds between inbox checks (default 5 min)
 
+    # SQLite persistent storage
+    db_path: str = "expense_tracker.db"
+
 
 def load_config() -> Config:
     return Config(
@@ -55,4 +58,5 @@ def load_config() -> Config:
         gmail_address=os.environ["GMAIL_ADDRESS"],
         gmail_app_password=os.environ["GMAIL_APP_PASSWORD"],
         email_poll_interval=int(os.getenv("EMAIL_POLL_INTERVAL", "300")),
+        db_path=os.getenv("DB_PATH", "expense_tracker.db"),
     )

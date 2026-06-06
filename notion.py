@@ -56,17 +56,17 @@ class NotionClient:
         self,
         subcategories: dict[str, str],
         accounts: dict[str, str],
-    ) -> dict[float, dict]:
+    ) -> dict[int, dict]:
         """
         Load Active entries from the Recurring Payment database.
-        Returns dict keyed by amount (IDR float) → {name, page_url, subcategory, account}.
+        Returns dict keyed by amount (IDR int) → {name, page_url, subcategory, account}.
         """
         # Build reverse maps: Notion page ID → human-readable name
         sub_id_to_name = {_url_to_id(url): name for name, url in subcategories.items()}
         acc_id_to_name = {_url_to_id(url): name for name, url in accounts.items()}
 
         pages = await self._query_db(self._config.recurring_ds)
-        result: dict[float, dict] = {}
+        result: dict[int, dict] = {}
 
         for p in pages:
             # Only Active entries

@@ -4,7 +4,7 @@ import json
 import logging
 from openai import AsyncOpenAI, APIError, APITimeoutError, APIConnectionError, RateLimitError
 from config import Config
-from models import ExpenseEntry, QueryIntent, EmailTransaction, NotionCache, ConversationState
+from models import ExpenseEntry, QueryIntent, EmailTransaction, NotionCache
 
 log = logging.getLogger(__name__)
 
@@ -261,17 +261,17 @@ class Agent:
         question: str,
         expenses: list[dict],
         owner: str,
-        state: ConversationState,
-    ) -> str:
+        history: list[dict],
+    ) -> tuple[str, list[dict]]:
         expenses_text = json.dumps(expenses, indent=2)
-        state.history.append({"role": "user", "content": question})
+        history.append({"role": "user", "content": question})
 
         messages = [
             {
                 "role": "system",
                 "content": f"{QUERY_SYSTEM}\n\n{owner}'s expense data:\n{expenses_text}",
             },
-            *state.history,
+            *history,
         ]
 
         # answer_query returns plain text, not JSON — use _call directly
@@ -279,11 +279,11 @@ class Agent:
         if not answer:
             answer = "Sorry, I couldn't process that."
 
-        state.history.append({"role": "assistant", "content": answer})
-        if len(state.history) > 20:
-            state.history = state.history[-20:]
+        history.append({"role": "assistant", "content": answer})
+        if len(history) > 20:
+            history = history[-20:]
 
-        return answer
+        return answer, history
 
     async def parse_bank_email(
         self,

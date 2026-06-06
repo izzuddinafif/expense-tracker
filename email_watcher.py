@@ -21,15 +21,14 @@ import asyncio
 import email
 import email.header
 import imaplib
-import json
 import logging
-import os
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import date
 from html.parser import HTMLParser
 from typing import Callable
 
-from models import ExpenseEntry, EmailTransaction, ConversationState
+from db import Database
+from models import ExpenseEntry, EmailTransaction
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +48,6 @@ SKIP_SUBJECT_KEYWORDS = [
     "declined",
 ]
 
-PROCESSED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "processed_emails.json")
 IMAP_HOST = "imap.gmail.com"
 
 # Description the AI returns for Jago debit card emails (no merchant info)
@@ -103,82 +101,43 @@ class EmailWatcher:
     Parameters
     ----------
     config            : app Config
+    db                : Database instance for persistence
     notion            : NotionClient instance
     agent             : Agent instance
     cache_getter      : zero-arg callable returning current NotionCache
     bot               : aiogram Bot instance (for Telegram notifications)
     owner_telegram_id : Telegram user_id to notify (email account owner)
     owner_name        : owner name string (e.g. "Afif") for Notion expense prefix
-    conversations     : shared ConversationState dict from main.py (for debit follow-up)
     alert_fn          : async fn(text) that broadcasts to all users
     """
 
     def __init__(
         self,
         config,
+        db: Database,
         notion,
         agent,
         cache_getter: Callable,
         bot=None,
         owner_telegram_id: int | None = None,
         owner_name: str = "Afif",
-        conversations: dict | None = None,
         alert_fn=None,
     ):
         self._config = config
+        self._db = db
         self._notion = notion
         self._agent = agent
         self._cache_getter = cache_getter
         self._bot = bot
         self._owner_id = owner_telegram_id
         self._owner_name = owner_name
-        self._conversations = conversations
-        self._alert_fn = alert_fn  # async fn(text) → broadcasts to all users
-        self._processed: dict[str, str] = self._load_processed()  # uid → ISO timestamp
+        self._alert_fn = alert_fn
         self._last_imap_error: str | None = None
-        self._notion_fail_streak: int = 0  # consecutive Notion write failures
-
-    # ── Persistence ────────────────────────────────────────────────────────────
-
-    def _load_processed(self) -> dict[str, str]:
-        """
-        Load processed email UIDs with timestamps.
-        Prune entries older than 90 days to prevent unbounded growth.
-        """
-        if os.path.exists(PROCESSED_FILE):
-            try:
-                with open(PROCESSED_FILE) as f:
-                    data = json.load(f)
-                if isinstance(data, list):
-                    # Legacy format: list of uid strings → migrate
-                    return {uid: "" for uid in data}
-                return data  # {uid: ISO_timestamp}
-            except Exception:
-                pass
-        return {}
-
-    def _save_processed(self) -> None:
-        with open(PROCESSED_FILE, "w") as f:
-            json.dump(self._processed, f)
-
-    def _prune_processed(self) -> None:
-        """Remove entries older than 90 days."""
-        cutoff = datetime.now(timezone.utc) - timedelta(days=90)
-        before = len(self._processed)
-        self._processed = {
-            uid: ts
-            for uid, ts in self._processed.items()
-            if ts
-            and datetime.fromisoformat(ts) > cutoff
-        }
-        pruned = before - len(self._processed)
-        if pruned:
-            log.info(f"Pruned {pruned} processed email(s) older than 90 days")
-            self._save_processed()
+        self._notion_fail_streak: int = 0
 
     # ── IMAP (synchronous — called via asyncio.to_thread) ──────────────────────
 
-    def _imap_fetch(self) -> list[tuple[str, str, str, str]]:
+    def _imap_fetch(self, processed_uids: set[str]) -> list[tuple[str, str, str, str]]:
         """
         Connect to Gmail IMAP and fetch unprocessed emails from bank senders.
         Returns list of (uid, sender_email, subject, body_text).
@@ -196,10 +155,9 @@ class EmailWatcher:
                     continue
 
                 uids = data[0].split()
-                # Only process the most recent 100 to bound memory + time
                 for uid_bytes in uids[-100:]:
                     uid = uid_bytes.decode()
-                    if uid in self._processed:
+                    if uid in processed_uids:
                         continue
 
                     typ2, msg_data = imap.uid("fetch", uid_bytes, "(RFC822)")
@@ -214,7 +172,6 @@ class EmailWatcher:
 
         except imaplib.IMAP4.error as e:
             log.error(f"IMAP auth/connection error: {e}")
-            # Store for async alerting — can't await inside sync method
             self._last_imap_error = str(e)
         except Exception as e:
             log.error(f"IMAP fetch error: {e}")
@@ -267,7 +224,6 @@ class EmailWatcher:
     # ── Notification helpers ────────────────────────────────────────────────────
 
     async def _notify(self, text: str) -> None:
-        """Send a message to the owner (Afif)."""
         if self._bot and self._owner_id:
             try:
                 await self._bot.send_message(
@@ -277,7 +233,6 @@ class EmailWatcher:
                 log.error(f"Telegram notify failed: {e}")
 
     async def _alert(self, text: str) -> None:
-        """Broadcast a critical error to all users via alert_fn, or fall back to _notify."""
         if self._alert_fn:
             try:
                 await self._alert_fn(text)
@@ -289,47 +244,40 @@ class EmailWatcher:
     async def _ask_debit_merchant(self, tx: EmailTransaction) -> None:
         """
         For a Jago debit card tx with no merchant info:
-        - enqueue the tx on the user's ConversationState
-        - if no tx is currently pending, promote this one to pending and notify
-        - if a tx is already pending, just queue it (user will be prompted after
-          they respond to the current one)
+        - if no tx is currently pending, promote this one and notify
+        - if a tx is already pending, queue it
         """
-        if self._conversations is not None and self._owner_id is not None:
-            if self._owner_id not in self._conversations:
-                self._conversations[self._owner_id] = ConversationState()
-            state = self._conversations[self._owner_id]
+        if self._owner_id is None:
+            return
 
-            if state.pending_email_expense is None:
-                # No pending question — prompt user immediately
-                state.pending_email_expense = tx
-                await self._notify(
-                    f"💳 *Jago debit card* — Rp {tx.amount:,.0f}\n"
-                    f"📅 {tx.date}  🏦 {tx.account}\n\n"
-                    f"Beli apa? Balas dengan nama merchant/deskripsi."
-                )
-            else:
-                # Already waiting for a reply — queue this one
-                state.pending_debit_queue.append(tx)
-                log.info(
-                    f"[email] Queued Jago debit card Rp {tx.amount:,.0f} "
-                    f"(queue depth: {len(state.pending_debit_queue)})"
-                )
+        current = await self._db.get_pending_email_expense(self._owner_id)
+        if current is None:
+            await self._db.set_pending_email_expense(self._owner_id, tx)
+            await self._notify(
+                f"💳 *Jago debit card* — Rp {tx.amount:,.0f}\n"
+                f"📅 {tx.date}  🏦 {tx.account}\n\n"
+                f"Beli apa? Balas dengan nama merchant/deskripsi."
+            )
+        else:
+            await self._db.push_debit(self._owner_id, tx)
+            depth = await self._db.debit_queue_depth(self._owner_id)
+            log.info(
+                f"[email] Queued Jago debit card Rp {tx.amount:,.0f} "
+                f"(queue depth: {depth})"
+            )
 
     # ── Email processing ────────────────────────────────────────────────────────
 
     async def _process(self, uid: str, sender: str, subject: str, body: str) -> None:
-        # Pre-filter: skip failed transactions by subject
         subject_lower = subject.lower()
         if any(kw in subject_lower for kw in SKIP_SUBJECT_KEYWORDS):
             log.info(f"Skipping failed-transaction email [{uid}]: {subject}")
-            self._processed[uid] = datetime.now(timezone.utc).isoformat()
-            self._save_processed()
+            await self._db.mark_processed(uid, sender)
             return
 
         cache = self._cache_getter()
         today = date.today().isoformat()
 
-        # Parse with AI
         try:
             tx = await self._agent.parse_bank_email(
                 subject=subject,
@@ -344,20 +292,17 @@ class EmailWatcher:
 
         if tx.type == "skip":
             log.info(f"AI skipped [{uid}]: {tx.skip_reason}")
-            self._processed[uid] = datetime.now(timezone.utc).isoformat()
-            self._save_processed()
+            await self._db.mark_processed(uid, sender)
             return
 
         owner = self._owner_name
 
         try:
             if tx.type == "expense":
-                # ── Jago debit card: no merchant info ─────────────────────────
                 if tx.description.lower() == JAGO_DEBIT_DESCRIPTION:
                     recurring = cache.recurring_payments.get(int(round(tx.amount)))
 
                     if recurring:
-                        # Known recurring expense — auto-log and link back
                         entry = ExpenseEntry(
                             description=recurring["name"],
                             amount=tx.amount,
@@ -382,7 +327,6 @@ class EmailWatcher:
                             f"[View in Notion]({url})"
                         )
                     else:
-                        # Unknown debit — ask user for merchant name
                         log.info(
                             f"[email] Jago debit card Rp {tx.amount:,.0f} "
                             f"— asking user for merchant"
@@ -390,7 +334,6 @@ class EmailWatcher:
                         await self._ask_debit_merchant(tx)
 
                 else:
-                    # Normal expense/transfer with known merchant
                     entry = ExpenseEntry(
                         description=tx.description,
                         amount=tx.amount,
@@ -456,10 +399,8 @@ class EmailWatcher:
                 )
             return  # don't mark processed — retry next cycle
 
-        self._notion_fail_streak = 0  # reset on success
-
-        self._processed.add(uid)
-        self._save_processed()
+        self._notion_fail_streak = 0
+        await self._db.mark_processed(uid, sender)
 
     # ── Main loop ───────────────────────────────────────────────────────────────
 
@@ -469,9 +410,13 @@ class EmailWatcher:
 
         while True:
             try:
-                self._prune_processed()
+                pruned = await self._db.prune_processed()
+                if pruned:
+                    log.info(f"Pruned {pruned} processed email(s) older than 90 days")
+
+                processed = await self._db.get_all_processed_uids()
                 self._last_imap_error = None
-                emails = await asyncio.to_thread(self._imap_fetch)
+                emails = await asyncio.to_thread(self._imap_fetch, processed)
 
                 if self._last_imap_error:
                     await self._alert(
