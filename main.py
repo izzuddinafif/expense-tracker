@@ -25,15 +25,15 @@ log = logging.getLogger(__name__)
 
 def make_confirm_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Log it", callback_data=f"confirm:{user_id}"),
-        InlineKeyboardButton(text="❌ Cancel", callback_data=f"cancel:{user_id}"),
+        InlineKeyboardButton(text="✅ Simpan", callback_data=f"confirm:{user_id}"),
+        InlineKeyboardButton(text="❌ Batal", callback_data=f"cancel:{user_id}"),
     ]])
 
 
 def make_income_confirm_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Log income", callback_data=f"income_confirm:{user_id}"),
-        InlineKeyboardButton(text="❌ Cancel", callback_data=f"income_cancel:{user_id}"),
+        InlineKeyboardButton(text="✅ Simpan", callback_data=f"income_confirm:{user_id}"),
+        InlineKeyboardButton(text="❌ Batal", callback_data=f"income_cancel:{user_id}"),
     ]])
 
 
@@ -104,16 +104,16 @@ async def main() -> None:
     async def handle_start(msg: Message) -> None:
         owner = get_owner(msg.from_user.id)
         if not owner:
-            await msg.answer("Sorry, you're not authorized to use this bot.")
+            await msg.answer("Maaf, kamu tidak punya akses ke bot ini.")
             return
         await msg.answer(
-            f"Hey {owner}! 👋\n\n"
-            "Send me:\n"
-            "📸 A photo of a receipt → I'll log it\n"
-            "💬 A text like 'Nasi goreng 25k cash' → I'll log it\n"
-            "❓ A question like 'How much did I spend this month?' → I'll answer\n\n"
-            "/help — show what I can do\n"
-            "/refresh — reload categories from Notion"
+            f"Halo {owner}! 👋\n\n"
+            "Kirim ke saya:\n"
+            "📸 **Foto struk** → otomatis ekstrak & catat\n"
+            "💬 **Teks** kayak `Nasi goreng 25k cash` → langsung dicatat\n"
+            "❓ **Pertanyaan** kayak `Berapa pengeluaran bulan ini?` → dijawab\n"
+            "💰 **Pemasukan** kayak `Gaji bulanan masuk 3 juta` → dicatat\n\n"
+            "Ketik /help untuk bantuan lengkap."
         )
 
     @dp.message(Command("help"))
@@ -122,16 +122,24 @@ async def main() -> None:
         if not owner:
             return
         await msg.answer(
-            "Here's what I can do:\n\n"
-            "📸 *Receipt photo* — send a photo of a receipt and I'll extract and log the expense\n"
-            "💬 *Text expense* — describe it naturally: `Nasi goreng 25k jago`\n"
-            "💰 *Log income* — report money received: `Gaji bulanan masuk 3 juta ke Mandiri`\n"
-            "❓ *Spending query* — ask anything: `How much did I spend this week?`\n\n"
-            "Commands:\n"
-            "/networth — show your assets summary\n"
-            "/refresh — reload categories and recurring payments from Notion\n"
-            "/budget — show budget status\n"
-            "/help — show this message",
+            "✨ *Apa yang bisa saya lakukan?*\n\n"
+            "📸 *Foto struk*\n"
+            "Kirim foto struk belanja, saya akan baca otomatis.\n"
+            "Contoh: kirim foto struk Indomaret\n\n"
+            "💬 *Catat pengeluaran*\n"
+            "Teks biasa aja, saya paham bahasa sehari-hari.\n"
+            "Contoh: `Nasi goreng 25k jago` atau `bensin 50rb mandiri`\n\n"
+            "💰 *Catat pemasukan*\n"
+            "Laporan uang masuk.\n"
+            "Contoh: `Gaji bulanan masuk 3 juta ke Mandiri`\n\n"
+            "❓ *Tanya pengeluaran*\n"
+            "Tanya soal keuangan kamu, saya jawab pake data Notion.\n"
+            "Contoh: `Berapa yang aku habiskan minggu ini?`\n\n"
+            "📋 *Perintah khusus*\n"
+            "/networth — lihat ringkasan aset\n"
+            "/budget — cek status anggaran bulanan\n"
+            "/refresh — muat ulang data kategori dari Notion\n"
+            "/help — tampilkan pesan ini",
             parse_mode="Markdown",
         )
 
@@ -143,12 +151,12 @@ async def main() -> None:
         try:
             assets = await notion.fetch_assets()
             if not assets:
-                await msg.answer("No assets found. Add them to the Assets database in Notion.")
+                await msg.answer("Belum ada aset. Tambahin dulu di database Assets Notion.")
                 return
             total = sum(a["value_idr"] for a in assets if a["value_idr"])
-            lines = ["💼 *Assets*\n"]
+            lines = ["💼 *Kekayaan (Net Worth)*\n"]
             for a in assets:
-                val = f"Rp {a['value_idr']:,.0f}" if a["value_idr"] else "_(no value set)_"
+                val = f"Rp {a['value_idr']:,.0f}" if a["value_idr"] else "_(belum diisi)_"
                 qty = f"{a['quantity']:g} {a['unit']}" if a["quantity"] else ""
                 lines.append(f"• *{a['name']}*{' — ' + qty if qty else ''}: {val}")
             if total:
@@ -156,7 +164,7 @@ async def main() -> None:
             await msg.answer("\n".join(lines), parse_mode="Markdown")
         except Exception as e:
             log.error(f"/networth failed: {e}")
-            await msg.answer(f"❌ Couldn't fetch assets.\n`{type(e).__name__}: {str(e)[:80]}`", parse_mode="Markdown")
+            await msg.answer(f"❌ Gagal ambil data aset.\n`{type(e).__name__}: {str(e)[:80]}`", parse_mode="Markdown")
 
     @dp.message(Command("budget"))
     async def handle_budget(msg: Message) -> None:
@@ -166,9 +174,9 @@ async def main() -> None:
         try:
             budgets = await notion.fetch_budgets(cache)
             if not budgets:
-                await msg.answer("No budgets found. Add them in Notion first (Budget database).")
+                await msg.answer("Belum ada anggaran. Tambahin dulu di database Budget Notion.")
                 return
-            lines = ["💰 *Budgets*\n"]
+            lines = ["💰 *Anggaran (Budget)*\n"]
             for b in budgets:
                 if b["percentage"] > 100:
                     status = "🔴 OVER"
@@ -184,34 +192,34 @@ async def main() -> None:
             await msg.answer("\n".join(lines), parse_mode="Markdown")
         except Exception as e:
             log.error(f"/budget failed: {e}")
-            await msg.answer(f"❌ Couldn't fetch budgets.\n`{type(e).__name__}: {str(e)[:80]}`", parse_mode="Markdown")
+            await msg.answer(f"❌ Gagal ambil data anggaran.\n`{type(e).__name__}: {str(e)[:80]}`", parse_mode="Markdown")
 
     @dp.message(Command("refresh"))
     async def handle_refresh(msg: Message) -> None:
         owner = get_owner(msg.from_user.id)
         if not owner:
             return
-        await msg.answer("Refreshing cache...")
+        await msg.answer("🔄 Memuat ulang cache...")
         try:
             await refresh_cache()
             await msg.answer(
-                f"✅ Done! {len(cache.subcategories)} expense subcategories, "
-                f"{len(cache.income_subcategories)} income subcategories, "
-                f"{len(cache.accounts)} accounts, "
-                f"{len(cache.recurring_payments)} recurring payments loaded."
+                f"✅ Selesai! {len(cache.subcategories)} subkategori pengeluaran, "
+                f"{len(cache.income_subcategories)} subkategori pemasukan, "
+                f"{len(cache.accounts)} akun, "
+                f"{len(cache.recurring_payments)} pembayaran rutin."
             )
         except Exception as e:
             log.error(f"/refresh failed: {e}")
-            await msg.answer(f"❌ Refresh failed: `{type(e).__name__}: {e}`", parse_mode="Markdown")
+            await msg.answer(f"❌ Gagal refresh: `{type(e).__name__}: {e}`", parse_mode="Markdown")
 
     @dp.message(F.photo)
     async def handle_photo(msg: Message) -> None:
         owner = get_owner(msg.from_user.id)
         if not owner:
-            await msg.answer("Not authorized.")
+            await msg.answer("Maaf, kamu tidak punya akses.")
             return
 
-        await msg.answer("🔍 Reading receipt...")
+        await msg.answer("🔍 Membaca struk...")
 
         photo = msg.photo[-1]
         file = await bot.get_file(photo.file_id)
@@ -223,7 +231,7 @@ async def main() -> None:
         except Exception as e:
             log.error(f"extract_from_image failed: {e}")
             await msg.answer(
-                "❌ Couldn't read the receipt. Try a clearer photo.\n"
+                "❌ Gagal baca struk. Coba foto yang lebih jelas.\n"
                 f"`{type(e).__name__}: {str(e)[:80]}`",
                 parse_mode="Markdown",
             )
@@ -233,7 +241,7 @@ async def main() -> None:
         confidence_emoji = "✅" if entry.confidence >= 0.8 else "⚠️"
 
         await msg.answer(
-            f"{confidence_emoji} Got it! Confirm:\n\n{format_entry(entry)}",
+            f"{confidence_emoji} Ketemu! Konfirmasi:\n\n{format_entry(entry)}",
             parse_mode="Markdown",
             reply_markup=make_confirm_keyboard(msg.from_user.id),
         )
@@ -242,7 +250,7 @@ async def main() -> None:
     async def handle_text(msg: Message) -> None:
         owner = get_owner(msg.from_user.id)
         if not owner:
-            await msg.answer("Not authorized.")
+            await msg.answer("Maaf, kamu tidak punya akses.")
             return
 
         text = msg.text.strip()
@@ -254,7 +262,7 @@ async def main() -> None:
             if text.lower().strip() in ("batal", "cancel", "skip", "/cancel"):
                 await db.clear_pending_email_expense(user_id)
                 await db.clear_debit_queue(user_id)
-                await msg.answer("Debit card follow-up cancelled ❌")
+                await msg.answer("Follow-up debit dibatalkan ❌")
                 return
             await db.clear_pending_email_expense(user_id)
             entry = ExpenseEntry(
@@ -267,7 +275,7 @@ async def main() -> None:
             )
             await db.set_pending_expense(user_id, entry)
             await msg.answer(
-                f"Got it! Confirm:\n\n{format_entry(entry)}",
+                f"Oke! Konfirmasi:\n\n{format_entry(entry)}",
                 parse_mode="Markdown",
                 reply_markup=make_confirm_keyboard(user_id),
             )
@@ -276,9 +284,9 @@ async def main() -> None:
             if next_tx:
                 await db.set_pending_email_expense(user_id, next_tx)
                 await msg.answer(
-                    f"💳 *Jago debit card* — Rp {next_tx.amount:,.0f}\n"
+                    f"💳 *Kartu debit Jago* — Rp {next_tx.amount:,.0f}\n"
                     f"📅 {next_tx.date}  🏦 {next_tx.account}\n\n"
-                    f"Beli apa? Balas dengan nama merchant/deskripsi."
+                    f"Beli apa? Balas dengan nama merchant atau deskripsi."
                 )
             return
 
@@ -288,14 +296,14 @@ async def main() -> None:
         except Exception as e:
             log.error(f"detect_intent failed: {e}")
             await msg.answer(
-                "❌ Couldn't understand that right now. Please try again.\n"
+                "❌ Gagal memahami pesan. Coba lagi ya.\n"
                 f"`{type(e).__name__}: {str(e)[:80]}`",
                 parse_mode="Markdown",
             )
             return
 
         if intent.type == "query":
-            await msg.answer("🔎 Fetching your expenses...")
+            await msg.answer("🔎 Mengambil data pengeluaran...")
             try:
                 expenses, assets = await asyncio.gather(
                     notion.fetch_expenses(owner),
@@ -309,7 +317,7 @@ async def main() -> None:
             except Exception as e:
                 log.error(f"query flow failed: {e}")
                 await msg.answer(
-                    f"❌ Couldn't fetch your expenses right now.\n"
+                    f"❌ Gagal ambil data pengeluaran.\n"
                     f"`{type(e).__name__}: {str(e)[:80]}`",
                     parse_mode="Markdown",
                 )
@@ -321,7 +329,7 @@ async def main() -> None:
             except Exception as e:
                 log.error(f"extract_from_text failed: {e}")
                 await msg.answer(
-                    "❌ Couldn't parse that. Try: 'Nasi goreng 25k cash'\n"
+                    "❌ Gagal baca pengeluaran. Contoh: 'Nasi goreng 25k cash'\n"
                     f"`{type(e).__name__}: {str(e)[:80]}`",
                     parse_mode="Markdown",
                 )
@@ -329,7 +337,7 @@ async def main() -> None:
 
             await db.set_pending_expense(user_id, entry)
             await msg.answer(
-                f"Got it! Confirm:\n\n{format_entry(entry)}",
+                f"Oke! Konfirmasi:\n\n{format_entry(entry)}",
                 parse_mode="Markdown",
                 reply_markup=make_confirm_keyboard(user_id),
             )
@@ -341,7 +349,7 @@ async def main() -> None:
             except Exception as e:
                 log.error(f"extract_income_from_text failed: {e}")
                 await msg.answer(
-                    "❌ Couldn't parse that income. Try: 'Gaji bulanan masuk 3 juta ke Jago'\n"
+                    "❌ Gagal baca pemasukan. Contoh: 'Gaji bulanan masuk 3 juta ke Jago'\n"
                     f"`{type(e).__name__}: {str(e)[:80]}`",
                     parse_mode="Markdown",
                 )
@@ -349,14 +357,14 @@ async def main() -> None:
 
             await db.set_pending_income(user_id, income)
             await msg.answer(
-                f"💰 Income received! Confirm:\n\n{format_income_entry(income)}",
+                f"💰 Pemasukan! Konfirmasi:\n\n{format_income_entry(income)}",
                 parse_mode="Markdown",
                 reply_markup=make_income_confirm_keyboard(user_id),
             )
 
         else:
             await msg.answer(
-                "Hmm, not sure what you mean. Send a receipt photo or describe an expense."
+                "Hmm, kurang paham. Coba kirim foto struk atau deskripsi pengeluaran."
             )
 
     # ── Inline keyboard callbacks ─────────────────────────────────────────────
@@ -365,33 +373,33 @@ async def main() -> None:
     async def handle_confirm(callback: CallbackQuery) -> None:
         user_id = int(callback.data.split(":")[1])
         if callback.from_user.id != user_id:
-            await callback.answer("Not authorized.")
+            await callback.answer("Tidak punya akses.")
             return
         owner = get_owner(user_id)
         if not owner:
-            await callback.answer("Not authorized.")
+            await callback.answer("Tidak punya akses.")
             return
 
         entry = await db.get_pending_expense(user_id)
         if not entry:
-            await callback.answer("No pending expense.")
+            await callback.answer("Tidak ada pengeluaran pending.")
             await callback.message.edit_reply_markup(reply_markup=None)
             return
 
         await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.answer("Logging...")
+        await callback.answer("Menyimpan...")
 
-        status_msg = await callback.message.answer("⏳ Logging to Notion...")
+        status_msg = await callback.message.answer("⏳ Menyimpan ke Notion...")
         try:
             url = await notion.log_expense(entry, owner, cache)
             await db.clear_pending_expense(user_id)
             await status_msg.edit_text(
-                f"✅ Logged! [View in Notion]({url})", parse_mode="Markdown"
+                f"✅ Tersimpan! [Lihat di Notion]({url})", parse_mode="Markdown"
             )
         except Exception as e:
             log.error(f"Notion write failed: {e}")
             await status_msg.edit_text(
-                f"❌ Failed to log to Notion.\n`{type(e).__name__}: {str(e)[:80]}`",
+                f"❌ Gagal simpan ke Notion.\n`{type(e).__name__}: {str(e)[:80]}`",
                 parse_mode="Markdown",
             )
 
@@ -399,51 +407,51 @@ async def main() -> None:
     async def handle_cancel(callback: CallbackQuery) -> None:
         user_id = int(callback.data.split(":")[1])
         if callback.from_user.id != user_id:
-            await callback.answer("Not authorized.")
+            await callback.answer("Tidak punya akses.")
             return
         owner = get_owner(user_id)
         if not owner:
-            await callback.answer("Not authorized.")
+            await callback.answer("Tidak punya akses.")
             return
 
         await db.clear_pending_expense(user_id)
         await db.clear_pending_email_expense(user_id)
         await db.clear_debit_queue(user_id)
         await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.answer("Cancelled.")
-        await callback.message.answer("Cancelled ❌")
+        await callback.answer("Dibatalkan.")
+        await callback.message.answer("Dibatalkan ❌")
 
     @dp.callback_query(F.data.startswith("income_confirm:"))
     async def handle_income_confirm(callback: CallbackQuery) -> None:
         user_id = int(callback.data.split(":")[1])
         if callback.from_user.id != user_id:
-            await callback.answer("Not authorized.")
+            await callback.answer("Tidak punya akses.")
             return
         owner = get_owner(user_id)
         if not owner:
-            await callback.answer("Not authorized.")
+            await callback.answer("Tidak punya akses.")
             return
 
         income = await db.get_pending_income(user_id)
         if not income:
-            await callback.answer("No pending income.")
+            await callback.answer("Tidak ada pemasukan pending.")
             await callback.message.edit_reply_markup(reply_markup=None)
             return
 
         await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.answer("Logging income...")
+        await callback.answer("Menyimpan pemasukan...")
 
-        status_msg = await callback.message.answer("⏳ Logging income to Notion...")
+        status_msg = await callback.message.answer("⏳ Menyimpan pemasukan ke Notion...")
         try:
             url = await notion.log_income(income, owner, cache)
             await db.clear_pending_income(user_id)
             await status_msg.edit_text(
-                f"✅ Income logged! [View in Notion]({url})", parse_mode="Markdown"
+                f"✅ Pemasukan tersimpan! [Lihat di Notion]({url})", parse_mode="Markdown"
             )
         except Exception as e:
             log.error(f"Notion income write failed: {e}")
             await status_msg.edit_text(
-                f"❌ Failed to log income to Notion.\n`{type(e).__name__}: {str(e)[:80]}`",
+                f"❌ Gagal simpan pemasukan ke Notion.\n`{type(e).__name__}: {str(e)[:80]}`",
                 parse_mode="Markdown",
             )
 
@@ -451,17 +459,17 @@ async def main() -> None:
     async def handle_income_cancel(callback: CallbackQuery) -> None:
         user_id = int(callback.data.split(":")[1])
         if callback.from_user.id != user_id:
-            await callback.answer("Not authorized.")
+            await callback.answer("Tidak punya akses.")
             return
         owner = get_owner(user_id)
         if not owner:
-            await callback.answer("Not authorized.")
+            await callback.answer("Tidak punya akses.")
             return
 
         await db.clear_pending_income(user_id)
         await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.answer("Cancelled.")
-        await callback.message.answer("Cancelled ❌")
+        await callback.answer("Dibatalkan.")
+        await callback.message.answer("Dibatalkan ❌")
 
     # ── Startup ───────────────────────────────────────────────────────────────
     try:

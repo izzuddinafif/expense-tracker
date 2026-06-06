@@ -284,9 +284,9 @@ class EmailWatcher:
                 try:
                     await self._bot.send_message(
                         self._owner_id,
-                        f"💳 *Jago debit card* — Rp {tx.amount:,.0f}\n"
+                        f"💳 *Kartu debit Jago* — Rp {tx.amount:,.0f}\n"
                         f"📅 {tx.date}  🏦 {tx.account}\n\n"
-                        f"Beli apa? Balas dengan nama merchant/deskripsi.\n"
+                        f"Beli apa? Balas dengan nama merchant atau deskripsi.\n"
                         f"_(Ketik *batal* untuk lewati)_",
                         parse_mode="Markdown",
                     )
@@ -358,11 +358,11 @@ class EmailWatcher:
                             f"Rp {tx.amount:,.0f}"
                         )
                         await self._notify(
-                            f"🔁 *Auto-logged recurring*\n"
+                            f"🔁 *Otomatis tercatat (rutin)*\n"
                             f"📝 {entry.description}\n"
                             f"💰 Rp {tx.amount:,.0f}\n"
                             f"📅 {tx.date}\n"
-                            f"[View in Notion]({url})"
+                            f"[Lihat di Notion]({url})"
                         )
                     else:
                         log.info(
@@ -388,13 +388,13 @@ class EmailWatcher:
                         f"Rp {tx.amount:,.0f} [{tx.subcategory}]"
                     )
                     await self._notify(
-                        f"📧 *Auto-logged from email*\n"
+                        f"📧 *Otomatis tercatat dari email*\n"
                         f"📝 {tx.description}\n"
                         f"💰 Rp {tx.amount:,.0f}\n"
                         f"📅 {tx.date}\n"
                         f"🏷 {tx.subcategory}\n"
                         f"🏦 {tx.account}\n"
-                        f"[View in Notion]({url})"
+                        f"[Lihat di Notion]({url})"
                     )
 
             elif tx.type == "self_transfer":
@@ -413,14 +413,14 @@ class EmailWatcher:
                     url = await self._notion.log_expense(fee_entry, owner, cache)
                     log.info(f"[email→Notion] Admin fee Rp {tx.admin_fee:,.0f} logged")
                     await self._notify(
-                        f"📧 *Self-transfer* Rp {tx.amount:,.0f} → {dest}\n"
-                        f"Admin fee logged: 💰 Rp {tx.admin_fee:,.0f}\n"
-                        f"[View in Notion]({url})"
+                        f"📧 *Transfer sendiri* Rp {tx.amount:,.0f} → {dest}\n"
+                        f"Biaya admin tercatat: 💰 Rp {tx.admin_fee:,.0f}\n"
+                        f"[Lihat di Notion]({url})"
                     )
                 else:
                     await self._notify(
-                        f"📧 *Self-transfer* Rp {tx.amount:,.0f} → {dest}\n"
-                        f"No admin fee — not logged."
+                        f"📧 *Transfer sendiri* Rp {tx.amount:,.0f} → {dest}\n"
+                        f"Tidak ada biaya admin — tidak dicatat."
                     )
 
             else:
@@ -434,8 +434,8 @@ class EmailWatcher:
             self._notion_fail_streak += 1
             if self._notion_fail_streak == 3 or self._notion_fail_streak % 5 == 0:
                 await self._alert(
-                    f"⚠️ *Email watcher: Notion write failing*\n"
-                    f"Failed {self._notion_fail_streak}x in a row.\n"
+                    f"⚠️ *Email watcher: gagal nulis ke Notion*\n"
+                    f"Gagal {self._notion_fail_streak}x berturut-turut.\n"
                     f"`{type(e).__name__}: {str(e)[:120]}`"
                 )
             return  # don't mark processed — retry next cycle
@@ -461,9 +461,9 @@ class EmailWatcher:
 
                 if self._last_imap_error:
                     await self._alert(
-                        f"⚠️ *Email watcher: IMAP auth failed*\n"
+                        f"⚠️ *Email watcher: login IMAP gagal*\n"
                         f"`{self._last_imap_error}`\n"
-                        "Check your Gmail App Password in `.env`."
+                        "Cek Gmail App Password di file `.env`."
                     )
 
                 if emails:
