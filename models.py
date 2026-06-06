@@ -20,7 +20,7 @@ class QueryIntent(BaseModel):
 
 class EmailTransaction(BaseModel):
     """Parsed result from a bank notification email."""
-    type: str           # "expense" | "transfer" | "self_transfer" | "skip"
+    type: str           # "expense" | "self_transfer" | "skip"
     description: str    # merchant name or recipient name
     amount: float       # main transaction amount in IDR
     admin_fee: float    # admin fee for self-transfers (0 if none)
@@ -80,4 +80,5 @@ def _fuzzy_match(name: str, options: dict[str, str]) -> tuple[str, str] | None:
 class ConversationState:
     history: list[dict] = field(default_factory=list)
     pending_expense: ExpenseEntry | None = None           # awaiting inline keyboard confirmation
-    pending_email_expense: "EmailTransaction | None" = None  # Jago debit card needs merchant name
+    pending_email_expense: "EmailTransaction | None" = None  # Jago debit card needs merchant name (current item)
+    pending_debit_queue: list["EmailTransaction"] = field(default_factory=list)  # queued Jago debit cards

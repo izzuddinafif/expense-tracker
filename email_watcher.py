@@ -25,7 +25,7 @@ import json
 import logging
 import os
 import re
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 from typing import Callable
 
@@ -134,24 +134,47 @@ class EmailWatcher:
         self._owner_name = owner_name
         self._conversations = conversations
         self._alert_fn = alert_fn  # async fn(text) → broadcasts to all users
-        self._processed: set[str] = self._load_processed()
+        self._processed: dict[str, str] = self._load_processed()  # uid → ISO timestamp
         self._last_imap_error: str | None = None
         self._notion_fail_streak: int = 0  # consecutive Notion write failures
 
     # ── Persistence ────────────────────────────────────────────────────────────
 
-    def _load_processed(self) -> set[str]:
+    def _load_processed(self) -> dict[str, str]:
+        """
+        Load processed email UIDs with timestamps.
+        Prune entries older than 90 days to prevent unbounded growth.
+        """
         if os.path.exists(PROCESSED_FILE):
             try:
                 with open(PROCESSED_FILE) as f:
-                    return set(json.load(f))
+                    data = json.load(f)
+                if isinstance(data, list):
+                    # Legacy format: list of uid strings → migrate
+                    return {uid: "" for uid in data}
+                return data  # {uid: ISO_timestamp}
             except Exception:
                 pass
-        return set()
+        return {}
 
     def _save_processed(self) -> None:
         with open(PROCESSED_FILE, "w") as f:
-            json.dump(list(self._processed), f)
+            json.dump(self._processed, f)
+
+    def _prune_processed(self) -> None:
+        """Remove entries older than 90 days."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=90)
+        before = len(self._processed)
+        self._processed = {
+            uid: ts
+            for uid, ts in self._processed.items()
+            if ts
+            and datetime.fromisoformat(ts) > cutoff
+        }
+        pruned = before - len(self._processed)
+        if pruned:
+            log.info(f"Pruned {pruned} processed email(s) older than 90 days")
+            self._save_processed()
 
     # ── IMAP (synchronous — called via asyncio.to_thread) ──────────────────────
 
@@ -161,6 +184,7 @@ class EmailWatcher:
         Returns list of (uid, sender_email, subject, body_text).
         """
         results = []
+        imap = None
         try:
             imap = imaplib.IMAP4_SSL(IMAP_HOST)
             imap.login(self._config.gmail_address, self._config.gmail_app_password)
@@ -188,13 +212,18 @@ class EmailWatcher:
                     body = self._extract_body(msg)
                     results.append((uid, sender, subject, body))
 
-            imap.logout()
         except imaplib.IMAP4.error as e:
             log.error(f"IMAP auth/connection error: {e}")
             # Store for async alerting — can't await inside sync method
             self._last_imap_error = str(e)
         except Exception as e:
             log.error(f"IMAP fetch error: {e}")
+        finally:
+            if imap is not None:
+                try:
+                    imap.logout()
+                except Exception:
+                    pass
         return results
 
     def _decode_header(self, raw: str) -> str:
@@ -260,19 +289,31 @@ class EmailWatcher:
     async def _ask_debit_merchant(self, tx: EmailTransaction) -> None:
         """
         For a Jago debit card tx with no merchant info:
-        - set pending_email_expense on the user's ConversationState
-        - send Telegram message asking what was bought
+        - enqueue the tx on the user's ConversationState
+        - if no tx is currently pending, promote this one to pending and notify
+        - if a tx is already pending, just queue it (user will be prompted after
+          they respond to the current one)
         """
         if self._conversations is not None and self._owner_id is not None:
             if self._owner_id not in self._conversations:
                 self._conversations[self._owner_id] = ConversationState()
-            self._conversations[self._owner_id].pending_email_expense = tx
+            state = self._conversations[self._owner_id]
 
-        await self._notify(
-            f"💳 *Jago debit card* — Rp {tx.amount:,.0f}\n"
-            f"📅 {tx.date}  🏦 {tx.account}\n\n"
-            f"Beli apa? Balas dengan nama merchant/deskripsi."
-        )
+            if state.pending_email_expense is None:
+                # No pending question — prompt user immediately
+                state.pending_email_expense = tx
+                await self._notify(
+                    f"💳 *Jago debit card* — Rp {tx.amount:,.0f}\n"
+                    f"📅 {tx.date}  🏦 {tx.account}\n\n"
+                    f"Beli apa? Balas dengan nama merchant/deskripsi."
+                )
+            else:
+                # Already waiting for a reply — queue this one
+                state.pending_debit_queue.append(tx)
+                log.info(
+                    f"[email] Queued Jago debit card Rp {tx.amount:,.0f} "
+                    f"(queue depth: {len(state.pending_debit_queue)})"
+                )
 
     # ── Email processing ────────────────────────────────────────────────────────
 
@@ -281,7 +322,7 @@ class EmailWatcher:
         subject_lower = subject.lower()
         if any(kw in subject_lower for kw in SKIP_SUBJECT_KEYWORDS):
             log.info(f"Skipping failed-transaction email [{uid}]: {subject}")
-            self._processed.add(uid)
+            self._processed[uid] = datetime.now(timezone.utc).isoformat()
             self._save_processed()
             return
 
@@ -303,7 +344,7 @@ class EmailWatcher:
 
         if tx.type == "skip":
             log.info(f"AI skipped [{uid}]: {tx.skip_reason}")
-            self._processed.add(uid)
+            self._processed[uid] = datetime.now(timezone.utc).isoformat()
             self._save_processed()
             return
 
@@ -399,6 +440,11 @@ class EmailWatcher:
                         f"No admin fee — not logged."
                     )
 
+            else:
+                log.warning(
+                    f"Unknown EmailTransaction.type '{tx.type}' for [{uid}] — skipping"
+                )
+
         except Exception as e:
             log.error(f"Failed to log email [{uid}] to Notion: {e}")
             self._notion_fail_streak += 1
@@ -423,6 +469,7 @@ class EmailWatcher:
 
         while True:
             try:
+                self._prune_processed()
                 self._last_imap_error = None
                 emails = await asyncio.to_thread(self._imap_fetch)
 

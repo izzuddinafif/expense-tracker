@@ -215,6 +215,7 @@ class Agent:
                     {
                         "type": "image_url",
                         "image_url": {
+                            # Telegram always serves photos as JPEG, so image/jpeg is always correct
                             "url": f"data:image/jpeg;base64,{base64.b64encode(image_bytes).decode()}"
                         },
                     },

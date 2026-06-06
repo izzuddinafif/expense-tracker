@@ -180,6 +180,15 @@ async def main() -> None:
                 parse_mode="Markdown",
                 reply_markup=make_confirm_keyboard(msg.from_user.id),
             )
+            # Promote next queued debit card tx (if any)
+            if state.pending_debit_queue:
+                next_tx = state.pending_debit_queue.pop(0)
+                state.pending_email_expense = next_tx
+                await msg.answer(
+                    f"💳 *Jago debit card* — Rp {next_tx.amount:,.0f}\n"
+                    f"📅 {next_tx.date}  🏦 {next_tx.account}\n\n"
+                    f"Beli apa? Balas dengan nama merchant/deskripsi."
+                )
             return
 
         # ── Intent detection ──────────────────────────────────────────────────
@@ -300,8 +309,19 @@ async def main() -> None:
         conversations=conversations,
         alert_fn=alert_owner,
     )
-    asyncio.create_task(email_watcher.run())
+    _watcher_task = asyncio.create_task(email_watcher.run())
     log.info("Email watcher scheduled.")
+
+    # Prevent silent task death — log critically if the watcher dies
+    async def _watch_over(task: asyncio.Task) -> None:
+        try:
+            await task
+        except Exception:
+            log.critical("Email watcher task died!", exc_info=True)
+
+    _watcher_task.add_done_callback(
+        lambda t: asyncio.ensure_future(_watch_over(t))
+    )
 
     log.info("Bot starting...")
     await dp.start_polling(bot)

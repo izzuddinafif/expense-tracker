@@ -49,8 +49,7 @@ def load_config() -> Config:
         recurring_ds="409c2adf-8454-83fd-997e-079ec8c04d73",
         # Add your Telegram user IDs here
         users={
-            981749333: "Afif",  # replace with your real Telegram ID
-            987654321: "Friend",  # replace with your friend's Telegram ID
+            981749333: "Afif",
         },
         # Gmail IMAP credentials
         gmail_address=os.environ["GMAIL_ADDRESS"],

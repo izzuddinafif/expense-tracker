@@ -25,7 +25,7 @@ No build step. No tests. Single-process async app.
 
 ## Architecture
 
-All code lives at the repo root (no src/ directory despite what README says). Flat module structure:
+All code lives at the repo root. Flat module structure:
 
 ```
 main.py          # Entry point. aiogram handlers + startup. Owns in-memory state.

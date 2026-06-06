@@ -4,6 +4,7 @@ from models import NotionCache, ExpenseEntry
 
 
 NOTION_VERSION = "2022-06-28"
+_HTTP_TIMEOUT = 30.0  # seconds
 
 
 class NotionClient:
@@ -15,13 +16,15 @@ class NotionClient:
         }
         self._config = config
 
-    async def _query_db(self, database_id: str) -> list[dict]:
+    async def _query_db(
+        self, database_id: str, *, extra_payload: dict | None = None
+    ) -> list[dict]:
         """Query all pages from a Notion database (handles pagination)."""
         url = f"https://api.notion.com/v1/databases/{database_id}/query"
         results = []
-        payload: dict = {}
+        payload: dict = extra_payload.copy() if extra_payload else {}
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             while True:
                 resp = await client.post(url, headers=self._headers, json=payload)
                 resp.raise_for_status()
@@ -173,7 +176,7 @@ class NotionClient:
             "properties": properties,
         }
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.post(
                 "https://api.notion.com/v1/pages",
                 headers=self._headers,
@@ -183,20 +186,25 @@ class NotionClient:
             return resp.json()["url"]
 
     async def fetch_expenses(self, owner: str) -> list[dict]:
-        """Fetch all expenses for a given owner."""
-        pages = await self._query_db(self._config.expenses_ds)
+        """Fetch expenses for a given owner, filtered on the Notion side."""
+        payload = {
+            "filter": {
+                "property": "Description",
+                "title": {"contains": f"[{owner}]"},
+            }
+        }
+        pages = await self._query_db(self._config.expenses_ds, extra_payload=payload)
         result = []
         for p in pages:
             title_prop = p["properties"].get("Description", {})
             title = "".join(t["plain_text"] for t in title_prop.get("title", []))
-            if f"[{owner}]" in title:
-                amount = p["properties"].get("Amount", {}).get("number", 0)
-                date_prop = p["properties"].get("Date of Expense", {}).get("date") or {}
-                result.append({
-                    "description": title.replace(f"[{owner}] ", ""),
-                    "amount": amount,
-                    "date": date_prop.get("start", ""),
-                })
+            amount = p["properties"].get("Amount", {}).get("number", 0)
+            date_prop = p["properties"].get("Date of Expense", {}).get("date") or {}
+            result.append({
+                "description": title.replace(f"[{owner}] ", ""),
+                "amount": amount,
+                "date": date_prop.get("start", ""),
+            })
         return result
 
 
