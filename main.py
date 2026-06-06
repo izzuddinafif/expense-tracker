@@ -42,25 +42,12 @@ async def main() -> None:
     # Migrate legacy env vars to users table (one-time)
     await db.migrate_from_env(config.notion_token, config.users)
 
-    notion = NotionClient.from_config(config)
     agent = Agent(config)
-
-    cache: NotionCache = NotionCache()
 
     pending_edit: dict[int, str] = {}
     page_desc: dict[str, str] = {}
     photo_queue: dict[int, list[str]] = {}
     processing_group: set[int] = set()
-
-    async def refresh_cache() -> None:
-        nonlocal cache
-        log.info("Refreshing Notion cache...")
-        cache = await notion.load_cache()
-        log.info(
-            f"Cache loaded: {len(cache.subcategories)} subcategories, "
-            f"{len(cache.accounts)} accounts, "
-            f"{len(cache.recurring_payments)} recurring payments"
-        )
 
     async def alert_owner(text: str) -> None:
         all_users = await db.get_all_users()
@@ -71,9 +58,8 @@ async def main() -> None:
                 log.error(f"Failed to send alert to {uid}: {e}")
 
     def format_entry(entry: ExpenseEntry, cache: NotionCache | None = None) -> str:
-        c = cache or globals().get("cache")
-        sub_match = c.closest_subcategory(entry.subcategory) if c else (entry.subcategory,)
-        acc_match = c.closest_account(entry.account) if c else (entry.account,)
+        sub_match = cache.closest_subcategory(entry.subcategory) if cache else (entry.subcategory,)
+        acc_match = cache.closest_account(entry.account) if cache else (entry.account,)
         sub_label = sub_match[0] if sub_match else f"❓ {entry.subcategory}"
         acc_label = acc_match[0] if acc_match else f"❓ {entry.account}"
         return (
@@ -85,9 +71,8 @@ async def main() -> None:
         )
 
     def format_income_entry(entry: IncomeEntry, cache: NotionCache | None = None) -> str:
-        c = cache or globals().get("cache")
-        sub_match = c.closest_income_subcategory(entry.subcategory) if c else (entry.subcategory,)
-        acc_match = c.closest_account(entry.account) if c else (entry.account,)
+        sub_match = cache.closest_income_subcategory(entry.subcategory) if cache else (entry.subcategory,)
+        acc_match = cache.closest_account(entry.account) if cache else (entry.account,)
         sub_label = sub_match[0] if sub_match else f"❓ {entry.subcategory}"
         acc_label = acc_match[0] if acc_match else f"❓ {entry.account}"
         return (
@@ -175,6 +160,16 @@ async def main() -> None:
             return
 
         if step == "discovering":
+            await _do_discovery(msg, user_id)
+            return
+
+        if step == "migrated":
+            # User migrated from env vars — has token but needs discovery
+            await msg.answer(
+                f"✅ Token sudah tersimpan untuk *{user.owner_name}*.\n"
+                "🔍 Mencari database Notion di workspace kamu...",
+                parse_mode="Markdown",
+            )
             await _do_discovery(msg, user_id)
             return
 
@@ -1105,11 +1100,13 @@ async def main() -> None:
         log.debug(f"Callback received: {callback.data}")
         _, page_id, cat_idx_str = callback.data.split(":", 2)
         cat_index = int(cat_idx_str)
-        # Need to find the user's cache - look up by page_id or use global for now
-        # TODO: store user_id in callback data for these legacy handlers
-        user_notion_cache = cache  # fallback to global for legacy handlers
+        result = await get_user_notion(callback.from_user.id)
+        if not result:
+            await callback.answer("Ketik /setup untuk menghubungkan Notion.")
+            return
+        _, user_cache = result
         await callback.message.edit_reply_markup(
-            reply_markup=make_subcategory_keyboard(page_id, cat_index, user_notion_cache)
+            reply_markup=make_subcategory_keyboard(page_id, cat_index, user_cache)
         )
         await callback.answer("Pilih subkategori")
 
@@ -1117,9 +1114,13 @@ async def main() -> None:
     async def handle_cat_back(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
         _, page_id = callback.data.split(":", 1)
-        user_notion_cache = cache  # fallback to global for legacy handlers
+        result = await get_user_notion(callback.from_user.id)
+        if not result:
+            await callback.answer("Ketik /setup untuk menghubungkan Notion.")
+            return
+        _, user_cache = result
         await callback.message.edit_reply_markup(
-            reply_markup=make_category_keyboard(page_id, user_notion_cache)
+            reply_markup=make_category_keyboard(page_id, user_cache)
         )
         await callback.answer("Kembali ke daftar kategori")
 
@@ -1127,9 +1128,13 @@ async def main() -> None:
     async def handle_cat_all(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
         _, page_id = callback.data.split(":", 1)
-        user_notion_cache = cache  # fallback to global for legacy handlers
+        result = await get_user_notion(callback.from_user.id)
+        if not result:
+            await callback.answer("Ketik /setup untuk menghubungkan Notion.")
+            return
+        _, user_cache = result
         await callback.message.edit_reply_markup(
-            reply_markup=make_category_keyboard(page_id, user_notion_cache)
+            reply_markup=make_category_keyboard(page_id, user_cache)
         )
         await callback.answer("Pilih kategori")
 
@@ -1185,65 +1190,56 @@ async def main() -> None:
         await callback.answer("❌ Aksi tidak dikenali.")
 
     # ── Startup ───────────────────────────────────────────────────────────────
-    # Load global cache (used by email watcher)
-    try:
-        await refresh_cache()
-    except Exception as e:
-        log.error(f"Initial cache load failed: {e}")
-
     # Look up email owner from DB
     target_owner = config.email_owner
-    afif_id = None
-    afif_name = target_owner or "Unknown"
+    email_owner_record = None
     if target_owner:
-        # Find user by owner_name in DB
-        all_users = await db.get_all_users()
-        for uid, user_rec in all_users.items():
-            if user_rec.owner_name == target_owner:
-                afif_id = uid
-                afif_name = user_rec.owner_name
-                break
-    if afif_id is None:
+        email_owner_record = await db.get_user_by_name(target_owner)
+    if not email_owner_record:
         log.warning("Email watcher: no matching user found for EMAIL_OWNER=%r — notifications disabled", target_owner)
+    elif email_owner_record.setup_step != "done":
+        log.warning("Email watcher: EMAIL_OWNER user setup incomplete — run /setup first")
+        email_owner_record = None
 
-    # Create a placeholder notion/cache for email watcher (will be replaced per-user in future)
-    email_watcher = EmailWatcher(
-        config=config,
-        db=db,
-        notion=notion,
-        agent=agent,
-        cache_getter=lambda: cache,
-        bot=bot,
-        owner_telegram_id=afif_id,
-        owner_name=afif_name,
-        alert_fn=alert_owner,
-        page_desc=page_desc,
-    )
-    _watcher_task = asyncio.create_task(email_watcher.run())
-    log.info("Email watcher scheduled.")
+    if email_owner_record:
+        email_notion = NotionClient.from_user(email_owner_record)
+        email_cache = await email_notion.load_cache()
+        email_watcher = EmailWatcher(
+            config=config,
+            db=db,
+            notion=email_notion,
+            agent=agent,
+            cache_getter=lambda: email_cache,
+            bot=bot,
+            owner_telegram_id=email_owner_record.telegram_id,
+            owner_name=email_owner_record.owner_name,
+            alert_fn=alert_owner,
+            page_desc=page_desc,
+        )
+        _watcher_task = asyncio.create_task(email_watcher.run())
+        log.info("Email watcher scheduled.")
 
-    async def _watch_over(task: asyncio.Task) -> None:
-        nonlocal _watcher_task
-        try:
-            await task
-        except Exception:
-            log.critical("Email watcher died, restarting in 10s...", exc_info=True)
-            await asyncio.sleep(10)
-            _watcher_task = asyncio.create_task(email_watcher.run())
-            _watcher_task.add_done_callback(
-                lambda t: asyncio.ensure_future(_watch_over(t))
-            )
+        async def _watch_over(task: asyncio.Task) -> None:
+            nonlocal _watcher_task
+            try:
+                await task
+            except Exception:
+                log.critical("Email watcher died, restarting in 10s...", exc_info=True)
+                await asyncio.sleep(10)
+                _watcher_task = asyncio.create_task(email_watcher.run())
+                _watcher_task.add_done_callback(
+                    lambda t: asyncio.ensure_future(_watch_over(t))
+                )
 
-    _watcher_task.add_done_callback(
-        lambda t: asyncio.ensure_future(_watch_over(t))
-    )
+        _watcher_task.add_done_callback(
+            lambda t: asyncio.ensure_future(_watch_over(t))
+        )
 
     log.info("Bot starting...")
     try:
         await dp.start_polling(bot)
     finally:
         await db.close()
-        await notion.aclose()
         log.info("Database connection closed.")
 
 

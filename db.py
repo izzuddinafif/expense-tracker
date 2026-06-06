@@ -138,13 +138,14 @@ class Database:
             existing = await self.get_user(uid)
             if existing:
                 continue
+            # Token saved but setup_step='migrated' — user must run /setup to discover databases
             await self._conn.execute(
                 "INSERT INTO users (telegram_id, owner_name, notion_token, setup_step, created_at, updated_at) "
-                "VALUES (?, ?, ?, 'done', ?, ?)",
+                "VALUES (?, ?, ?, 'migrated', ?, ?)",
                 (uid, name, notion_token, now, now),
             )
         await self._conn.commit()
-        log.info(f"Migrated {len(users)} user(s) from env vars")
+        log.info(f"Migrated {len(users)} user(s) from env vars — run /setup to discover databases")
 
     # ── Processed emails ────────────────────────────────────────────────────────
 

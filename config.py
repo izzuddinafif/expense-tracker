@@ -61,7 +61,11 @@ def load_config() -> Config:
         # Legacy single-tenant env vars (optional, for backward compat)
         notion_token=os.getenv("NOTION_TOKEN", ""),
         users=(
-            {int(k): v for k, v in os.environ.get("TELEGRAM_USERS", "").split(",") if ":" in v}
+            {
+                int(item.split(":", 1)[0]): item.split(":", 1)[1]
+                for item in os.getenv("TELEGRAM_USERS", "").split(",")
+                if ":" in item
+            }
             if os.getenv("TELEGRAM_USERS")
             else {}
         ),
