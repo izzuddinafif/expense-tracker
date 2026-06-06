@@ -341,7 +341,12 @@ async def main() -> None:
         try:
             assets = await user_notion.fetch_assets()
             if not assets:
-                await msg.answer("Belum ada aset. Tambahkan dulu di database Assets Notion.")
+                await msg.answer(
+                    "💼 *Net Worth*\n\n"
+                    "Belum ada aset.\n"
+                    "Buat database *Assets* di Notion, lalu share ke integration.",
+                    parse_mode="Markdown",
+                )
                 return
             total = sum(a["value_idr"] for a in assets if a["value_idr"])
             lines = ["💼 *Kekayaan (Net Worth)*\n"]

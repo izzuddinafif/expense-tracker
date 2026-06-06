@@ -94,11 +94,14 @@ class NotionClient:
         # Match discovered databases to expected names
         found: dict[str, str] = {}
         missing: list[str] = []
+        OPTIONAL_DBS = {"assets_ds"}  # nice-to-have, won't block setup
 
         for field_name, expected_title in DB_NAME_MAP.items():
             db_id = all_databases.get(expected_title)
             if db_id:
                 found[field_name] = db_id
+            elif field_name in OPTIONAL_DBS:
+                log.info(f"Optional database '{expected_title}' not found — skipping")
             else:
                 missing.append(expected_title)
 
@@ -518,7 +521,10 @@ class NotionClient:
 
     async def fetch_assets(self) -> list[dict]:
         """Fetch all entries from the Assets database."""
-        pages = await self._query_db(self._db_ids["assets_ds"])
+        assets_ds = self._db_ids.get("assets_ds")
+        if not assets_ds:
+            return []
+        pages = await self._query_db(assets_ds)
         result = []
         for p in pages:
             props = p["properties"]
