@@ -130,6 +130,7 @@ async def main() -> None:
             "Commands:\n"
             "/networth — show your assets summary\n"
             "/refresh — reload categories and recurring payments from Notion\n"
+            "/budget — show budget status\n"
             "/help — show this message",
             parse_mode="Markdown",
         )
@@ -156,6 +157,33 @@ async def main() -> None:
         except Exception as e:
             log.error(f"/networth failed: {e}")
             await msg.answer(f"❌ Couldn't fetch assets.\n`{type(e).__name__}: {str(e)[:80]}`", parse_mode="Markdown")
+
+    @dp.message(Command("budget"))
+    async def handle_budget(msg: Message) -> None:
+        owner = get_owner(msg.from_user.id)
+        if not owner:
+            return
+        try:
+            budgets = await notion.fetch_budgets()
+            if not budgets:
+                await msg.answer("No budgets found. Add them in Notion first (Budget database).")
+                return
+            lines = ["💰 *Budgets*\n"]
+            for b in budgets:
+                if b["percentage"] > 100:
+                    status = "🔴 OVER"
+                elif b["percentage"] > 80:
+                    status = "🟡"
+                else:
+                    status = "🟢"
+                lines.append(
+                    f"{status} *{b['name']}* ({b['period']})\n"
+                    f"  Rp {b['spent']:,.0f} / Rp {b['budget']:,.0f}  ({b['percentage']:.0f}%)"
+                )
+            await msg.answer("\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            log.error(f"/budget failed: {e}")
+            await msg.answer(f"❌ Couldn't fetch budgets.\n`{type(e).__name__}: {str(e)[:80]}`", parse_mode="Markdown")
 
     @dp.message(Command("refresh"))
     async def handle_refresh(msg: Message) -> None:
@@ -463,10 +491,16 @@ async def main() -> None:
     log.info("Email watcher scheduled.")
 
     async def _watch_over(task: asyncio.Task) -> None:
+        nonlocal _watcher_task
         try:
             await task
         except Exception:
-            log.critical("Email watcher task died!", exc_info=True)
+            log.critical("Email watcher died, restarting in 10s...", exc_info=True)
+            await asyncio.sleep(10)
+            _watcher_task = asyncio.create_task(email_watcher.run())
+            _watcher_task.add_done_callback(
+                lambda t: asyncio.ensure_future(_watch_over(t))
+            )
 
     _watcher_task.add_done_callback(
         lambda t: asyncio.ensure_future(_watch_over(t))

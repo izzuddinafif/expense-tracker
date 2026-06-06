@@ -145,6 +145,15 @@ class EmailWatcher:
             imap.login(self._config.gmail_address, self._config.gmail_app_password)
             imap.select("INBOX")
             self._imap = imap
+        else:
+            try:
+                self._imap.noop()
+            except Exception:
+                self._close_imap()
+                imap = imaplib.IMAP4_SSL(IMAP_HOST)
+                imap.login(self._config.gmail_address, self._config.gmail_app_password)
+                imap.select("INBOX")
+                self._imap = imap
         return self._imap
 
     def _close_imap(self) -> None:

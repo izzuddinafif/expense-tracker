@@ -27,6 +27,7 @@ class Config:
     income_subcategories_ds: str
     income_months_ds: str
     income_years_ds: str
+    budget_ds: str
 
     # Telegram user ID → owner name
     users: dict[int, str]
@@ -64,6 +65,7 @@ def load_config() -> Config:
         income_subcategories_ds="ca4c2adf-8454-83bc-bb02-81fcc02735fe",
         income_months_ds="151c2adf-8454-83f6-b6e3-81f471896e43",
         income_years_ds="bb6c2adf-8454-82d7-9b50-8136332ea54e",
+        budget_ds="15ec2adf-8454-83cb-aeaa-01b852752497",
         # Add your Telegram user IDs here
         users={
             981749333: "Afif",

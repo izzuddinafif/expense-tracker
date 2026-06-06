@@ -1,7 +1,10 @@
 import asyncio
+import logging
 import httpx
 from config import Config
 from models import NotionCache, ExpenseEntry, IncomeEntry
+
+log = logging.getLogger(__name__)
 
 
 NOTION_VERSION = "2022-06-28"
@@ -22,11 +25,19 @@ class NotionClient:
         await self._http.aclose()
 
     async def _notion_post(self, url: str, json: dict) -> dict:
-        """POST ke Notion dengan retry untuk 429 (rate limit) dan 5xx."""
+        """POST ke Notion dengan retry untuk transport error, 429, dan 5xx."""
         last_resp = None
+        last_exc = None
         delay = 1.0
         for attempt in range(3):
-            resp = await self._http.post(url, headers=self._headers, json=json)
+            try:
+                resp = await self._http.post(url, headers=self._headers, json=json)
+            except httpx.TransportError as e:
+                last_exc = e
+                log.warning(f"Notion transport error (attempt {attempt + 1}): {e}")
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
             if resp.status_code < 500 and resp.status_code != 429:
                 resp.raise_for_status()
                 return resp.json()
@@ -34,6 +45,8 @@ class NotionClient:
             retry_after = float(resp.headers.get("Retry-After", delay))
             await asyncio.sleep(retry_after)
             delay *= 2
+        if last_exc:
+            raise last_exc
         last_resp.raise_for_status()
         return last_resp.json()
 
@@ -304,6 +317,27 @@ class NotionClient:
                 "last_updated": (props.get("Last Updated", {}).get("date") or {}).get("start", ""),
                 "notes": "".join(t["plain_text"] for t in props.get("Notes", {}).get("rich_text", [])),
             })
+        return result
+
+    async def fetch_budgets(self) -> list[dict]:
+        """Fetch all entries from the Budget database."""
+        pages = await self._query_db(self._config.budget_ds)
+        result = []
+        for p in pages:
+            props = p["properties"]
+            name = self._extract_title(p)
+            budget_amount = props.get("Amount (Input here)", {}).get("number")
+            period = props.get("Period", {}).get("select", {}) or {}
+            spent = props.get("Amount Spent within Period", {}).get("formula", {}).get("number")
+            pct = props.get("Percentage", {}).get("formula", {}).get("number")
+            if budget_amount is not None:
+                result.append({
+                    "name": name,
+                    "budget": budget_amount,
+                    "period": period.get("name", ""),
+                    "spent": spent or 0,
+                    "percentage": pct or 0,
+                })
         return result
 
 
