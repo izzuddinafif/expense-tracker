@@ -391,11 +391,12 @@ class EmailWatcher:
         except Exception as e:
             log.error(f"Failed to log email [{uid}] to Notion: {e}")
             self._notion_fail_streak += 1
-            if self._notion_fail_streak >= 3:
+            if self._notion_fail_streak == 3:
                 await self._alert(
                     f"⚠️ *Email watcher: Notion write failing*\n"
                     f"Failed {self._notion_fail_streak}x in a row.\n"
-                    f"`{type(e).__name__}: {str(e)[:120]}`"
+                    f"`{type(e).__name__}: {str(e)[:120]}`\n"
+                    f"_Will retry, but not alert again until it recovers._"
                 )
             return  # don't mark processed — retry next cycle
 
