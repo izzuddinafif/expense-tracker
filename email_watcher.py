@@ -133,10 +133,27 @@ class EmailWatcher:
         self._owner_id = owner_telegram_id
         self._owner_name = owner_name
         self._alert_fn = alert_fn
+        self._imap: imaplib.IMAP4_SSL | None = None
         self._last_imap_error: str | None = None
         self._notion_fail_streak: int = 0
 
     # ── IMAP (synchronous — called via asyncio.to_thread) ──────────────────────
+
+    def _ensure_imap(self) -> imaplib.IMAP4_SSL:
+        if self._imap is None:
+            imap = imaplib.IMAP4_SSL(IMAP_HOST)
+            imap.login(self._config.gmail_address, self._config.gmail_app_password)
+            imap.select("INBOX")
+            self._imap = imap
+        return self._imap
+
+    def _close_imap(self) -> None:
+        if self._imap is not None:
+            try:
+                self._imap.logout()
+            except Exception:
+                pass
+            self._imap = None
 
     def _imap_fetch(self, processed_uids: set[str]) -> list[tuple[str, str, str, str]]:
         """
@@ -144,11 +161,8 @@ class EmailWatcher:
         Returns list of (uid, sender_email, subject, body_text).
         """
         results = []
-        imap = None
         try:
-            imap = imaplib.IMAP4_SSL(IMAP_HOST)
-            imap.login(self._config.gmail_address, self._config.gmail_app_password)
-            imap.select("INBOX")
+            imap = self._ensure_imap()
 
             # Only fetch emails from the last LOOKBACK_DAYS days
             since = (date.today() - timedelta(days=LOOKBACK_DAYS)).strftime("%d-%b-%Y")
@@ -177,14 +191,10 @@ class EmailWatcher:
         except imaplib.IMAP4.error as e:
             log.error(f"IMAP auth/connection error: {e}")
             self._last_imap_error = str(e)
+            self._close_imap()
         except Exception as e:
             log.error(f"IMAP fetch error: {e}")
-        finally:
-            if imap is not None:
-                try:
-                    imap.logout()
-                except Exception:
-                    pass
+            self._close_imap()
         return results
 
     def _decode_header(self, raw: str) -> str:

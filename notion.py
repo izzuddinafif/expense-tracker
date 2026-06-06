@@ -1,7 +1,7 @@
 import asyncio
 import httpx
 from config import Config
-from models import NotionCache, ExpenseEntry, IncomeEntry, _fuzzy_match
+from models import NotionCache, ExpenseEntry, IncomeEntry
 
 
 NOTION_VERSION = "2022-06-28"
@@ -21,6 +21,22 @@ class NotionClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
+    async def _notion_post(self, url: str, json: dict) -> dict:
+        """POST ke Notion dengan retry untuk 429 (rate limit) dan 5xx."""
+        last_resp = None
+        delay = 1.0
+        for attempt in range(3):
+            resp = await self._http.post(url, headers=self._headers, json=json)
+            if resp.status_code < 500 and resp.status_code != 429:
+                resp.raise_for_status()
+                return resp.json()
+            last_resp = resp
+            retry_after = float(resp.headers.get("Retry-After", delay))
+            await asyncio.sleep(retry_after)
+            delay *= 2
+        last_resp.raise_for_status()
+        return last_resp.json()
+
     async def _query_db(
         self, database_id: str, *, extra_payload: dict | None = None
     ) -> list[dict]:
@@ -28,13 +44,13 @@ class NotionClient:
         url = f"https://api.notion.com/v1/databases/{database_id}/query"
         results = []
         payload: dict = extra_payload.copy() if extra_payload else {}
+        pages = 0
 
         while True:
-            resp = await self._http.post(url, headers=self._headers, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
+            data = await self._notion_post(url, json=payload)
             results.extend(data["results"])
-            if not data.get("has_more"):
+            pages += 1
+            if not data.get("has_more") or pages >= 100:
                 break
             payload["start_cursor"] = data["next_cursor"]
 
@@ -189,13 +205,10 @@ class NotionClient:
             "properties": properties,
         }
 
-        resp = await self._http.post(
-            "https://api.notion.com/v1/pages",
-            headers=self._headers,
-            json=payload,
+        data = await self._notion_post(
+            "https://api.notion.com/v1/pages", json=payload,
         )
-        resp.raise_for_status()
-        return resp.json()["url"]
+        return data["url"]
 
     async def log_income(
         self,
@@ -208,8 +221,8 @@ class NotionClient:
 
         subcategory_match = cache.closest_income_subcategory(entry.subcategory)
         account_match = cache.closest_account(entry.account)
-        month_match = _fuzzy_match(month_str, cache.income_months)
-        year_match = _fuzzy_match(year_str, cache.income_years)
+        month_match = cache.month_url(month_str)
+        year_match = cache.year_url(year_str)
 
         properties: dict = {
             "Description": {
@@ -248,13 +261,10 @@ class NotionClient:
             "properties": properties,
         }
 
-        resp = await self._http.post(
-            "https://api.notion.com/v1/pages",
-            headers=self._headers,
-            json=payload,
+        data = await self._notion_post(
+            "https://api.notion.com/v1/pages", json=payload,
         )
-        resp.raise_for_status()
-        return resp.json()["url"]
+        return data["url"]
 
     async def fetch_expenses(self, owner: str) -> list[dict]:
         """Fetch expenses for a given owner, filtered on the Notion side."""

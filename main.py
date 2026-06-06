@@ -13,7 +13,7 @@ from aiogram.types import (
 
 from config import load_config
 from db import Database
-from models import NotionCache, ExpenseEntry, IncomeEntry
+from models import NotionCache, ExpenseEntry, IncomeEntry, EmailTransaction
 from notion import NotionClient
 from agent import Agent
 from email_watcher import EmailWatcher
