@@ -2,7 +2,7 @@ import asyncio
 import logging
 import httpx
 from config import Config
-from models import NotionCache, ExpenseEntry, IncomeEntry
+from models import NotionCache, ExpenseEntry, IncomeEntry, UserRecord
 
 log = logging.getLogger(__name__)
 
@@ -10,16 +10,115 @@ log = logging.getLogger(__name__)
 NOTION_VERSION = "2022-06-28"
 _HTTP_TIMEOUT = 30.0  # seconds
 
+# Map from db_ids key → expected Notion database title (from the template)
+DB_NAME_MAP = {
+    "expenses_ds":              "Expenses",
+    "subcategories_ds":         "Expenses Sub-categories",
+    "accounts_ds":              "Accounts",
+    "months_ds":                "Month",
+    "years_ds":                 "Year",
+    "recurring_ds":             "Recurring Payment",
+    "assets_ds":                "Assets",
+    "income_ds":                "Income",
+    "income_subcategories_ds":  "Income Sub-categories",
+    "budget_ds":                "Budget",
+    "categories_ds":            "Expenses Categories",
+}
+
 
 class NotionClient:
-    def __init__(self, config: Config) -> None:
+    def __init__(self, notion_token: str, db_ids: dict[str, str]) -> None:
         self._headers = {
-            "Authorization": f"Bearer {config.notion_token}",
+            "Authorization": f"Bearer {notion_token}",
             "Notion-Version": NOTION_VERSION,
             "Content-Type": "application/json",
         }
-        self._config = config
+        self._db_ids = db_ids
         self._http = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
+
+    @classmethod
+    def from_config(cls, config: Config) -> "NotionClient":
+        """Build a NotionClient from the legacy Config (single-tenant)."""
+        db_ids = {
+            "expenses_ds": config.expenses_ds,
+            "subcategories_ds": config.subcategories_ds,
+            "accounts_ds": config.accounts_ds,
+            "months_ds": config.months_ds,
+            "years_ds": config.years_ds,
+            "recurring_ds": config.recurring_ds,
+            "assets_ds": config.assets_ds,
+            "income_ds": config.income_ds,
+            "income_subcategories_ds": config.income_subcategories_ds,
+            "income_months_ds": config.income_months_ds,
+            "income_years_ds": config.income_years_ds,
+            "budget_ds": config.budget_ds,
+            "categories_ds": config.categories_ds,
+        }
+        return cls(notion_token=config.notion_token, db_ids=db_ids)
+
+    @classmethod
+    def from_user(cls, user: UserRecord) -> "NotionClient":
+        """Build a NotionClient from a UserRecord (multi-tenant)."""
+        return cls(notion_token=user.notion_token, db_ids=user.db_ids())
+
+    async def discover_databases(self) -> dict[str, str]:
+        """
+        Search the user's Notion workspace for all databases by name.
+        Returns {field_name: database_id} for every DB found.
+        Raises RuntimeError listing any DBs that couldn't be found.
+        """
+        url = "https://api.notion.com/v1/search"
+        payload = {
+            "filter": {"value": "database", "property": "object"},
+            "page_size": 100,
+        }
+
+        all_databases: dict[str, str] = {}  # title → database_id
+        start_cursor = None
+
+        while True:
+            body = payload.copy()
+            if start_cursor:
+                body["start_cursor"] = start_cursor
+            data = await self._notion_post(url, json=body)
+
+            for db in data.get("results", []):
+                title_parts = db.get("title", [])
+                title = "".join(t.get("plain_text", "") for t in title_parts).strip()
+                if title:
+                    all_databases[title] = db["id"]
+
+            if not data.get("has_more"):
+                break
+            start_cursor = data.get("next_cursor")
+
+        # Match discovered databases to expected names
+        found: dict[str, str] = {}
+        missing: list[str] = []
+
+        for field_name, expected_title in DB_NAME_MAP.items():
+            db_id = all_databases.get(expected_title)
+            if db_id:
+                found[field_name] = db_id
+            else:
+                missing.append(expected_title)
+
+        # Handle shared databases: income_subcategories uses same DB as subcategories
+        # income_months uses same DB as months, income_years uses same DB as years
+        if "subcategories_ds" in found and "income_subcategories_ds" not in found:
+            found["income_subcategories_ds"] = found["subcategories_ds"]
+        if "months_ds" in found and "income_months_ds" not in found:
+            found["income_months_ds"] = found["months_ds"]
+        if "years_ds" in found and "income_years_ds" not in found:
+            found["income_years_ds"] = found["years_ds"]
+
+        if missing:
+            raise RuntimeError(
+                f"Could not find these Notion databases: {', '.join(missing)}. "
+                "Please share the template page with your Notion integration."
+            )
+
+        return found
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -98,7 +197,7 @@ class NotionClient:
         sub_id_to_name = {_url_to_id(url): name for name, url in subcategories.items()}
         acc_id_to_name = {_url_to_id(url): name for name, url in accounts.items()}
 
-        pages = await self._query_db(self._config.recurring_ds)
+        pages = await self._query_db(self._db_ids["recurring_ds"])
         result: dict[int, dict] = {}
 
         for p in pages:
@@ -135,8 +234,8 @@ class NotionClient:
 
         # subcategories and accounts must be ready before _load_recurring
         cache.subcategories, cache.accounts = await asyncio.gather(
-            _load(self._config.subcategories_ds),
-            _load(self._config.accounts_ds),
+            _load(self._db_ids["subcategories_ds"]),
+            _load(self._db_ids["accounts_ds"]),
         )
         (
             cache.months,
@@ -146,11 +245,11 @@ class NotionClient:
             cache.income_years,
             cache.recurring_payments,
         ) = await asyncio.gather(
-            _load(self._config.months_ds),
-            _load(self._config.years_ds),
-            _load(self._config.income_subcategories_ds),
-            _load(self._config.income_months_ds),
-            _load(self._config.income_years_ds),
+            _load(self._db_ids["months_ds"]),
+            _load(self._db_ids["years_ds"]),
+            _load(self._db_ids["income_subcategories_ds"]),
+            _load(self._db_ids["income_months_ds"]),
+            _load(self._db_ids["income_years_ds"]),
             self._load_recurring(cache.subcategories, cache.accounts),
         )
 
@@ -158,7 +257,7 @@ class NotionClient:
         subcat_id_to_name = {
             _url_to_id(url): name for name, url in cache.subcategories.items()
         }
-        cat_pages = await self._query_db(self._config.categories_ds)
+        cat_pages = await self._query_db(self._db_ids["categories_ds"])
         for p in cat_pages:
             cat_name = self._extract_title(p)
             subcat_ids = [
@@ -233,7 +332,7 @@ class NotionClient:
             }
 
         payload = {
-            "parent": {"database_id": self._config.expenses_ds},
+            "parent": {"database_id": self._db_ids["expenses_ds"]},
             "properties": properties,
         }
 
@@ -289,7 +388,7 @@ class NotionClient:
             }
 
         payload = {
-            "parent": {"database_id": self._config.income_ds},
+            "parent": {"database_id": self._db_ids["income_ds"]},
             "properties": properties,
         }
 
@@ -355,7 +454,7 @@ class NotionClient:
                 ]
             }
         }
-        pages = await self._query_db(self._config.expenses_ds, extra_payload=payload)
+        pages = await self._query_db(self._db_ids["expenses_ds"], extra_payload=payload)
         result = []
         for p in pages:
             title_prop = p["properties"].get("Description", {})
@@ -371,7 +470,7 @@ class NotionClient:
                 "title": {"contains": f"[{owner}]"},
             }
         }
-        pages = await self._query_db(self._config.expenses_ds, extra_payload=payload)
+        pages = await self._query_db(self._db_ids["expenses_ds"], extra_payload=payload)
         sub_id_to_name = {_url_to_id(url): name for name, url in (cache.subcategories.items() if cache else {})}
         result = []
         for p in pages:
@@ -402,7 +501,7 @@ class NotionClient:
                 ]
             }
         }
-        pages = await self._query_db(self._config.expenses_ds, extra_payload=payload)
+        pages = await self._query_db(self._db_ids["expenses_ds"], extra_payload=payload)
         result = []
         for p in pages:
             title_prop = p["properties"].get("Description", {})
@@ -420,7 +519,7 @@ class NotionClient:
 
     async def fetch_assets(self) -> list[dict]:
         """Fetch all entries from the Assets database."""
-        pages = await self._query_db(self._config.assets_ds)
+        pages = await self._query_db(self._db_ids["assets_ds"])
         result = []
         for p in pages:
             props = p["properties"]
@@ -442,7 +541,7 @@ class NotionClient:
         if cache is not None:
             sub_id_to_name = {_url_to_id(url): name for name, url in cache.subcategories.items()}
 
-        pages = await self._query_db(self._config.budget_ds)
+        pages = await self._query_db(self._db_ids["budget_ds"])
         result = []
         for p in pages:
             props = p["properties"]

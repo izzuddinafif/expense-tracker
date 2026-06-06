@@ -95,3 +95,55 @@ def _fuzzy_match(name: str, options: dict[str, str]) -> tuple[str, str] | None:
     if candidates:
         return max(candidates, key=lambda kv: len(kv[0]))
     return None
+
+
+# ── User record (multi-tenant) ───────────────────────────────────────────────
+
+@dataclass
+class UserRecord:
+    telegram_id: int
+    owner_name: str
+    notion_token: str
+    expenses_ds: str | None = None
+    subcategories_ds: str | None = None
+    accounts_ds: str | None = None
+    months_ds: str | None = None
+    years_ds: str | None = None
+    recurring_ds: str | None = None
+    assets_ds: str | None = None
+    income_ds: str | None = None
+    income_subcategories_ds: str | None = None
+    income_months_ds: str | None = None
+    income_years_ds: str | None = None
+    budget_ds: str | None = None
+    categories_ds: str | None = None
+    setup_step: str = "start"
+
+    def db_ids(self) -> dict[str, str]:
+        """Return non-None database IDs as a dict."""
+        mapping = {
+            "expenses_ds": self.expenses_ds,
+            "subcategories_ds": self.subcategories_ds,
+            "accounts_ds": self.accounts_ds,
+            "months_ds": self.months_ds,
+            "years_ds": self.years_ds,
+            "recurring_ds": self.recurring_ds,
+            "assets_ds": self.assets_ds,
+            "income_ds": self.income_ds,
+            "income_subcategories_ds": self.income_subcategories_ds,
+            "income_months_ds": self.income_months_ds,
+            "income_years_ds": self.income_years_ds,
+            "budget_ds": self.budget_ds,
+            "categories_ds": self.categories_ds,
+        }
+        return {k: v for k, v in mapping.items() if v is not None}
+
+    @property
+    def is_setup_complete(self) -> bool:
+        return all(v is not None for v in [
+            self.expenses_ds, self.subcategories_ds, self.accounts_ds,
+            self.months_ds, self.years_ds, self.recurring_ds,
+            self.assets_ds, self.income_ds, self.income_subcategories_ds,
+            self.income_months_ds, self.income_years_ds, self.budget_ds,
+            self.categories_ds,
+        ])

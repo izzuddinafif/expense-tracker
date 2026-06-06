@@ -6,7 +6,7 @@ from typing import Any
 
 import aiosqlite
 
-from models import ExpenseEntry, EmailTransaction, IncomeEntry
+from models import ExpenseEntry, EmailTransaction, IncomeEntry, UserRecord
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +73,28 @@ class Database:
                 ON conversation_history(user_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_debit_user
                 ON pending_debit_queue(user_id);
+
+            CREATE TABLE IF NOT EXISTS users (
+                telegram_id              INTEGER PRIMARY KEY,
+                owner_name               TEXT NOT NULL,
+                notion_token             TEXT NOT NULL,
+                expenses_ds              TEXT,
+                subcategories_ds         TEXT,
+                accounts_ds              TEXT,
+                months_ds                TEXT,
+                years_ds                 TEXT,
+                recurring_ds             TEXT,
+                assets_ds                TEXT,
+                income_ds                TEXT,
+                income_subcategories_ds  TEXT,
+                income_months_ds         TEXT,
+                income_years_ds          TEXT,
+                budget_ds                TEXT,
+                categories_ds            TEXT,
+                setup_step               TEXT NOT NULL DEFAULT 'start',
+                created_at               TEXT NOT NULL,
+                updated_at               TEXT NOT NULL
+            );
         """)
         await self._conn.commit()
 
@@ -269,3 +291,113 @@ class Database:
             "DELETE FROM conversation_history WHERE user_id = ?", (user_id,)
         )
         await self._conn.commit()
+
+    # ── Users (multi-tenant) ──────────────────────────────────────────────────
+
+    async def get_user(self, telegram_id: int) -> UserRecord | None:
+        cur = await self._conn.execute(
+            "SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return UserRecord(
+            telegram_id=row["telegram_id"],
+            owner_name=row["owner_name"],
+            notion_token=row["notion_token"],
+            expenses_ds=row["expenses_ds"],
+            subcategories_ds=row["subcategories_ds"],
+            accounts_ds=row["accounts_ds"],
+            months_ds=row["months_ds"],
+            years_ds=row["years_ds"],
+            recurring_ds=row["recurring_ds"],
+            assets_ds=row["assets_ds"],
+            income_ds=row["income_ds"],
+            income_subcategories_ds=row["income_subcategories_ds"],
+            income_months_ds=row["income_months_ds"],
+            income_years_ds=row["income_years_ds"],
+            budget_ds=row["budget_ds"],
+            categories_ds=row["categories_ds"],
+            setup_step=row["setup_step"],
+        )
+
+    async def upsert_user(self, telegram_id: int, **fields) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        # Check if user exists
+        existing = await self.get_user(telegram_id)
+        if existing is None:
+            # Insert new user
+            cols = ["telegram_id", "created_at", "updated_at"] + list(fields.keys())
+            vals = [telegram_id, now, now] + list(fields.values())
+            placeholders = ", ".join(["?"] * len(cols))
+            col_names = ", ".join(cols)
+            await self._conn.execute(
+                f"INSERT INTO users ({col_names}) VALUES ({placeholders})",
+                vals,
+            )
+        else:
+            # Update existing user
+            if fields:
+                set_clause = ", ".join(f"{k} = ?" for k in fields)
+                vals = list(fields.values()) + [now, telegram_id]
+                await self._conn.execute(
+                    f"UPDATE users SET {set_clause}, updated_at = ? WHERE telegram_id = ?",
+                    vals,
+                )
+        await self._conn.commit()
+
+    async def set_user_setup_step(self, telegram_id: int, step: str) -> None:
+        await self.upsert_user(telegram_id, setup_step=step)
+
+    async def get_user_by_name(self, owner_name: str) -> UserRecord | None:
+        cur = await self._conn.execute(
+            "SELECT * FROM users WHERE owner_name = ?", (owner_name,)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return UserRecord(
+            telegram_id=row["telegram_id"],
+            owner_name=row["owner_name"],
+            notion_token=row["notion_token"],
+            expenses_ds=row["expenses_ds"],
+            subcategories_ds=row["subcategories_ds"],
+            accounts_ds=row["accounts_ds"],
+            months_ds=row["months_ds"],
+            years_ds=row["years_ds"],
+            recurring_ds=row["recurring_ds"],
+            assets_ds=row["assets_ds"],
+            income_ds=row["income_ds"],
+            income_subcategories_ds=row["income_subcategories_ds"],
+            income_months_ds=row["income_months_ds"],
+            income_years_ds=row["income_years_ds"],
+            budget_ds=row["budget_ds"],
+            categories_ds=row["categories_ds"],
+            setup_step=row["setup_step"],
+        )
+
+    async def get_all_users(self) -> dict[int, UserRecord]:
+        cur = await self._conn.execute("SELECT * FROM users")
+        rows = await cur.fetchall()
+        result: dict[int, UserRecord] = {}
+        for row in rows:
+            result[row["telegram_id"]] = UserRecord(
+                telegram_id=row["telegram_id"],
+                owner_name=row["owner_name"],
+                notion_token=row["notion_token"],
+                expenses_ds=row["expenses_ds"],
+                subcategories_ds=row["subcategories_ds"],
+                accounts_ds=row["accounts_ds"],
+                months_ds=row["months_ds"],
+                years_ds=row["years_ds"],
+                recurring_ds=row["recurring_ds"],
+                assets_ds=row["assets_ds"],
+                income_ds=row["income_ds"],
+                income_subcategories_ds=row["income_subcategories_ds"],
+                income_months_ds=row["income_months_ds"],
+                income_years_ds=row["income_years_ds"],
+                budget_ds=row["budget_ds"],
+                categories_ds=row["categories_ds"],
+                setup_step=row["setup_step"],
+            )
+        return result
