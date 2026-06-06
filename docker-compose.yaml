@@ -4,4 +4,4 @@ services:
     env_file: .env
     restart: unless-stopped
     volumes:
-      - ./expense_tracker.db:/app/expense_tracker.db
+      - ./data:/app/data

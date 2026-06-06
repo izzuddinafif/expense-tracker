@@ -92,7 +92,24 @@ async def main() -> None:
             "📸 A photo of a receipt → I'll log it\n"
             "💬 A text like 'Nasi goreng 25k cash' → I'll log it\n"
             "❓ A question like 'How much did I spend this month?' → I'll answer\n\n"
+            "/help — show what I can do\n"
             "/refresh — reload categories from Notion"
+        )
+
+    @dp.message(Command("help"))
+    async def handle_help(msg: Message) -> None:
+        owner = get_owner(msg.from_user.id)
+        if not owner:
+            return
+        await msg.answer(
+            "Here's what I can do:\n\n"
+            "📸 *Receipt photo* — send a photo of a receipt and I'll extract and log the expense\n"
+            "💬 *Text expense* — describe it naturally: `Nasi goreng 25k cash`\n"
+            "❓ *Spending query* — ask anything: `How much did I spend this week?`\n\n"
+            "Commands:\n"
+            "/refresh — reload categories and recurring payments from Notion\n"
+            "/help — show this message",
+            parse_mode="Markdown",
         )
 
     @dp.message(Command("refresh"))
