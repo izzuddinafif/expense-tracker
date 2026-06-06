@@ -71,11 +71,11 @@ class NotionCache:
     def closest_account(self, name: str) -> tuple[str, str] | None:
         return _fuzzy_match(name, self.accounts)
 
-    def month_url(self, month_name: str) -> str | None:
-        return self.months.get(month_name)
+    def month_url(self, month_name: str) -> tuple[str, str] | None:
+        return _fuzzy_match(month_name, self.months)
 
-    def year_url(self, year: str) -> str | None:
-        return self.years.get(year)
+    def year_url(self, year: str) -> tuple[str, str] | None:
+        return _fuzzy_match(year, self.years)
 
 
 def _fuzzy_match(name: str, options: dict[str, str]) -> tuple[str, str] | None:

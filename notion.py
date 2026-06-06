@@ -1,6 +1,6 @@
 import httpx
 from config import Config
-from models import NotionCache, ExpenseEntry, IncomeEntry
+from models import NotionCache, ExpenseEntry, IncomeEntry, _fuzzy_match
 
 
 NOTION_VERSION = "2022-06-28"
@@ -136,8 +136,8 @@ class NotionClient:
 
         subcategory_match = cache.closest_subcategory(entry.subcategory)
         account_match = cache.closest_account(entry.account)
-        month_url = cache.month_url(month_str)
-        year_url = cache.year_url(year_str)
+        month_match = cache.month_url(month_str)
+        year_match = cache.year_url(year_str)
 
         properties: dict = {
             "Description": {
@@ -159,12 +159,14 @@ class NotionClient:
                 "relation": [{"id": _url_to_id(acc_url)}]
             }
 
-        if month_url:
+        if month_match:
+            _, month_url = month_match
             properties["Month"] = {
                 "relation": [{"id": _url_to_id(month_url)}]
             }
 
-        if year_url:
+        if year_match:
+            _, year_url = year_match
             properties["Year"] = {
                 "relation": [{"id": _url_to_id(year_url)}]
             }
@@ -205,8 +207,8 @@ class NotionClient:
 
         subcategory_match = cache.closest_income_subcategory(entry.subcategory)
         account_match = cache.closest_account(entry.account)
-        month_url = cache.income_months.get(month_str)
-        year_url = cache.income_years.get(year_str)
+        month_match = _fuzzy_match(month_str, cache.income_months)
+        year_match = _fuzzy_match(year_str, cache.income_years)
 
         properties: dict = {
             "Description": {
@@ -228,12 +230,14 @@ class NotionClient:
                 "relation": [{"id": _url_to_id(acc_url)}]
             }
 
-        if month_url:
+        if month_match:
+            _, month_url = month_match
             properties["Month"] = {
                 "relation": [{"id": _url_to_id(month_url)}]
             }
 
-        if year_url:
+        if year_match:
+            _, year_url = year_match
             properties["Year"] = {
                 "relation": [{"id": _url_to_id(year_url)}]
             }
