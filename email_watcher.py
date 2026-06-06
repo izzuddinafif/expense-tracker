@@ -28,6 +28,7 @@ from html.parser import HTMLParser
 from typing import Callable
 
 from db import Database
+from keyboards import make_category_keyboard, make_change_category_button
 from models import ExpenseEntry, EmailTransaction, NotionCache
 from notion import _url_to_id
 
@@ -35,26 +36,6 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-
-
-def _make_category_keyboard(page_id: str, cache: NotionCache) -> InlineKeyboardMarkup:
-    buttons = [
-        [InlineKeyboardButton(
-            text=cat,
-            callback_data=f"cat_pick:{page_id}:{i}",
-        )]
-        for i, cat in enumerate(cache.category_subcategories)
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-def _make_change_category_button(page_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text="🏷 Ganti kategori",
-            callback_data=f"cat_back:{page_id}",
-        )
-    ]])
 
 log = logging.getLogger(__name__)
 
@@ -400,7 +381,7 @@ class EmailWatcher:
                             f"💰 Rp {tx.amount:,.0f}\n"
                             f"📅 {tx.date}\n"
                             f"[Lihat di Notion]({url})",
-                            _make_change_category_button(page_id),
+                            make_change_category_button(page_id),
                         )
                     else:
                         log.info(
@@ -436,7 +417,7 @@ class EmailWatcher:
                             f"🏦 {tx.account}\n\n"
                             f"⚠️ Kategori tidak ditemukan, pilih kategori:\n"
                             f"[Lihat di Notion]({url})",
-                            _make_category_keyboard(page_id, cache),
+                            make_category_keyboard(page_id, cache),
                         )
                     else:
                         await self._notify_with_markup(
@@ -447,7 +428,7 @@ class EmailWatcher:
                             f"🏷 {tx.subcategory}\n"
                             f"🏦 {tx.account}\n"
                             f"[Lihat di Notion]({url})",
-                            _make_change_category_button(page_id),
+                            make_change_category_button(page_id),
                         )
 
             elif tx.type == "self_transfer":
@@ -470,7 +451,7 @@ class EmailWatcher:
                         f"📧 *Transfer sendiri* Rp {tx.amount:,.0f} → {dest}\n"
                         f"Biaya admin tercatat: 💰 Rp {tx.admin_fee:,.0f}\n"
                         f"[Lihat di Notion]({url})",
-                        _make_change_category_button(fee_page_id),
+                        make_change_category_button(fee_page_id),
                     )
                 else:
                     await self._notify(
