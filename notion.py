@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import httpx
-from config import Config
 from models import NotionCache, ExpenseEntry, IncomeEntry, UserRecord
 
 log = logging.getLogger(__name__)
@@ -34,26 +33,6 @@ class NotionClient:
         }
         self._db_ids = db_ids
         self._http = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
-
-    @classmethod
-    def from_config(cls, config: Config) -> "NotionClient":
-        """Build a NotionClient from the legacy Config (single-tenant)."""
-        db_ids = {
-            "expenses_ds": config.expenses_ds,
-            "subcategories_ds": config.subcategories_ds,
-            "accounts_ds": config.accounts_ds,
-            "months_ds": config.months_ds,
-            "years_ds": config.years_ds,
-            "recurring_ds": config.recurring_ds,
-            "assets_ds": config.assets_ds,
-            "income_ds": config.income_ds,
-            "income_subcategories_ds": config.income_subcategories_ds,
-            "income_months_ds": config.income_months_ds,
-            "income_years_ds": config.income_years_ds,
-            "budget_ds": config.budget_ds,
-            "categories_ds": config.categories_ds,
-        }
-        return cls(notion_token=config.notion_token, db_ids=db_ids)
 
     @classmethod
     def from_user(cls, user: UserRecord) -> "NotionClient":
@@ -424,6 +403,13 @@ class NotionClient:
             raise last_exc
         last_resp.raise_for_status()
         return last_resp.json()
+
+    async def archive_page(self, page_id: str) -> None:
+        """Archive (soft-delete) a Notion page by ID. Used for undo."""
+        await self._notion_patch(
+            f"https://api.notion.com/v1/pages/{page_id}",
+            {"archived": True},
+        )
 
     async def update_expense_subcategory(
         self, page_id: str, subcategory_name: str, cache: NotionCache

@@ -74,6 +74,24 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_debit_user
                 ON pending_debit_queue(user_id);
 
+            CREATE TABLE IF NOT EXISTS email_account_owners (
+                account_pattern TEXT PRIMARY KEY,
+                telegram_id    INTEGER NOT NULL,
+                created_at     TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS pending_recurring (
+                user_id            INTEGER PRIMARY KEY,
+                entry_json         TEXT NOT NULL,
+                recurring_page_url TEXT,
+                uid                TEXT NOT NULL,
+                sender             TEXT NOT NULL,
+                created_at         TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_email_owner
+                ON email_account_owners(telegram_id);
+
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id              INTEGER PRIMARY KEY,
                 owner_name               TEXT NOT NULL,
@@ -313,6 +331,80 @@ class Database:
     async def clear_history(self, user_id: int) -> None:
         await self._conn.execute(
             "DELETE FROM conversation_history WHERE user_id = ?", (user_id,)
+        )
+        await self._conn.commit()
+
+    # ── Email account owners (multi-user email watcher) ───────────────────────
+
+    async def set_email_account_owner(self, account_pattern: str, telegram_id: int) -> None:
+        await self._conn.execute(
+            "INSERT OR REPLACE INTO email_account_owners (account_pattern, telegram_id, created_at) VALUES (?, ?, ?)",
+            (account_pattern, telegram_id, datetime.now(timezone.utc).isoformat()),
+        )
+        await self._conn.commit()
+
+    async def remove_email_account_owner(self, account_pattern: str) -> None:
+        await self._conn.execute(
+            "DELETE FROM email_account_owners WHERE account_pattern = ?", (account_pattern,)
+        )
+        await self._conn.commit()
+
+    async def get_email_owner_for_account(self, account_name: str) -> int | None:
+        """Fuzzy match an account name to a telegram_id. Exact match first, then substring."""
+        cur = await self._conn.execute("SELECT account_pattern, telegram_id FROM email_account_owners")
+        rows = await cur.fetchall()
+        # exact match
+        for row in rows:
+            if row["account_pattern"].lower() == account_name.lower():
+                return row["telegram_id"]
+        # substring match: account_name contains pattern, or pattern contains account_name
+        for row in rows:
+            pat_lower = row["account_pattern"].lower()
+            if pat_lower in account_name.lower() or account_name.lower() in pat_lower:
+                return row["telegram_id"]
+        return None
+
+    async def get_all_email_account_owners(self) -> dict[str, int]:
+        cur = await self._conn.execute("SELECT account_pattern, telegram_id FROM email_account_owners")
+        rows = await cur.fetchall()
+        return {row["account_pattern"]: row["telegram_id"] for row in rows}
+
+    async def get_email_accounts_for_user(self, telegram_id: int) -> list[str]:
+        cur = await self._conn.execute(
+            "SELECT account_pattern FROM email_account_owners WHERE telegram_id = ?", (telegram_id,)
+        )
+        rows = await cur.fetchall()
+        return [row["account_pattern"] for row in rows]
+
+    # ── Pending recurring (one-tap confirm for recurring expenses) ────────────
+
+    async def set_pending_recurring(
+        self, user_id: int, entry: ExpenseEntry, recurring_page_url: str | None, uid: str, sender: str
+    ) -> None:
+        await self._conn.execute(
+            "INSERT OR REPLACE INTO pending_recurring (user_id, entry_json, recurring_page_url, uid, sender, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, entry.model_dump_json(), recurring_page_url or "", uid, sender, datetime.now(timezone.utc).isoformat()),
+        )
+        await self._conn.commit()
+
+    async def get_pending_recurring(self, user_id: int) -> dict | None:
+        cur = await self._conn.execute(
+            "SELECT * FROM pending_recurring WHERE user_id = ?", (user_id,)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "entry": ExpenseEntry.model_validate_json(row["entry_json"]),
+            "recurring_page_url": row["recurring_page_url"] or None,
+            "uid": row["uid"],
+            "sender": row["sender"],
+        }
+
+    async def clear_pending_recurring(self, user_id: int) -> None:
+        await self._conn.execute(
+            "DELETE FROM pending_recurring WHERE user_id = ?", (user_id,)
         )
         await self._conn.commit()
 

@@ -143,7 +143,7 @@ class UserRecord:
         return all(v is not None for v in [
             self.expenses_ds, self.subcategories_ds, self.accounts_ds,
             self.months_ds, self.years_ds, self.recurring_ds,
-            self.assets_ds, self.income_ds, self.income_subcategories_ds,
+            self.income_ds, self.income_subcategories_ds,
             self.income_months_ds, self.income_years_ds, self.budget_ds,
             self.categories_ds,
         ])

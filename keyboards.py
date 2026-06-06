@@ -40,6 +40,12 @@ def make_category_keyboard(page_id: str, cache: NotionCache) -> InlineKeyboardMa
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def make_undo_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="↩️ Undo", callback_data=f"undo:{user_id}"),
+    ]])
+
+
 def make_subcategory_keyboard(
     page_id: str, cat_index: int, cache: NotionCache
 ) -> InlineKeyboardMarkup:

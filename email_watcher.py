@@ -28,9 +28,8 @@ from html.parser import HTMLParser
 from typing import Callable
 
 from db import Database
-from keyboards import make_category_keyboard
+from keyboards import make_category_keyboard, make_confirm_keyboard
 from models import ExpenseEntry, EmailTransaction, NotionCache
-from notion import _url_to_id
 
 from aiogram.types import (
     InlineKeyboardMarkup,
@@ -106,16 +105,21 @@ class EmailWatcher:
     Background task that polls Gmail via IMAP every `interval` seconds,
     parses bank notification emails, and logs transactions to Notion.
 
+    Supports multi-user routing: after parsing, the account name is looked up
+    in the email_account_owners DB table to find the target Telegram user.
+    If no match is found, falls back to the default email owner.
+
     Parameters
     ----------
     config            : app Config
     db                : Database instance for persistence
-    notion            : NotionClient instance
+    notion            : NotionClient instance (default email owner)
     agent             : Agent instance
-    cache_getter      : zero-arg callable returning current NotionCache
+    cache_getter      : zero-arg callable returning current NotionCache (default)
     bot               : aiogram Bot instance (for Telegram notifications)
-    owner_telegram_id : Telegram user_id to notify (email account owner)
-    owner_name        : owner name string (e.g. "Afif") for Notion expense prefix
+    email_owner_id    : default Telegram user_id (fallback when no account match)
+    email_owner_name  : default owner name string (fallback)
+    user_data_fn      : optional async fn(telegram_id) -> (NotionClient, NotionCache, owner_name) | None
     alert_fn          : async fn(text) that broadcasts to all users
     """
 
@@ -127,10 +131,10 @@ class EmailWatcher:
         agent,
         cache_getter: Callable,
         bot=None,
-        owner_telegram_id: int | None = None,
-        owner_name: str = "Afif",
+        email_owner_id: int | None = None,
+        email_owner_name: str = "Afif",
+        user_data_fn=None,
         alert_fn=None,
-        page_desc: dict[str, str] | None = None,
     ):
         self._config = config
         self._db = db
@@ -138,10 +142,10 @@ class EmailWatcher:
         self._agent = agent
         self._cache_getter = cache_getter
         self._bot = bot
-        self._owner_id = owner_telegram_id
-        self._owner_name = owner_name
+        self._owner_id = email_owner_id
+        self._owner_name = email_owner_name
+        self._user_data_fn = user_data_fn
         self._alert_fn = alert_fn
-        self._page_desc = page_desc or {}
         self._imap: imaplib.IMAP4_SSL | None = None
         self._last_imap_error: str | None = None
         self._notion_fail_streak: int = 0
@@ -253,10 +257,11 @@ class EmailWatcher:
 
         return html_to_text(html_body) if html_body else text_body.strip()
 
-    async def _check_budget_alert(self, entry: ExpenseEntry) -> None:
+    async def _check_budget_alert(self, entry: ExpenseEntry, notion=None, cache=None) -> None:
         try:
-            cache = self._cache_getter()
-            budgets = await self._notion.fetch_budgets(cache)
+            notion = notion or self._notion
+            cache = cache or self._cache_getter()
+            budgets = await notion.fetch_budgets(cache)
             for b in budgets:
                 if entry.subcategory not in b["subcategories"]:
                     continue
@@ -271,26 +276,27 @@ class EmailWatcher:
                         f"🟡 *Budget Alert!* Anggaran *{b['name']}* hampir habis.\n"
                         f"Rp {b['spent']:,.0f} / Rp {b['budget']:,.0f} ({pct:.0f}%)"
                     )
-                break
         except Exception as e:
             log.warning(f"Budget alert check failed: {e}")
 
     # ── Notification helpers ────────────────────────────────────────────────────
 
-    async def _notify(self, text: str) -> None:
-        if self._bot and self._owner_id:
+    async def _notify(self, text: str, user_id: int | None = None) -> None:
+        target = user_id or self._owner_id
+        if self._bot and target:
             try:
                 await self._bot.send_message(
-                    self._owner_id, text, parse_mode="Markdown"
+                    target, text, parse_mode="Markdown"
                 )
             except Exception as e:
                 log.error(f"Telegram notify failed: {e}")
 
-    async def _notify_with_markup(self, text: str, markup: InlineKeyboardMarkup) -> None:
-        if self._bot and self._owner_id:
+    async def _notify_with_markup(self, text: str, markup: InlineKeyboardMarkup, user_id: int | None = None) -> None:
+        target = user_id or self._owner_id
+        if self._bot and target:
             try:
                 await self._bot.send_message(
-                    self._owner_id, text, parse_mode="Markdown",
+                    target, text, parse_mode="Markdown",
                     reply_markup=markup,
                 )
             except Exception as e:
@@ -305,7 +311,7 @@ class EmailWatcher:
         else:
             await self._notify(text)
 
-    async def _ask_debit_merchant(self, tx: EmailTransaction) -> bool:
+    async def _ask_debit_merchant(self, tx: EmailTransaction, user_id: int | None = None) -> bool:
         """
         For a Jago debit card tx with no merchant info:
         - if no tx is currently pending, promote this one and notify
@@ -315,16 +321,17 @@ class EmailWatcher:
         Returns False if Telegram notification failed for a newly-promoted tx,
         so the caller can avoid marking the email as processed.
         """
-        if self._owner_id is None:
+        target = user_id or self._owner_id
+        if target is None:
             return False
 
-        current = await self._db.get_pending_email_expense(self._owner_id)
+        current = await self._db.get_pending_email_expense(target)
         if current is None:
-            await self._db.set_pending_email_expense(self._owner_id, tx)
+            await self._db.set_pending_email_expense(target, tx)
             if self._bot:
                 try:
                     await self._bot.send_message(
-                        self._owner_id,
+                        target,
                         f"💳 *Kartu debit Jago* — Rp {tx.amount:,.0f}\n"
                         f"📅 {tx.date}  🏦 {tx.account}\n\n"
                         f"Beli apa? Balas dengan nama merchant atau deskripsi.\n"
@@ -333,17 +340,33 @@ class EmailWatcher:
                     )
                 except Exception as e:
                     log.error(f"Telegram notify failed for Jago debit follow-up: {e}")
-                    await self._db.clear_pending_email_expense(self._owner_id)
+                    await self._db.clear_pending_email_expense(target)
                     return False
             return True
         else:
-            await self._db.push_debit(self._owner_id, tx)
-            depth = await self._db.debit_queue_depth(self._owner_id)
+            await self._db.push_debit(target, tx)
+            depth = await self._db.debit_queue_depth(target)
             log.info(
                 f"[email] Queued Jago debit card Rp {tx.amount:,.0f} "
                 f"(queue depth: {depth})"
             )
             return True
+
+    # ── User resolution (multi-user routing) ────────────────────────────────────
+
+    async def _resolve_user(self, account_name: str) -> tuple[int, str, object, object] | None:
+        """
+        Look up the Telegram user who owns a given bank account.
+        Returns (telegram_id, owner_name, NotionClient, NotionCache) or None.
+        """
+        telegram_id = await self._db.get_email_owner_for_account(account_name)
+        if telegram_id is None:
+            return None
+        if self._user_data_fn:
+            data = await self._user_data_fn(telegram_id)
+            if data:
+                return (telegram_id, data[2], data[0], data[1])
+        return None
 
     # ── Email processing ────────────────────────────────────────────────────────
 
@@ -374,12 +397,20 @@ class EmailWatcher:
             await self._db.mark_processed(uid, sender)
             return
 
-        owner = self._owner_name
+        # ── Multi-user routing ───────────────────────────────────────────────────
+        resolved = await self._resolve_user(tx.account)
+        if resolved:
+            target_id, target_owner, target_notion, target_cache = resolved
+        else:
+            target_id = self._owner_id
+            target_owner = self._owner_name
+            target_notion = self._notion
+            target_cache = cache
 
         try:
             if tx.type == "expense":
                 if tx.description.lower() == JAGO_DEBIT_DESCRIPTION:
-                    recurring = cache.recurring_payments.get(int(round(tx.amount)))
+                    recurring = target_cache.recurring_payments.get(int(round(tx.amount)))
 
                     if recurring:
                         entry = ExpenseEntry(
@@ -390,30 +421,39 @@ class EmailWatcher:
                             account=recurring["account"] or tx.account,
                             confidence=1.0,
                         )
-                        url = await self._notion.log_expense(
-                            entry, owner, cache,
-                            recurring_page_url=recurring["page_url"],
+                        # Store in both pending_expenses (for edit/confirm flow)
+                        # and pending_recurring (to mark email processed on confirm)
+                        await self._db.set_pending_expense(target_id, entry)
+                        await self._db.set_pending_recurring(
+                            target_id, entry, recurring["page_url"], uid, sender,
                         )
-                        page_id = _url_to_id(url)
-                        self._page_desc[page_id] = entry.description
-                        asyncio.create_task(self._check_budget_alert(entry))
-                        log.info(
-                            f"[email→Notion] Recurring: {entry.description} "
-                            f"Rp {tx.amount:,.0f}"
-                        )
-                        await self._notify(
-                            f"🔁 *Otomatis tercatat (rutin)*\n"
+                        sub_label = target_cache.closest_subcategory(entry.subcategory)
+                        sub_text = sub_label[0] if sub_label else entry.subcategory
+                        acc_label = target_cache.closest_account(entry.account)
+                        acc_text = acc_label[0] if acc_label else entry.account
+                        await self._notify_with_markup(
+                            f"🔁 *Pembayaran rutin*\n"
                             f"📝 {entry.description}\n"
-                            f"💰 Rp {tx.amount:,.0f}\n"
-                            f"📅 {tx.date}\n"
-                            f"[Lihat di Notion]({url})",
+                            f"💰 Rp {entry.amount:,.0f}\n"
+                            f"📅 {entry.date}\n"
+                            f"🏷 {sub_text}\n"
+                            f"🏦 {acc_text}\n\n"
+                            f"Konfirmasi:",
+                            make_confirm_keyboard(target_id),
+                            user_id=target_id,
                         )
+                        log.info(
+                            f"[email] Recurring Rp {tx.amount:,.0f} ({recurring['name']}) "
+                            f"— waiting for user confirmation via Simpan/Edit/Batal"
+                        )
+                        await self._db.mark_processed(uid, sender)
+                        return
                     else:
                         log.info(
                             f"[email] Jago debit card Rp {tx.amount:,.0f} "
                             f"— asking user for merchant"
                         )
-                        handled = await self._ask_debit_merchant(tx)
+                        handled = await self._ask_debit_merchant(tx, user_id=target_id)
                         if not handled:
                             return  # notify failed — don't mark processed, retry next cycle
 
@@ -426,26 +466,23 @@ class EmailWatcher:
                         account=tx.account,
                         confidence=0.95,
                     )
-                    url = await self._notion.log_expense(entry, owner, cache)
-                    page_id = _url_to_id(url)
-                    self._page_desc[page_id] = entry.description
-                    asyncio.create_task(self._check_budget_alert(entry))
-                    subcat_match = cache.closest_subcategory(tx.subcategory)
+                    url = await target_notion.log_expense(entry, target_owner, target_cache)
+                    asyncio.create_task(self._check_budget_alert(entry, notion=target_notion, cache=target_cache))
+                    subcat_match = target_cache.closest_subcategory(tx.subcategory)
                     log.info(
                         f"[email→Notion] {tx.description} "
                         f"Rp {tx.amount:,.0f} [{tx.subcategory}]"
                     )
                     if subcat_match is None:
-                        markup = make_category_keyboard(page_id, cache)
-                        await self._notify_with_markup(
+                        await self._notify(
                             f"📧 *Otomatis tercatat dari email*\n"
                             f"📝 {tx.description}\n"
                             f"💰 Rp {tx.amount:,.0f}\n"
                             f"📅 {tx.date}\n"
-                            f"🏦 {tx.account}\n\n"
-                            f"⚠️ Kategori tidak ditemukan, pilih kategori:\n"
+                            f"🏦 {tx.account}\n"
+                            f"⚠️ Kategori belum dipilih. Buka Notion untuk mengatur.\n"
                             f"[Lihat di Notion]({url})",
-                            markup,
+                            user_id=target_id,
                         )
                     else:
                         await self._notify(
@@ -456,6 +493,7 @@ class EmailWatcher:
                             f"🏷 {tx.subcategory}\n"
                             f"🏦 {tx.account}\n"
                             f"[Lihat di Notion]({url})",
+                            user_id=target_id,
                         )
 
             elif tx.type == "self_transfer":
@@ -471,19 +509,19 @@ class EmailWatcher:
                         account=tx.account,
                         confidence=0.9,
                     )
-                    url = await self._notion.log_expense(fee_entry, owner, cache)
-                    fee_page_id = _url_to_id(url)
-                    self._page_desc[fee_page_id] = fee_entry.description
+                    url = await target_notion.log_expense(fee_entry, target_owner, target_cache)
                     log.info(f"[email→Notion] Admin fee Rp {tx.admin_fee:,.0f} logged")
                     await self._notify(
                         f"📧 *Transfer sendiri* Rp {tx.amount:,.0f} → {dest}\n"
                         f"Biaya admin tercatat: 💰 Rp {tx.admin_fee:,.0f}\n"
                         f"[Lihat di Notion]({url})",
+                        user_id=target_id,
                     )
                 else:
                     await self._notify(
                         f"📧 *Transfer sendiri* Rp {tx.amount:,.0f} → {dest}\n"
-                        f"Tidak ada biaya admin — tidak dicatat."
+                        f"Tidak ada biaya admin — tidak dicatat.",
+                        user_id=target_id,
                     )
 
             else:

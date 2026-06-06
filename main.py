@@ -19,6 +19,7 @@ from keyboards import (
     make_category_keyboard,
     make_subcategory_keyboard,
     make_edit_field_keyboard,
+    make_undo_keyboard,
 )
 from models import NotionCache, ExpenseEntry, IncomeEntry, EmailTransaction
 from notion import NotionClient, _url_to_id
@@ -45,9 +46,10 @@ async def main() -> None:
     agent = Agent(config)
 
     pending_edit: dict[int, str] = {}
-    page_desc: dict[str, str] = {}
     photo_queue: dict[int, list[str]] = {}
     processing_group: set[int] = set()
+    email_cache_holder: list[NotionCache] = []
+    last_saved_page: dict[int, str] = {}  # user_id → notion page_id (for undo)
 
     async def alert_owner(text: str) -> None:
         all_users = await db.get_all_users()
@@ -284,14 +286,14 @@ async def main() -> None:
             await run_setup(msg)
             return
         await msg.answer(
-            f"Halo {user.owner_name}\\! 👋\n\n"
+            f"Halo {user.owner_name}! 👋\n\n"
             "Kirim ke saya:\n"
             "📸 *Foto struk* → otomatis ekstrak & catat\n"
             "💬 *Teks* kayak `Nasi goreng 25k cash` → langsung dicatat\n"
             "❓ *Pertanyaan* kayak `Berapa pengeluaran bulan ini?` → dijawab\n"
             "💰 *Pemasukan* kayak `Gaji bulanan masuk 3 juta` → dicatat\n\n"
-            "Ketik /help untuk bantuan lengkap\\.",
-            parse_mode="MarkdownV2",
+            "Ketik /help untuk bantuan lengkap.",
+            parse_mode="Markdown",
         )
 
     @dp.message(Command("help"))
@@ -321,6 +323,7 @@ async def main() -> None:
             "/search <kata kunci> — cari pengeluaran\n"
             "/stats — ringkasan pengeluaran bulan ini\n"
             "/refresh — muat ulang data kategori dari Notion\n"
+            "/linkemail — hubungkan akun bank ke email watcher\n"
             "/help — tampilkan pesan ini",
             parse_mode="Markdown",
         )
@@ -399,6 +402,50 @@ async def main() -> None:
             log.error(f"/budget failed: {e}")
             await msg.answer(f"❌ Gagal ambil data anggaran.\n`{type(e).__name__}: {str(e)[:80]}`", parse_mode="Markdown")
 
+    @dp.message(Command("linkemail"))
+    async def handle_linkemail(msg: Message) -> None:
+        user_id = msg.from_user.id
+        result = await get_user_notion(user_id)
+        if not result:
+            await msg.answer("Ketik /setup dulu untuk menghubungkan Notion.")
+            return
+
+        parts = msg.text.strip().split(maxsplit=2)
+        cmd = parts[1].lower() if len(parts) > 1 else "list"
+
+        if cmd == "list":
+            accounts = await db.get_email_accounts_for_user(user_id)
+            if not accounts:
+                await msg.answer(
+                    "📧 *Email account links*\n\n"
+                    "Belum ada akun yang terhubung.\n"
+                    "Gunakan: `/linkemail <nama_bank>` untuk menghubungkan.\n"
+                    "Contoh: `/linkemail Mandiri`\n\n"
+                    "Setelah di-link, email dari bank tersebut akan "
+                    "dirutekan ke chat ini.",
+                    parse_mode="Markdown",
+                )
+            else:
+                lines = ["📧 *Akun email terhubung:*\n"]
+                for a in accounts:
+                    lines.append(f"• {a}")
+                lines.append("\nGunakan `/linkemail remove <nama>` untuk putuskan.")
+                await msg.answer("\n".join(lines), parse_mode="Markdown")
+
+        elif cmd == "remove" and len(parts) >= 3:
+            pattern = parts[2].strip()
+            await db.remove_email_account_owner(pattern)
+            await msg.answer(f"✅ Akun `{pattern}` telah diputuskan.", parse_mode="Markdown")
+
+        else:
+            pattern = cmd
+            await db.set_email_account_owner(pattern, user_id)
+            await msg.answer(
+                f"✅ Akun `{pattern}` terhubung!\n\n"
+                f"Email yang menyebutkan akun ini akan dirutekan ke chat kamu.",
+                parse_mode="Markdown",
+            )
+
     @dp.message(Command("refresh"))
     async def handle_refresh(msg: Message) -> None:
         user_id = msg.from_user.id
@@ -411,6 +458,8 @@ async def main() -> None:
         try:
             new_cache = await user_notion.load_cache()
             user_caches[user_id] = new_cache
+            if email_cache_holder and email_owner_record and user_id == email_owner_record.telegram_id:
+                email_cache_holder[0] = new_cache
             await msg.answer(
                 f"✅ Selesai! {len(new_cache.subcategories)} subkategori pengeluaran, "
                 f"{len(new_cache.income_subcategories)} subkategori pemasukan, "
@@ -840,13 +889,20 @@ async def main() -> None:
 
         status_msg = await callback.message.answer("⏳ Menyimpan ke Notion...")
         try:
-            url = await user_notion.log_expense(entry, owner, user_cache)
+            # Check for recurring expense link before logging
+            pending_rec = await db.get_pending_recurring(user_id)
+            rec_page_url = pending_rec["recurring_page_url"] if pending_rec else None
+
+            url = await user_notion.log_expense(entry, owner, user_cache, recurring_page_url=rec_page_url)
             await db.clear_pending_expense(user_id)
+            if pending_rec:
+                await db.clear_pending_recurring(user_id)
             page_id = _url_to_id(url)
-            page_desc[page_id] = entry.description
+            last_saved_page[user_id] = page_id
             await status_msg.edit_text(
                 f"✅ Tersimpan! [Lihat di Notion]({url})",
                 parse_mode="Markdown",
+                reply_markup=make_undo_keyboard(user_id),
             )
             asyncio.ensure_future(_process_next_photo(user_id, owner))
         except Exception as e:
@@ -877,7 +933,7 @@ async def main() -> None:
             return
         pending_edit[user_id] = "desc"
         await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.answer()
+        await callback.answer("Ketik deskripsi baru")
         await callback.message.answer("✏️ Ketik deskripsi baru:")
 
     @dp.callback_query(F.data.startswith("edit_amount:"))
@@ -889,7 +945,7 @@ async def main() -> None:
             return
         pending_edit[user_id] = "amount"
         await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.answer()
+        await callback.answer("Ketik jumlah baru")
         await callback.message.answer("✏️ Ketik jumlah baru (contoh: 25000):")
 
     @dp.callback_query(F.data.startswith("edit_date:"))
@@ -901,7 +957,7 @@ async def main() -> None:
             return
         pending_edit[user_id] = "date"
         await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.answer()
+        await callback.answer("Ketik tanggal baru")
         await callback.message.answer("✏️ Ketik tanggal baru (YYYY-MM-DD):")
 
     @dp.callback_query(F.data.startswith("edit_cat:"))
@@ -1092,10 +1148,12 @@ async def main() -> None:
         if not entry:
             await callback.answer("Tidak ada pengeluaran pending.")
             return
+        result = await get_user_notion(user_id)
+        user_cache = result[1] if result else None
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer()
         await callback.message.answer(
-            f"Oke! Konfirmasi:\n\n{format_entry(entry)}",
+            f"Oke! Konfirmasi:\n\n{format_entry(entry, user_cache)}",
             parse_mode="Markdown",
             reply_markup=make_confirm_keyboard(user_id),
         )
@@ -1111,10 +1169,12 @@ async def main() -> None:
         if not entry:
             await callback.answer("Tidak ada pengeluaran pending.")
             return
+        result = await get_user_notion(user_id)
+        user_cache = result[1] if result else None
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer()
         await callback.message.answer(
-            f"Oke! Konfirmasi:\n\n{format_entry(entry)}",
+            f"Oke! Konfirmasi:\n\n{format_entry(entry, user_cache)}",
             parse_mode="Markdown",
             reply_markup=make_confirm_keyboard(user_id),
         )
@@ -1135,6 +1195,7 @@ async def main() -> None:
         await db.clear_pending_expense(user_id)
         await db.clear_pending_email_expense(user_id)
         await db.clear_debit_queue(user_id)
+        await db.clear_pending_recurring(user_id)
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("Dibatalkan.")
         await callback.message.answer("Dibatalkan ❌")
@@ -1169,8 +1230,12 @@ async def main() -> None:
         try:
             url = await user_notion.log_income(income, owner, user_cache)
             await db.clear_pending_income(user_id)
+            page_id = _url_to_id(url)
+            last_saved_page[user_id] = page_id
             await status_msg.edit_text(
-                f"✅ Pemasukan tersimpan! [Lihat di Notion]({url})", parse_mode="Markdown"
+                f"✅ Pemasukan tersimpan! [Lihat di Notion]({url})",
+                parse_mode="Markdown",
+                reply_markup=make_undo_keyboard(user_id),
             )
         except Exception as e:
             log.error(f"Notion income write failed: {e}")
@@ -1197,12 +1262,47 @@ async def main() -> None:
         await callback.answer("Dibatalkan.")
         await callback.message.answer("Dibatalkan ❌")
 
+    # ── Undo ─────────────────────────────────────────────────────────────────
+
+    @dp.callback_query(F.data.startswith("undo:"))
+    async def handle_undo(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = int(callback.data.split(":")[1])
+        if callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+
+        page_id = last_saved_page.pop(user_id, None)
+        if not page_id:
+            await callback.answer("Tidak ada yang bisa di-undo.")
+            return
+
+        result = await get_user_notion(user_id)
+        if not result:
+            await callback.answer("Ketik /setup untuk menghubungkan Notion.")
+            return
+        user_notion, _ = result
+
+        try:
+            await user_notion.archive_page(page_id)
+            await callback.message.edit_reply_markup(reply_markup=None)
+            await callback.answer("Dibatalkan!")
+            await callback.message.answer("✅ Dibatalkan — entri telah dihapus dari Notion.")
+        except Exception as e:
+            log.error(f"Undo failed for user {user_id}: {e}")
+            await callback.answer("❌ Gagal undo.")
+            await callback.message.answer(
+                f"❌ Gagal membatalkan.\n`{type(e).__name__}: {str(e)[:80]}`",
+                parse_mode="Markdown",
+            )
+
     @dp.callback_query(F.data.startswith("cat_pick:"))
     async def handle_cat_pick(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
+        user_id = callback.from_user.id
         _, page_id, cat_idx_str = callback.data.split(":", 2)
         cat_index = int(cat_idx_str)
-        result = await get_user_notion(callback.from_user.id)
+        result = await get_user_notion(user_id)
         if not result:
             await callback.answer("Ketik /setup untuk menghubungkan Notion.")
             return
@@ -1305,18 +1405,27 @@ async def main() -> None:
 
     if email_owner_record:
         email_notion = NotionClient.from_user(email_owner_record)
-        email_cache = await email_notion.load_cache()
+        email_cache_holder.append(await email_notion.load_cache())
+
+        async def _resolve_email_user(telegram_id: int) -> tuple | None:
+            data = await get_user_notion(telegram_id)
+            if not data:
+                return None
+            client, cache = data
+            user = await db.get_user(telegram_id)
+            return (client, cache, user.owner_name if user else "")
+
         email_watcher = EmailWatcher(
             config=config,
             db=db,
             notion=email_notion,
             agent=agent,
-            cache_getter=lambda: email_cache,
+            cache_getter=lambda: email_cache_holder[0],
             bot=bot,
-            owner_telegram_id=email_owner_record.telegram_id,
-            owner_name=email_owner_record.owner_name,
+            email_owner_id=email_owner_record.telegram_id,
+            email_owner_name=email_owner_record.owner_name,
+            user_data_fn=_resolve_email_user,
             alert_fn=alert_owner,
-            page_desc=page_desc,
         )
         _watcher_task = asyncio.create_task(email_watcher.run())
         log.info("Email watcher scheduled.")
