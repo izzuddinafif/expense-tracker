@@ -164,7 +164,7 @@ async def main() -> None:
         if not owner:
             return
         try:
-            budgets = await notion.fetch_budgets()
+            budgets = await notion.fetch_budgets(cache)
             if not budgets:
                 await msg.answer("No budgets found. Add them in Notion first (Budget database).")
                 return
@@ -176,8 +176,9 @@ async def main() -> None:
                     status = "🟡"
                 else:
                     status = "🟢"
+                subs = f" ({', '.join(b['subcategories'])})" if b["subcategories"] else ""
                 lines.append(
-                    f"{status} *{b['name']}* ({b['period']})\n"
+                    f"{status} *{b['name']}{subs}* ({b['period']})\n"
                     f"  Rp {b['spent']:,.0f} / Rp {b['budget']:,.0f}  ({b['percentage']:.0f}%)"
                 )
             await msg.answer("\n".join(lines), parse_mode="Markdown")

@@ -319,8 +319,12 @@ class NotionClient:
             })
         return result
 
-    async def fetch_budgets(self) -> list[dict]:
+    async def fetch_budgets(self, cache: NotionCache | None = None) -> list[dict]:
         """Fetch all entries from the Budget database."""
+        sub_id_to_name: dict[str, str] | None = None
+        if cache is not None:
+            sub_id_to_name = {_url_to_id(url): name for name, url in cache.subcategories.items()}
+
         pages = await self._query_db(self._config.budget_ds)
         result = []
         for p in pages:
@@ -330,6 +334,14 @@ class NotionClient:
             period = props.get("Period", {}).get("select", {}) or {}
             spent = props.get("Amount Spent within Period", {}).get("formula", {}).get("number")
             pct = props.get("Percentage", {}).get("formula", {}).get("number")
+
+            sub_names = []
+            for rel in props.get("Sub-categories", {}).get("relation", []):
+                sub_id = rel.get("id", "")
+                sub_name = sub_id_to_name.get(sub_id, "") if sub_id_to_name else ""
+                if sub_name:
+                    sub_names.append(sub_name)
+
             if budget_amount is not None:
                 result.append({
                     "name": name,
@@ -337,6 +349,7 @@ class NotionClient:
                     "period": period.get("name", ""),
                     "spent": spent or 0,
                     "percentage": pct or 0,
+                    "subcategories": sub_names,
                 })
         return result
 
