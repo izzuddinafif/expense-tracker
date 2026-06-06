@@ -408,6 +408,7 @@ class EmailWatcher:
                 log.warning(
                     f"Unknown EmailTransaction.type '{tx.type}' for [{uid}] — skipping"
                 )
+                return  # don't mark processed; let a future model fix surface it
 
         except Exception as e:
             log.error(f"Failed to log email [{uid}] to Notion: {e}")
