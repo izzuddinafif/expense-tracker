@@ -150,11 +150,10 @@ async def main() -> None:
                 "Sekarang butuh *Notion Integration Token*.\n\n"
                 "Cara membuat:\n"
                 "1. Buka https://www.notion.so/my-integrations\n"
-                "2. Klik *New integration*\n"
-                "3. Beri nama (misal: \"Expense Bot\")\n"
-                "4. Pilih workspace kamu\n"
-                "5. Copy token-nya (format: `ntn_...` atau `secret_...`)\n"
-                "6. *Penting:* Buka template Notion kamu, klik *Share* → *Invite* → pilih integration yang baru dibuat\n\n"
+                "2. Klik *+ New connection*\n"
+                "3. Isi *Connection name* (wajib, misal: \"Expense Bot\"), pilih workspace, klik *Create connection*\n"
+                "4. Buka tab *Configuration* → copy *Access token*-nya (format: `ntn_...`)\n"
+                "5. *Penting:* Buka tab *Content access* → klik *Edit access* → centang halaman template kamu → Save\n\n"
                 "Ketik token-nya di sini:",
                 parse_mode="Markdown",
             )
