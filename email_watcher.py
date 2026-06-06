@@ -489,7 +489,7 @@ class EmailWatcher:
             self._notion_fail_streak += 1
             if self._notion_fail_streak == 3 or self._notion_fail_streak % 5 == 0:
                 await self._alert(
-                    f"⚠️ *Email watcher: gagal nulis ke Notion*\n"
+                    f"⚠️ *Email watcher: gagal menyimpan ke Notion*\n"
                     f"Gagal {self._notion_fail_streak}x berturut-turut.\n"
                     f"`{type(e).__name__}: {str(e)[:120]}`"
                 )

@@ -164,13 +164,13 @@ async def main() -> None:
             "Kirim foto struk belanja, saya akan baca otomatis.\n"
             "Contoh: kirim foto struk Indomaret\n\n"
             "💬 *Catat pengeluaran*\n"
-            "Teks biasa aja, saya paham bahasa sehari-hari.\n"
+            "Teks biasa saja, saya paham bahasa sehari-hari.\n"
             "Contoh: `Nasi goreng 25k jago` atau `bensin 50rb mandiri`\n\n"
             "💰 *Catat pemasukan*\n"
-            "Laporan uang masuk.\n"
+            "Laporkan uang yang kamu terima.\n"
             "Contoh: `Gaji bulanan masuk 3 juta ke Mandiri`\n\n"
             "❓ *Tanya pengeluaran*\n"
-            "Tanya soal keuangan kamu, saya jawab pake data Notion.\n"
+            "Tanya soal keuangan kamu, saya jawab pakai data Notion.\n"
             "Contoh: `Berapa yang aku habiskan minggu ini?`\n\n"
             "📋 *Perintah khusus*\n"
             "/networth — lihat ringkasan aset\n"
@@ -188,7 +188,7 @@ async def main() -> None:
         try:
             assets = await notion.fetch_assets()
             if not assets:
-                await msg.answer("Belum ada aset. Tambahin dulu di database Assets Notion.")
+                await msg.answer("Belum ada aset. Tambahkan dulu di database Assets Notion.")
                 return
             total = sum(a["value_idr"] for a in assets if a["value_idr"])
             lines = ["💼 *Kekayaan (Net Worth)*\n"]
@@ -211,7 +211,7 @@ async def main() -> None:
         try:
             budgets = await notion.fetch_budgets(cache)
             if not budgets:
-                await msg.answer("Belum ada anggaran. Tambahin dulu di database Budget Notion.")
+                await msg.answer("Belum ada anggaran. Tambahkan dulu di database Budget Notion.")
                 return
             lines = ["💰 *Anggaran (Budget)*\n"]
             for b in budgets:
@@ -278,7 +278,7 @@ async def main() -> None:
         confidence_emoji = "✅" if entry.confidence >= 0.8 else "⚠️"
 
         await msg.answer(
-            f"{confidence_emoji} Ketemu! Konfirmasi:\n\n{format_entry(entry)}",
+            f"{confidence_emoji} Oke! Konfirmasi:\n\n{format_entry(entry)}",
             parse_mode="Markdown",
             reply_markup=make_confirm_keyboard(msg.from_user.id),
         )
@@ -299,7 +299,7 @@ async def main() -> None:
             if text.lower().strip() in ("batal", "cancel", "skip", "/cancel"):
                 await db.clear_pending_email_expense(user_id)
                 await db.clear_debit_queue(user_id)
-                await msg.answer("Follow-up debit dibatalkan ❌")
+                await msg.answer("Transaksi debit dibatalkan ❌")
                 return
             await db.clear_pending_email_expense(user_id)
             entry = ExpenseEntry(
@@ -563,7 +563,6 @@ async def main() -> None:
             reply_markup=None,
         )
         await callback.answer("Tersimpan!")
-
     # ── Startup ───────────────────────────────────────────────────────────────
     try:
         await refresh_cache()
