@@ -96,11 +96,11 @@ async def main() -> None:
         if not user or not user.is_setup_complete:
             return None
         client = NotionClient.from_user(user)
-        cache_entry = NotionCache()
         try:
             cache_entry = await client.load_cache()
         except Exception as e:
             log.error(f"Failed to load cache for user {user_id}: {e}")
+            return None  # don't cache broken state
         user_notions[user_id] = client
         user_caches[user_id] = cache_entry
         return client, cache_entry
@@ -120,11 +120,21 @@ async def main() -> None:
 
         step = user.setup_step
 
-        if step == "start" or text.lower() in ("/setup", "setup"):
+        if step == "start":
             await db.set_user_setup_step(user_id, "await_name")
             await msg.answer(
                 "👋 *Selamat datang!*\n\n"
                 "Ayo hubungkan bot ini dengan workspace Notion kamu.\n"
+                "Ketik nama kamu (akan digunakan sebagai prefix di Notion):",
+                parse_mode="Markdown",
+            )
+            return
+
+        if text.lower() == "/setup" and step not in ("start", "await_name"):
+            # Allow /setup to restart from any non-initial step
+            await db.set_user_setup_step(user_id, "await_name")
+            await msg.answer(
+                "🔄 Setup diulang dari awal.\n"
                 "Ketik nama kamu (akan digunakan sebagai prefix di Notion):",
                 parse_mode="Markdown",
             )
@@ -255,7 +265,7 @@ async def main() -> None:
             log.warning(f"Duplicate check failed: {e}")
         await bot.send_message(
             chat_id,
-            f"{confidence_emoji} Oke! Konfirmasi:{dup_warning}\n\n{format_entry(entry)}",
+            f"{confidence_emoji} Oke! Konfirmasi:{dup_warning}\n\n{format_entry(entry, user_cache)}",
             parse_mode="Markdown",
             reply_markup=make_confirm_keyboard(user_id),
         )
@@ -382,12 +392,13 @@ async def main() -> None:
         user_notion, user_cache = result
         await msg.answer("🔄 Memuat ulang cache...")
         try:
-            await user_notion.load_caches(user_cache)
+            new_cache = await user_notion.load_cache()
+            user_caches[user_id] = new_cache
             await msg.answer(
-                f"✅ Selesai! {len(user_cache.subcategories)} subkategori pengeluaran, "
-                f"{len(user_cache.income_subcategories)} subkategori pemasukan, "
-                f"{len(user_cache.accounts)} akun, "
-                f"{len(user_cache.recurring_payments)} pembayaran rutin."
+                f"✅ Selesai! {len(new_cache.subcategories)} subkategori pengeluaran, "
+                f"{len(new_cache.income_subcategories)} subkategori pemasukan, "
+                f"{len(new_cache.accounts)} akun, "
+                f"{len(new_cache.recurring_payments)} pembayaran rutin."
             )
         except Exception as e:
             log.error(f"/refresh failed: {e}")
@@ -529,7 +540,7 @@ async def main() -> None:
             log.warning(f"Duplicate check failed: {e}")
 
         await msg.answer(
-            f"{confidence_emoji} Oke! Konfirmasi:{dup_warning}\n\n{format_entry(entry)}",
+            f"{confidence_emoji} Oke! Konfirmasi:{dup_warning}\n\n{format_entry(entry, user_cache)}",
             parse_mode="Markdown",
             reply_markup=make_confirm_keyboard(user_id),
         )
@@ -563,7 +574,7 @@ async def main() -> None:
             entry = await db.get_pending_expense(user_id)
             if entry:
                 await msg.answer(
-                    f"Oke! Konfirmasi:\n\n{format_entry(entry)}",
+                    f"Oke! Konfirmasi:\n\n{format_entry(entry, user_cache)}",
                     parse_mode="Markdown",
                     reply_markup=make_confirm_keyboard(user_id),
                 )
@@ -586,7 +597,7 @@ async def main() -> None:
                 entry.date = text
             await db.set_pending_expense(user_id, entry)
             await msg.answer(
-                f"✅ Diubah! Konfirmasi:\n\n{format_entry(entry)}",
+                f"✅ Diubah! Konfirmasi:\n\n{format_entry(entry, user_cache)}",
                 parse_mode="Markdown",
                 reply_markup=make_confirm_keyboard(user_id),
             )
@@ -611,7 +622,7 @@ async def main() -> None:
             )
             await db.set_pending_expense(user_id, entry)
             await msg.answer(
-                f"Oke! Konfirmasi:\n\n{format_entry(entry)}",
+                f"Oke! Konfirmasi:\n\n{format_entry(entry, user_cache)}",
                 parse_mode="Markdown",
                 reply_markup=make_confirm_keyboard(user_id),
             )
@@ -641,7 +652,7 @@ async def main() -> None:
             await msg.answer("🔎 Mengambil data pengeluaran...")
             try:
                 expenses, assets = await asyncio.gather(
-                    user_notion.fetch_expenses(owner),
+                    user_notion.fetch_expenses(owner, user_cache),
                     user_notion.fetch_assets(),
                 )
                 history = await db.get_history(user_id)
@@ -681,7 +692,7 @@ async def main() -> None:
             except Exception as e:
                 log.warning(f"Duplicate check failed: {e}")
             await msg.answer(
-                f"Oke! Konfirmasi:{dup_warning}\n\n{format_entry(entry)}",
+                f"Oke! Konfirmasi:{dup_warning}\n\n{format_entry(entry, user_cache)}",
                 parse_mode="Markdown",
                 reply_markup=make_confirm_keyboard(user_id),
             )
@@ -701,7 +712,7 @@ async def main() -> None:
 
             await db.set_pending_income(user_id, income)
             await msg.answer(
-                f"💰 Pemasukan! Konfirmasi:\n\n{format_income_entry(income)}",
+                f"💰 Pemasukan! Konfirmasi:\n\n{format_income_entry(income, user_cache)}",
                 parse_mode="Markdown",
                 reply_markup=make_income_confirm_keyboard(user_id),
             )
@@ -974,7 +985,7 @@ async def main() -> None:
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("Kategori diubah!")
         await callback.message.answer(
-            f"✅ Kategori diubah ke *{subcat_name}*\n\n{format_entry(entry)}",
+            f"✅ Kategori diubah ke *{subcat_name}*\n\n{format_entry(entry, user_cache)}",
             parse_mode="Markdown",
             reply_markup=make_confirm_keyboard(user_id),
         )
