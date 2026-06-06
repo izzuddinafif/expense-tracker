@@ -541,9 +541,7 @@ async def main() -> None:
             )
 
         else:
-            await msg.answer(
-                "Hmm, kurang paham. Coba kirim foto struk atau deskripsi pengeluaran."
-            )
+            await handle_help(msg)
 
     # ── Inline keyboard callbacks ─────────────────────────────────────────────
 
@@ -574,9 +572,11 @@ async def main() -> None:
             last_desc[user_id] = entry.description
             await db.clear_pending_expense(user_id)
             page_id = _url_to_id(url)
+            page_desc[page_id] = entry.description
             await status_msg.edit_text(
                 f"✅ Tersimpan! [Lihat di Notion]({url})",
                 parse_mode="Markdown",
+                reply_markup=make_change_category_button(page_id),
             )
             asyncio.ensure_future(_process_next_photo(user_id, owner))
         except Exception as e:
