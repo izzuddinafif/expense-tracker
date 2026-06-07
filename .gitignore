@@ -4,3 +4,4 @@ __pycache__/
 expense_tracker.db
 processed_emails.json
 processed_emails.json.migrated
+data/

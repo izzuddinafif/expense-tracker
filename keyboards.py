@@ -40,6 +40,16 @@ def make_category_keyboard(page_id: str, cache: NotionCache) -> InlineKeyboardMa
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def make_email_edit_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📝 Deskripsi", callback_data=f"email_edit_desc:{user_id}")],
+        [InlineKeyboardButton(text="💰 Jumlah", callback_data=f"email_edit_amount:{user_id}")],
+        [InlineKeyboardButton(text="📅 Tanggal", callback_data=f"email_edit_date:{user_id}")],
+        [InlineKeyboardButton(text="🏷 Kategori", callback_data=f"email_edit_subcat:{user_id}")],
+        [InlineKeyboardButton(text="❌ Batal", callback_data=f"email_edit_cancel:{user_id}")],
+    ])
+
+
 def make_undo_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="↩️ Undo", callback_data=f"undo:{user_id}"),

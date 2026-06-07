@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from logging.handlers import RotatingFileHandler
 from datetime import date, datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
@@ -20,6 +21,7 @@ from keyboards import (
     make_subcategory_keyboard,
     make_edit_field_keyboard,
     make_undo_keyboard,
+    make_email_edit_keyboard,
 )
 from models import NotionCache, ExpenseEntry, IncomeEntry, EmailTransaction
 from notion import NotionClient, _url_to_id
@@ -29,6 +31,11 @@ from email_watcher import EmailWatcher
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("__main__").setLevel(logging.DEBUG)
+
+_file_handler = RotatingFileHandler("/app/data/bot.log", maxBytes=5 * 1024 * 1024, backupCount=3)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+logging.getLogger().addHandler(_file_handler)
+
 log = logging.getLogger(__name__)
 
 
@@ -50,6 +57,8 @@ async def main() -> None:
     processing_group: set[int] = set()
     email_cache_holder: list[NotionCache] = []
     last_saved_page: dict[int, str] = {}  # user_id → notion page_id (for undo)
+    email_saved_pages: dict[int, dict] = {}  # user_id → {page_id, owner, desc, amount, date, subcat, timestamp}
+    email_pending_edit: dict[int, str] = {}  # user_id → field being edited (post-save email edit)
 
     async def alert_owner(text: str) -> None:
         all_users = await db.get_all_users()
@@ -743,6 +752,35 @@ async def main() -> None:
             )
             return
 
+        # ── Email post-save edit (desc/amount/date text input) ──────────────────
+        email_field = email_pending_edit.pop(user_id, None)
+        if email_field and text.lower().strip() in ("batal", "cancel", "/cancel"):
+            await msg.answer("✅ Edit dibatalkan.")
+            return
+        if email_field:
+            saved = email_saved_pages.get(user_id)
+            if not saved:
+                await msg.answer("Sesi kedaluwarsa.")
+                return
+            page_id = saved["page_id"]
+            try:
+                if email_field == "desc":
+                    await user_notion.update_expense_title(page_id, text)
+                    email_saved_pages[user_id]["description"] = text
+                elif email_field == "amount":
+                    amount = float(text.replace(",", "").replace("Rp", "").replace("rp", "").strip())
+                    await user_notion.update_expense_amount(page_id, amount)
+                    email_saved_pages[user_id]["amount"] = amount
+                elif email_field == "date":
+                    await user_notion.update_expense_date(page_id, text)
+                    email_saved_pages[user_id]["date"] = text
+                await msg.answer(f"✅ Tersimpan!")
+            except Exception as e:
+                log.error(f"Email post-save edit failed: {e}")
+                email_pending_edit[user_id] = email_field
+                await msg.answer(f"❌ Gagal menyimpan.\n`{type(e).__name__}: {str(e)[:80]}`", parse_mode="Markdown")
+            return
+
         # ── Jago debit card follow-up ──────────────────────────────────────────
         pending_tx = await db.get_pending_email_expense(user_id)
         if pending_tx:
@@ -1296,6 +1334,232 @@ async def main() -> None:
                 parse_mode="Markdown",
             )
 
+    # ── Email auto-log edit (post-save) ──────────────────────────────────────
+
+    @dp.callback_query(F.data.startswith("email_edit:"))
+    async def handle_email_edit(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = int(callback.data.split(":")[1])
+        if callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        saved = email_saved_pages.get(user_id)
+        if not saved:
+            await callback.answer("Tidak ada yang bisa diedit.")
+            return
+        # Check 10-minute expiry
+        age = datetime.now().timestamp() - saved["timestamp"]
+        if age > 600:
+            await callback.answer("Waktu edit sudah habis (10 menit).")
+            await callback.message.edit_reply_markup(reply_markup=None)
+            return
+        await callback.message.answer(
+            f"✏️ *Edit transaksi*\n\n"
+            f"📝 {saved['description']}\n"
+            f"💰 Rp {saved['amount']:,.0f}\n"
+            f"📅 {saved['date']}\n"
+            f"🏷 {saved['subcat']}\n\n"
+            f"Pilih field yang ingin diubah:",
+            parse_mode="Markdown",
+            reply_markup=make_email_edit_keyboard(user_id),
+        )
+        await callback.answer("Pilih field")
+
+    @dp.callback_query(F.data.startswith("email_edit_desc:"))
+    async def handle_email_edit_desc(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = int(callback.data.split(":")[1])
+        if callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        if not email_saved_pages.get(user_id):
+            await callback.answer("Sesi kedaluwarsa.")
+            return
+        email_pending_edit[user_id] = "desc"
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Ketik deskripsi baru")
+        await callback.message.answer("✏️ Ketik deskripsi baru:")
+
+    @dp.callback_query(F.data.startswith("email_edit_amount:"))
+    async def handle_email_edit_amount(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = int(callback.data.split(":")[1])
+        if callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        if not email_saved_pages.get(user_id):
+            await callback.answer("Sesi kedaluwarsa.")
+            return
+        email_pending_edit[user_id] = "amount"
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Ketik jumlah baru")
+        await callback.message.answer("✏️ Ketik jumlah baru (contoh: 25000):")
+
+    @dp.callback_query(F.data.startswith("email_edit_date:"))
+    async def handle_email_edit_date(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = int(callback.data.split(":")[1])
+        if callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        if not email_saved_pages.get(user_id):
+            await callback.answer("Sesi kedaluwarsa.")
+            return
+        email_pending_edit[user_id] = "date"
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Ketik tanggal baru")
+        await callback.message.answer("✏️ Ketik tanggal baru (YYYY-MM-DD):")
+
+    @dp.callback_query(F.data.startswith("email_edit_subcat:"))
+    async def handle_email_edit_subcat(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = int(callback.data.split(":")[1])
+        if callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        saved = email_saved_pages.get(user_id)
+        if not saved:
+            await callback.answer("Sesi kedaluwarsa.")
+            return
+        result = await get_user_notion(user_id)
+        if not result:
+            await callback.answer("Ketik /setup untuk menghubungkan Notion.")
+            return
+        _, user_cache = result
+        cats = list(user_cache.category_subcategories.keys())
+        buttons = [[InlineKeyboardButton(text=cat, callback_data=f"email_edit_cat_pick:{user_id}:{i}")] for i, cat in enumerate(cats)]
+        buttons.append([InlineKeyboardButton(text="❌ Batal", callback_data=f"email_edit_cancel:{user_id}")])
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(
+            "🏷 Pilih kategori:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+        await callback.answer("Pilih kategori")
+
+    @dp.callback_query(F.data.startswith("email_edit_cat_pick:"))
+    async def handle_email_edit_cat_pick(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        _, user_id_str, cat_idx_str = callback.data.split(":", 2)
+        user_id = int(user_id_str)
+        cat_index = int(cat_idx_str)
+        if callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        saved = email_saved_pages.get(user_id)
+        if not saved:
+            await callback.answer("Sesi kedaluwarsa.")
+            return
+        result = await get_user_notion(user_id)
+        if not result:
+            await callback.answer("Ketik /setup untuk menghubungkan Notion.")
+            return
+        _, user_cache = result
+        cats = list(user_cache.category_subcategories.keys())
+        if cat_index >= len(cats):
+            await callback.answer("❌ Data tidak ditemukan.")
+            return
+        cat_name = cats[cat_index]
+        subcats = user_cache.category_subcategories[cat_name]
+        rows = [subcats[i:i + 2] for i in range(0, len(subcats), 2)]
+        buttons = []
+        offset = 0
+        for row in rows:
+            row_buttons = []
+            for si, s in enumerate(row):
+                row_buttons.append(InlineKeyboardButton(
+                    text=s,
+                    callback_data=f"email_edit_subcat_pick:{user_id}:{cat_index}:{offset + si}",
+                ))
+            buttons.append(row_buttons)
+            offset += len(row)
+        buttons.append([InlineKeyboardButton(text="⬅️ Kembali", callback_data=f"email_edit_subcat_back:{user_id}")])
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(
+            f"🏷 Pilih subkategori *{cat_name}*:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+        await callback.answer(f"Pilih subkategori {cat_name}")
+
+    @dp.callback_query(F.data.startswith("email_edit_subcat_back:"))
+    async def handle_email_edit_subcat_back(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = int(callback.data.split(":")[1])
+        if callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        saved = email_saved_pages.get(user_id)
+        if not saved:
+            await callback.answer("Sesi kedaluwarsa.")
+            return
+        result = await get_user_notion(user_id)
+        if not result:
+            await callback.answer("Ketik /setup untuk menghubungkan Notion.")
+            return
+        _, user_cache = result
+        cats = list(user_cache.category_subcategories.keys())
+        buttons = [[InlineKeyboardButton(text=cat, callback_data=f"email_edit_cat_pick:{user_id}:{i}")] for i, cat in enumerate(cats)]
+        buttons.append([InlineKeyboardButton(text="❌ Batal", callback_data=f"email_edit_cancel:{user_id}")])
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(
+            "🏷 Pilih kategori:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+        await callback.answer("Kembali")
+
+    @dp.callback_query(F.data.startswith("email_edit_subcat_pick:"))
+    async def handle_email_edit_subcat_pick(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        _, user_id_str, cat_idx_str, subcat_idx_str = callback.data.split(":", 3)
+        user_id = int(user_id_str)
+        cat_index = int(cat_idx_str)
+        subcat_index = int(subcat_idx_str)
+        if callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        saved = email_saved_pages.get(user_id)
+        if not saved:
+            await callback.answer("Sesi kedaluwarsa.")
+            return
+        result = await get_user_notion(user_id)
+        if not result:
+            await callback.answer("Ketik /setup untuk menghubungkan Notion.")
+            return
+        user_notion, user_cache = result
+        cats = list(user_cache.category_subcategories.keys())
+        if cat_index >= len(cats):
+            await callback.answer("❌ Data tidak ditemukan.")
+            return
+        subcats = user_cache.category_subcategories[cats[cat_index]]
+        if subcat_index >= len(subcats):
+            await callback.answer("❌ Data tidak ditemukan.")
+            return
+        subcat_name = subcats[subcat_index]
+        try:
+            await user_notion.update_expense_subcategory(saved["page_id"], subcat_name, user_cache)
+            email_saved_pages[user_id]["subcat"] = subcat_name
+            await callback.message.edit_reply_markup(reply_markup=None)
+            await callback.answer("✅ Kategori diubah!")
+            await callback.message.answer(
+                f"✅ Kategori diubah ke *{subcat_name}*",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            log.error(f"Email edit subcategory failed: {e}")
+            await callback.answer("❌ Gagal.")
+
+    @dp.callback_query(F.data.startswith("email_edit_cancel:"))
+    async def handle_email_edit_cancel(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = int(callback.data.split(":")[1])
+        if callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        email_pending_edit.pop(user_id, None)
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Dibatalkan.")
+        await callback.message.answer("✅ Edit dibatalkan.")
+
     @dp.callback_query(F.data.startswith("cat_pick:"))
     async def handle_cat_pick(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
@@ -1415,6 +1679,17 @@ async def main() -> None:
             user = await db.get_user(telegram_id)
             return (client, cache, user.owner_name if user else "")
 
+        async def _on_email_saved(user_id: int, url: str, description: str, amount: float, date: str, subcategory: str) -> None:
+            page_id = _url_to_id(url)
+            email_saved_pages[user_id] = {
+                "page_id": page_id,
+                "description": description,
+                "amount": amount,
+                "date": date,
+                "subcat": subcategory,
+                "timestamp": datetime.now().timestamp(),
+            }
+
         email_watcher = EmailWatcher(
             config=config,
             db=db,
@@ -1425,6 +1700,7 @@ async def main() -> None:
             email_owner_id=email_owner_record.telegram_id,
             email_owner_name=email_owner_record.owner_name,
             user_data_fn=_resolve_email_user,
+            on_save_fn=_on_email_saved,
             alert_fn=alert_owner,
         )
         _watcher_task = asyncio.create_task(email_watcher.run())

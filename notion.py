@@ -420,6 +420,33 @@ class NotionClient:
         )
         log.info("Notion WRITE archive page: %s", page_id)
 
+    async def update_expense_title(self, page_id: str, description: str, owner: str) -> None:
+        await self._notion_patch(
+            f"https://api.notion.com/v1/pages/{page_id}",
+            {
+                "properties": {
+                    "Description": {
+                        "title": [{"text": {"content": f"[{owner}] {description}"}}]
+                    }
+                }
+            },
+        )
+        log.info("Notion WRITE update title: %s → %s", page_id, description)
+
+    async def update_expense_amount(self, page_id: str, amount: float) -> None:
+        await self._notion_patch(
+            f"https://api.notion.com/v1/pages/{page_id}",
+            {"properties": {"Amount": {"number": amount}}},
+        )
+        log.info("Notion WRITE update amount: %s → %.0f", page_id, amount)
+
+    async def update_expense_date(self, page_id: str, date: str) -> None:
+        await self._notion_patch(
+            f"https://api.notion.com/v1/pages/{page_id}",
+            {"properties": {"Date of Expense": {"date": {"start": date}}}},
+        )
+        log.info("Notion WRITE update date: %s → %s", page_id, date)
+
     async def update_expense_subcategory(
         self, page_id: str, subcategory_name: str, cache: NotionCache
     ) -> None:

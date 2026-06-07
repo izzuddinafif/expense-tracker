@@ -28,7 +28,7 @@ from html.parser import HTMLParser
 from typing import Callable
 
 from db import Database
-from keyboards import make_category_keyboard, make_confirm_keyboard
+from keyboards import make_category_keyboard, make_confirm_keyboard, make_email_edit_keyboard
 from models import ExpenseEntry, EmailTransaction, NotionCache
 
 from aiogram.types import (
@@ -119,8 +119,10 @@ class EmailWatcher:
     bot               : aiogram Bot instance (for Telegram notifications)
     email_owner_id    : default Telegram user_id (fallback when no account match)
     email_owner_name  : default owner name string (fallback)
-    user_data_fn      : optional async fn(telegram_id) -> (NotionClient, NotionCache, owner_name) | None
-    alert_fn          : async fn(text) that broadcasts to all users
+        user_data_fn      : optional async fn(telegram_id) -> (NotionClient, NotionCache, owner_name) | None
+        on_save_fn        : optional async fn(user_id, page_id, description, amount, date, subcategory)
+                            called after every auto-logged expense/admin-fee with page details
+        alert_fn          : async fn(text) that broadcasts to all users
     """
 
     def __init__(
@@ -134,6 +136,7 @@ class EmailWatcher:
         email_owner_id: int | None = None,
         email_owner_name: str = "Afif",
         user_data_fn=None,
+        on_save_fn=None,
         alert_fn=None,
     ):
         self._config = config
@@ -145,6 +148,7 @@ class EmailWatcher:
         self._owner_id = email_owner_id
         self._owner_name = email_owner_name
         self._user_data_fn = user_data_fn
+        self._on_save_fn = on_save_fn
         self._alert_fn = alert_fn
         self._imap: imaplib.IMAP4_SSL | None = None
         self._last_imap_error: str | None = None
@@ -468,33 +472,27 @@ class EmailWatcher:
                     )
                     url = await target_notion.log_expense(entry, target_owner, target_cache)
                     asyncio.create_task(self._check_budget_alert(entry, notion=target_notion, cache=target_cache))
+                    if self._on_save_fn:
+                        await self._on_save_fn(
+                            target_id, url, tx.description, tx.amount, tx.date, tx.subcategory,
+                        )
                     subcat_match = target_cache.closest_subcategory(tx.subcategory)
                     log.info(
                         f"[email→Notion] {tx.description} "
                         f"Rp {tx.amount:,.0f} [{tx.subcategory}]"
                     )
-                    if subcat_match is None:
-                        await self._notify(
-                            f"📧 *Otomatis tercatat dari email*\n"
-                            f"📝 {tx.description}\n"
-                            f"💰 Rp {tx.amount:,.0f}\n"
-                            f"📅 {tx.date}\n"
-                            f"🏦 {tx.account}\n"
-                            f"⚠️ Kategori belum dipilih. Buka Notion untuk mengatur.\n"
-                            f"[Lihat di Notion]({url})",
-                            user_id=target_id,
-                        )
-                    else:
-                        await self._notify(
-                            f"📧 *Otomatis tercatat dari email*\n"
-                            f"📝 {tx.description}\n"
-                            f"💰 Rp {tx.amount:,.0f}\n"
-                            f"📅 {tx.date}\n"
-                            f"🏷 {tx.subcategory}\n"
-                            f"🏦 {tx.account}\n"
-                            f"[Lihat di Notion]({url})",
-                            user_id=target_id,
-                        )
+                    sub_text = subcat_match[0] if subcat_match else f"❓ {tx.subcategory}"
+                    await self._notify_with_markup(
+                        f"📧 *Otomatis tercatat dari email*\n"
+                        f"📝 {tx.description}\n"
+                        f"💰 Rp {tx.amount:,.0f}\n"
+                        f"📅 {tx.date}\n"
+                        f"🏷 {sub_text}\n"
+                        f"🏦 {tx.account}\n"
+                        f"[Lihat di Notion]({url})",
+                        make_email_edit_keyboard(target_id),
+                        user_id=target_id,
+                    )
 
             elif tx.type == "self_transfer":
                 dest = tx.recipient_bank or "rekening sendiri"
@@ -510,11 +508,16 @@ class EmailWatcher:
                         confidence=0.9,
                     )
                     url = await target_notion.log_expense(fee_entry, target_owner, target_cache)
+                    if self._on_save_fn:
+                        await self._on_save_fn(
+                            target_id, url, fee_entry.description, fee_entry.amount, fee_entry.date, fee_entry.subcategory,
+                        )
                     log.info(f"[email→Notion] Admin fee Rp {tx.admin_fee:,.0f} logged")
-                    await self._notify(
+                    await self._notify_with_markup(
                         f"📧 *Transfer sendiri* Rp {tx.amount:,.0f} → {dest}\n"
                         f"Biaya admin tercatat: 💰 Rp {tx.admin_fee:,.0f}\n"
                         f"[Lihat di Notion]({url})",
+                        make_email_edit_keyboard(target_id),
                         user_id=target_id,
                     )
                 else:
