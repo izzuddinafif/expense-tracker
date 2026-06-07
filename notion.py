@@ -320,6 +320,10 @@ class NotionClient:
         data = await self._notion_post(
             "https://api.notion.com/v1/pages", json=payload,
         )
+        log.info(
+            "Notion WRITE expense: [%s] %s Rp %.0f → %s",
+            owner, entry.description, entry.amount, data["url"],
+        )
         return data["url"]
 
     async def log_income(
@@ -376,6 +380,10 @@ class NotionClient:
         data = await self._notion_post(
             "https://api.notion.com/v1/pages", json=payload,
         )
+        log.info(
+            "Notion WRITE income: [%s] %s Rp %.0f → %s",
+            owner, entry.description, entry.amount, data["url"],
+        )
         return data["url"]
 
     async def _notion_patch(self, url: str, json: dict) -> dict:
@@ -410,6 +418,7 @@ class NotionClient:
             f"https://api.notion.com/v1/pages/{page_id}",
             {"archived": True},
         )
+        log.info("Notion WRITE archive page: %s", page_id)
 
     async def update_expense_subcategory(
         self, page_id: str, subcategory_name: str, cache: NotionCache
@@ -428,6 +437,7 @@ class NotionClient:
                 }
             },
         )
+        log.info("Notion WRITE update subcategory: %s → %s", page_id, subcategory_name)
 
     async def fetch_duplicates(
         self, owner: str, amount: float, date: str
