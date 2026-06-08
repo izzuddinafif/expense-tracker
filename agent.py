@@ -171,7 +171,11 @@ class Agent:
         for attempt in range(_API_MAX_ATTEMPTS):
             try:
                 resp = await self._client.chat.completions.create(**kwargs)
-                return resp.choices[0].message.content or ""
+                content = resp.choices[0].message.content or ""
+                if content.strip():
+                    return content
+                last_exc = ValueError("Model returned empty response")
+                log.warning(f"Empty response (attempt {attempt + 1}) — likely rate limited")
             except (APITimeoutError, APIConnectionError) as e:
                 last_exc = e
                 log.warning(f"API network error (attempt {attempt + 1}): {e}")
@@ -199,10 +203,7 @@ class Agent:
         """
         raw = await self._call(messages=messages, **kwargs)
         if not raw.strip():
-            raise ValueError(
-                "Model returned empty response — check that VISION_MODEL supports image input "
-                "and that the model is not rate-limited."
-            )
+            raise ValueError("Model returned empty response — check the model is not rate-limited.")
         raw = _strip_fences(raw)
 
         for attempt in range(_JSON_MAX_ATTEMPTS):
@@ -339,7 +340,10 @@ class Agent:
         ]
 
         # answer_query returns plain text, not JSON — use _call directly
-        answer = await self._call(model=self._config.query_model, messages=messages)
+        try:
+            answer = await self._call(model=self._config.query_model, messages=messages)
+        except ValueError:
+            answer = ""
         if not answer:
             answer = "Sorry, I couldn't process that."
 
