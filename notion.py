@@ -547,7 +547,13 @@ class NotionClient:
         assets_ds = self._db_ids.get("assets_ds")
         if not assets_ds:
             return []
-        pages = await self._query_db(assets_ds)
+        try:
+            pages = await self._query_db(assets_ds)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                log.warning("Assets database not found (404) — treating as empty")
+                return []
+            raise
         result = []
         for p in pages:
             props = p["properties"]
