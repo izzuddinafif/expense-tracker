@@ -438,7 +438,7 @@ class Agent:
                 "content": (
                     f"From: {sender}\n"
                     f"Subject: {subject}\n\n"
-                    f"Body:\n{body[:3000]}"
+                    f"Body:\n{body[:4000]}"
                 ),
             },
         ]

@@ -481,6 +481,31 @@ class EmailWatcher:
                         account=tx.account,
                         confidence=0.95,
                     )
+                    # Duplicate check before auto-logging
+                    try:
+                        matches = await target_notion.fetch_duplicates(target_owner, tx.amount, tx.date)
+                        if matches:
+                            is_dup = await self._agent.check_duplicate(
+                                matches, tx.description, tx.amount, tx.date
+                            )
+                            if is_dup:
+                                log.info(f"[email] Duplicate skipped [{uid}]: {tx.description} Rp {tx.amount:,.0f}")
+                                subcat_match = target_cache.closest_subcategory(tx.subcategory)
+                                sub_text = subcat_match[0] if subcat_match else f"❓ {tx.subcategory}"
+                                await self._notify(
+                                    f"📧 *Email — duplikat, dilewati*\n"
+                                    f"📝 {tx.description}\n"
+                                    f"💰 Rp {tx.amount:,.0f}\n"
+                                    f"📅 {tx.date}\n"
+                                    f"🏷 {sub_text}\n"
+                                    f"🏦 {tx.account}\n\n"
+                                    f"Transaksi ini sudah tercatat sebelumnya.",
+                                    user_id=target_id,
+                                )
+                                await self._db.mark_processed(uid, sender)
+                                return
+                    except Exception as e:
+                        log.warning(f"[email] Duplicate check failed for [{uid}]: {e}")
                     url = await target_notion.log_expense(entry, target_owner, target_cache)
                     asyncio.create_task(self._check_budget_alert(entry, notion=target_notion, cache=target_cache))
                     if self._on_save_fn:
