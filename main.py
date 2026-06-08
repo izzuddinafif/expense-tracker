@@ -465,6 +465,11 @@ async def main() -> None:
         user_notion, user_cache = result
         await msg.answer("🔄 Memuat ulang cache...")
         try:
+            # Rebuild NotionClient from DB to pick up any DB ID changes
+            user = await db.get_user(user_id)
+            if user:
+                user_notion = NotionClient.from_user(user)
+                user_notions[user_id] = user_notion
             new_cache = await user_notion.load_cache()
             user_caches[user_id] = new_cache
             if email_cache_holder and email_owner_record and user_id == email_owner_record.telegram_id:
