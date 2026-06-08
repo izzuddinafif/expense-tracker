@@ -198,7 +198,12 @@ class EmailWatcher:
                 if typ != "OK" or not data[0]:
                     continue
 
-                uids = data[0].split()
+                raw = data[0]
+                if isinstance(raw, int):
+                    raw = str(raw).encode()
+                elif isinstance(raw, str):
+                    raw = raw.encode()
+                uids = raw.split()
                 for uid_bytes in uids[-100:]:
                     uid = uid_bytes.decode()
                     if uid in processed_uids:
