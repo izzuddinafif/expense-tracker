@@ -92,6 +92,11 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_email_owner
                 ON email_account_owners(telegram_id);
 
+            CREATE TABLE IF NOT EXISTS pending_since (
+                user_id    INTEGER PRIMARY KEY,
+                created_at REAL NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id              INTEGER PRIMARY KEY,
                 owner_name               TEXT NOT NULL,
@@ -333,6 +338,33 @@ class Database:
             "DELETE FROM conversation_history WHERE user_id = ?", (user_id,)
         )
         await self._conn.commit()
+
+    # ── Pending since (auto-confirm timestamps) ──────────────────────────────
+
+    async def set_pending_since(self, user_id: int, timestamp: float) -> None:
+        await self._conn.execute(
+            "INSERT OR REPLACE INTO pending_since (user_id, created_at) VALUES (?, ?)",
+            (user_id, timestamp),
+        )
+        await self._conn.commit()
+
+    async def clear_pending_since(self, user_id: int) -> None:
+        await self._conn.execute(
+            "DELETE FROM pending_since WHERE user_id = ?", (user_id,)
+        )
+        await self._conn.commit()
+
+    async def get_all_pending_since(self) -> dict[int, float]:
+        cur = await self._conn.execute("SELECT user_id, created_at FROM pending_since")
+        rows = await cur.fetchall()
+        return {row["user_id"]: row["created_at"] for row in rows}
+
+    async def get_pending_since(self, user_id: int) -> float | None:
+        cur = await self._conn.execute(
+            "SELECT created_at FROM pending_since WHERE user_id = ?", (user_id,)
+        )
+        row = await cur.fetchone()
+        return row["created_at"] if row else None
 
     # ── Email account owners (multi-user email watcher) ───────────────────────
 

@@ -255,6 +255,56 @@ class NotionClient:
 
         return cache
 
+    async def _ensure_month(self, month_name: str, cache: NotionCache) -> str | None:
+        db_id = self._db_ids.get("months_ds")
+        if not db_id:
+            return None
+        match = cache.month_url(month_name)
+        if match:
+            return match[1]
+        payload = {
+            "parent": {"database_id": db_id},
+            "properties": {
+                "title": {"title": [{"text": {"content": month_name}}]}
+            },
+        }
+        try:
+            data = await self._notion_post(
+                "https://api.notion.com/v1/pages", json=payload,
+            )
+            url = data["url"]
+            cache.months[month_name] = url
+            log.info("Notion WRITE auto-create month: %s → %s", month_name, url)
+            return url
+        except Exception as e:
+            log.warning("Failed to auto-create month page %s: %s", month_name, e)
+            return None
+
+    async def _ensure_year(self, year_str: str, cache: NotionCache) -> str | None:
+        db_id = self._db_ids.get("years_ds")
+        if not db_id:
+            return None
+        match = cache.year_url(year_str)
+        if match:
+            return match[1]
+        payload = {
+            "parent": {"database_id": db_id},
+            "properties": {
+                "title": {"title": [{"text": {"content": year_str}}]}
+            },
+        }
+        try:
+            data = await self._notion_post(
+                "https://api.notion.com/v1/pages", json=payload,
+            )
+            url = data["url"]
+            cache.years[year_str] = url
+            log.info("Notion WRITE auto-create year: %s → %s", year_str, url)
+            return url
+        except Exception as e:
+            log.warning("Failed to auto-create year page %s: %s", year_str, e)
+            return None
+
     async def log_expense(
         self,
         entry: ExpenseEntry,
@@ -272,8 +322,8 @@ class NotionClient:
 
         subcategory_match = cache.closest_subcategory(entry.subcategory)
         account_match = cache.closest_account(entry.account)
-        month_match = cache.month_url(month_str)
-        year_match = cache.year_url(year_str)
+        month_url = await self._ensure_month(month_str, cache)
+        year_url = await self._ensure_year(year_str, cache)
 
         properties: dict = {
             "Description": {
@@ -295,14 +345,12 @@ class NotionClient:
                 "relation": [{"id": _url_to_id(acc_url)}]
             }
 
-        if month_match:
-            _, month_url = month_match
+        if month_url:
             properties["Month"] = {
                 "relation": [{"id": _url_to_id(month_url)}]
             }
 
-        if year_match:
-            _, year_url = year_match
+        if year_url:
             properties["Year"] = {
                 "relation": [{"id": _url_to_id(year_url)}]
             }
@@ -337,8 +385,8 @@ class NotionClient:
 
         subcategory_match = cache.closest_income_subcategory(entry.subcategory)
         account_match = cache.closest_account(entry.account)
-        month_match = cache.month_url(month_str)
-        year_match = cache.year_url(year_str)
+        month_url = await self._ensure_month(month_str, cache)
+        year_url = await self._ensure_year(year_str, cache)
 
         properties: dict = {
             "Description": {
@@ -360,14 +408,12 @@ class NotionClient:
                 "relation": [{"id": _url_to_id(acc_url)}]
             }
 
-        if month_match:
-            _, month_url = month_match
+        if month_url:
             properties["Month"] = {
                 "relation": [{"id": _url_to_id(month_url)}]
             }
 
-        if year_match:
-            _, year_url = year_match
+        if year_url:
             properties["Year"] = {
                 "relation": [{"id": _url_to_id(year_url)}]
             }

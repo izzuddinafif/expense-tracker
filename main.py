@@ -59,7 +59,7 @@ async def main() -> None:
     last_saved_page: dict[int, str] = {}  # user_id → notion page_id (for undo)
     email_saved_pages: dict[int, dict] = {}  # user_id → {page_id, owner, desc, amount, date, subcat, timestamp}
     email_pending_edit: dict[int, str] = {}  # user_id → field being edited (post-save email edit)
-    pending_since: dict[int, float] = {}  # user_id → timestamp when pending expense was created
+    pending_since: dict[int, float] = await db.get_all_pending_since()  # user_id → timestamp when pending expense was created
 
     async def alert_owner(text: str) -> None:
         all_users = await db.get_all_users()
@@ -268,7 +268,9 @@ async def main() -> None:
             await _process_next_photo(user_id, owner)
             return
         await db.set_pending_expense(user_id, entry)
-        pending_since[user_id] = datetime.now().timestamp()
+        ts = datetime.now().timestamp()
+        pending_since[user_id] = ts
+        await db.set_pending_since(user_id, ts)
         confidence_emoji = "✅" if entry.confidence >= 0.8 else "⚠️"
         await status_msg.delete()
         dup_warning = ""
@@ -682,7 +684,9 @@ async def main() -> None:
             return
 
         await db.set_pending_expense(user_id, entry)
-        pending_since[user_id] = datetime.now().timestamp()
+        ts = datetime.now().timestamp()
+        pending_since[user_id] = ts
+        await db.set_pending_since(user_id, ts)
         confidence_emoji = "✅" if entry.confidence >= 0.8 else "⚠️"
         await status_msg.delete()
 
@@ -753,7 +757,9 @@ async def main() -> None:
             elif edit_field == "date":
                 entry.date = text
             await db.set_pending_expense(user_id, entry)
-            pending_since[user_id] = datetime.now().timestamp()
+            ts = datetime.now().timestamp()
+            pending_since[user_id] = ts
+            await db.set_pending_since(user_id, ts)
             await msg.answer(
                 f"✅ Diubah! Konfirmasi:\n\n{format_entry(entry, user_cache)}",
                 parse_mode="Markdown",
@@ -821,7 +827,9 @@ async def main() -> None:
                 confidence=0.9,
             )
             await db.set_pending_expense(user_id, entry)
-            pending_since[user_id] = datetime.now().timestamp()
+            ts = datetime.now().timestamp()
+            pending_since[user_id] = ts
+            await db.set_pending_since(user_id, ts)
             await msg.answer(
                 f"Oke! Konfirmasi:\n\n{format_entry(entry, user_cache)}",
                 parse_mode="Markdown",
@@ -883,7 +891,9 @@ async def main() -> None:
                 return
 
             await db.set_pending_expense(user_id, entry)
-            pending_since[user_id] = datetime.now().timestamp()
+            ts = datetime.now().timestamp()
+            pending_since[user_id] = ts
+            await db.set_pending_since(user_id, ts)
             dup_warning = ""
             try:
                 matches = await user_notion.fetch_duplicates(owner, entry.amount, entry.date)
@@ -957,6 +967,7 @@ async def main() -> None:
 
             url = await user_notion.log_expense(entry, owner, user_cache, recurring_page_url=rec_page_url)
             await db.clear_pending_expense(user_id)
+            await db.clear_pending_since(user_id)
             if pending_rec:
                 await db.clear_pending_recurring(user_id)
             page_id = _url_to_id(url)
@@ -1191,7 +1202,9 @@ async def main() -> None:
             return
         entry.subcategory = subcat_name
         await db.set_pending_expense(user_id, entry)
-        pending_since[user_id] = datetime.now().timestamp()
+        ts = datetime.now().timestamp()
+        pending_since[user_id] = ts
+        await db.set_pending_since(user_id, ts)
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("Kategori diubah!")
         await callback.message.answer(
@@ -1215,7 +1228,9 @@ async def main() -> None:
         user_cache = result[1] if result else None
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer()
-        pending_since[user_id] = datetime.now().timestamp()
+        ts = datetime.now().timestamp()
+        pending_since[user_id] = ts
+        await db.set_pending_since(user_id, ts)
         await callback.message.answer(
             f"Oke! Konfirmasi:\n\n{format_entry(entry, user_cache)}",
             parse_mode="Markdown",
@@ -1237,7 +1252,9 @@ async def main() -> None:
         user_cache = result[1] if result else None
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer()
-        pending_since[user_id] = datetime.now().timestamp()
+        ts = datetime.now().timestamp()
+        pending_since[user_id] = ts
+        await db.set_pending_since(user_id, ts)
         await callback.message.answer(
             f"Oke! Konfirmasi:\n\n{format_entry(entry, user_cache)}",
             parse_mode="Markdown",
@@ -1258,6 +1275,7 @@ async def main() -> None:
             return
 
         await db.clear_pending_expense(user_id)
+        await db.clear_pending_since(user_id)
         await db.clear_pending_email_expense(user_id)
         await db.clear_debit_queue(user_id)
         await db.clear_pending_recurring(user_id)
@@ -1712,6 +1730,7 @@ async def main() -> None:
                 if now - since < 300:
                     continue
                 pending_since.pop(user_id, None)
+                await db.clear_pending_since(user_id)
                 pending_rec = await db.get_pending_recurring(user_id)
                 entry = await db.get_pending_expense(user_id)
                 if not entry:
