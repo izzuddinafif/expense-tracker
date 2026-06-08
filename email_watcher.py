@@ -23,6 +23,7 @@ import email.header
 import imaplib
 import logging
 import re
+import time
 from datetime import date, timedelta
 from html.parser import HTMLParser
 from typing import Callable
@@ -122,6 +123,7 @@ class EmailWatcher:
         user_data_fn      : optional async fn(telegram_id) -> (NotionClient, NotionCache, owner_name) | None
         on_save_fn        : optional async fn(user_id, page_id, description, amount, date, subcategory)
                             called after every auto-logged expense/admin-fee with page details
+        pending_since     : optional dict[int, float] for tracking when pending expenses are created
         alert_fn          : async fn(text) that broadcasts to all users
     """
 
@@ -137,6 +139,7 @@ class EmailWatcher:
         email_owner_name: str = "Afif",
         user_data_fn=None,
         on_save_fn=None,
+        pending_since=None,
         alert_fn=None,
     ):
         self._config = config
@@ -149,6 +152,7 @@ class EmailWatcher:
         self._owner_name = email_owner_name
         self._user_data_fn = user_data_fn
         self._on_save_fn = on_save_fn
+        self._pending_since = pending_since
         self._alert_fn = alert_fn
         self._imap: imaplib.IMAP4_SSL | None = None
         self._last_imap_error: str | None = None
@@ -433,6 +437,8 @@ class EmailWatcher:
                         # Store in both pending_expenses (for edit/confirm flow)
                         # and pending_recurring (to mark email processed on confirm)
                         await self._db.set_pending_expense(target_id, entry)
+                        if self._pending_since is not None:
+                            self._pending_since[target_id] = time.time()
                         await self._db.set_pending_recurring(
                             target_id, entry, recurring["page_url"], uid, sender,
                         )

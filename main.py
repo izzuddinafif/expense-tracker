@@ -59,6 +59,7 @@ async def main() -> None:
     last_saved_page: dict[int, str] = {}  # user_id → notion page_id (for undo)
     email_saved_pages: dict[int, dict] = {}  # user_id → {page_id, owner, desc, amount, date, subcat, timestamp}
     email_pending_edit: dict[int, str] = {}  # user_id → field being edited (post-save email edit)
+    pending_since: dict[int, float] = {}  # user_id → timestamp when pending expense was created
 
     async def alert_owner(text: str) -> None:
         all_users = await db.get_all_users()
@@ -267,6 +268,7 @@ async def main() -> None:
             await _process_next_photo(user_id, owner)
             return
         await db.set_pending_expense(user_id, entry)
+        pending_since[user_id] = datetime.now().timestamp()
         confidence_emoji = "✅" if entry.confidence >= 0.8 else "⚠️"
         await status_msg.delete()
         dup_warning = ""
@@ -680,6 +682,7 @@ async def main() -> None:
             return
 
         await db.set_pending_expense(user_id, entry)
+        pending_since[user_id] = datetime.now().timestamp()
         confidence_emoji = "✅" if entry.confidence >= 0.8 else "⚠️"
         await status_msg.delete()
 
@@ -750,6 +753,7 @@ async def main() -> None:
             elif edit_field == "date":
                 entry.date = text
             await db.set_pending_expense(user_id, entry)
+            pending_since[user_id] = datetime.now().timestamp()
             await msg.answer(
                 f"✅ Diubah! Konfirmasi:\n\n{format_entry(entry, user_cache)}",
                 parse_mode="Markdown",
@@ -817,6 +821,7 @@ async def main() -> None:
                 confidence=0.9,
             )
             await db.set_pending_expense(user_id, entry)
+            pending_since[user_id] = datetime.now().timestamp()
             await msg.answer(
                 f"Oke! Konfirmasi:\n\n{format_entry(entry, user_cache)}",
                 parse_mode="Markdown",
@@ -878,6 +883,7 @@ async def main() -> None:
                 return
 
             await db.set_pending_expense(user_id, entry)
+            pending_since[user_id] = datetime.now().timestamp()
             dup_warning = ""
             try:
                 matches = await user_notion.fetch_duplicates(owner, entry.amount, entry.date)
@@ -1185,6 +1191,7 @@ async def main() -> None:
             return
         entry.subcategory = subcat_name
         await db.set_pending_expense(user_id, entry)
+        pending_since[user_id] = datetime.now().timestamp()
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("Kategori diubah!")
         await callback.message.answer(
@@ -1208,6 +1215,7 @@ async def main() -> None:
         user_cache = result[1] if result else None
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer()
+        pending_since[user_id] = datetime.now().timestamp()
         await callback.message.answer(
             f"Oke! Konfirmasi:\n\n{format_entry(entry, user_cache)}",
             parse_mode="Markdown",
@@ -1229,6 +1237,7 @@ async def main() -> None:
         user_cache = result[1] if result else None
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer()
+        pending_since[user_id] = datetime.now().timestamp()
         await callback.message.answer(
             f"Oke! Konfirmasi:\n\n{format_entry(entry, user_cache)}",
             parse_mode="Markdown",
@@ -1692,6 +1701,44 @@ async def main() -> None:
         log.warning(f"Unmatched callback: {callback.data!r}")
         await callback.answer("❌ Aksi tidak dikenali.")
 
+    # ── Auto-confirm stale pending expenses ─────────────────────────────
+
+    async def _auto_confirm_stale() -> None:
+        """Auto-confirm pending expenses older than 5 minutes."""
+        while True:
+            await asyncio.sleep(60)
+            now = datetime.now().timestamp()
+            for user_id, since in list(pending_since.items()):
+                if now - since < 300:
+                    continue
+                pending_since.pop(user_id, None)
+                pending_rec = await db.get_pending_recurring(user_id)
+                entry = await db.get_pending_expense(user_id)
+                if not entry:
+                    continue
+                result = await get_user_notion(user_id)
+                if not result:
+                    continue
+                n, c = result
+                user_record = await db.get_user(user_id)
+                owner = user_record.owner_name if user_record else ""
+                try:
+                    rec_url = pending_rec["recurring_page_url"] if pending_rec else None
+                    url = await n.log_expense(entry, owner, c, recurring_page_url=rec_url)
+                    page_id = _url_to_id(url)
+                    last_saved_page[user_id] = page_id
+                    await db.clear_pending_expense(user_id)
+                    if pending_rec:
+                        await db.clear_pending_recurring(user_id)
+                    await bot.send_message(
+                        user_id,
+                        f"⏰ Waktu habis — otomatis tersimpan!\n\n{format_entry(entry, c)}",
+                        parse_mode="Markdown",
+                        reply_markup=make_undo_keyboard(user_id),
+                    )
+                except Exception as e:
+                    log.error(f"Auto-confirm failed for user {user_id}: {e}")
+
     # ── Startup ───────────────────────────────────────────────────────────────
     # Look up email owner from DB
     target_owner = config.email_owner
@@ -1738,6 +1785,7 @@ async def main() -> None:
             email_owner_name=email_owner_record.owner_name,
             user_data_fn=_resolve_email_user,
             on_save_fn=_on_email_saved,
+            pending_since=pending_since,
             alert_fn=alert_owner,
         )
         _watcher_task = asyncio.create_task(email_watcher.run())
@@ -1760,6 +1808,7 @@ async def main() -> None:
         )
 
     log.info("Bot starting...")
+    asyncio.create_task(_auto_confirm_stale())
     try:
         await dp.start_polling(bot)
     finally:
