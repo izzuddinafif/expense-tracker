@@ -765,7 +765,7 @@ async def main() -> None:
             page_id = saved["page_id"]
             try:
                 if email_field == "desc":
-                    await user_notion.update_expense_title(page_id, text)
+                    await user_notion.update_expense_title(page_id, text, owner)
                     email_saved_pages[user_id]["description"] = text
                 elif email_field == "amount":
                     amount = float(text.replace(",", "").replace("Rp", "").replace("rp", "").strip())
@@ -774,6 +774,19 @@ async def main() -> None:
                 elif email_field == "date":
                     await user_notion.update_expense_date(page_id, text)
                     email_saved_pages[user_id]["date"] = text
+                elif email_field == "detail":
+                    cats = list(user_cache.category_subcategories.keys())
+                    recommended = await agent.suggest_categories(text, cats)
+                    new_desc = f"{saved['description']} — {text}"
+                    await user_notion.update_expense_title(page_id, new_desc, owner)
+                    email_saved_pages[user_id]["description"] = new_desc
+                    if recommended:
+                        top_cat = recommended[0]
+                        subcats = user_cache.category_subcategories.get(top_cat, [])
+                        if subcats:
+                            new_subcat = subcats[0]
+                            await user_notion.update_expense_subcategory(page_id, new_subcat, user_cache)
+                            email_saved_pages[user_id]["subcat"] = new_subcat
                 await msg.answer(f"✅ Tersimpan!")
             except Exception as e:
                 log.error(f"Email post-save edit failed: {e}")
@@ -1409,6 +1422,25 @@ async def main() -> None:
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("Ketik tanggal baru")
         await callback.message.answer("✏️ Ketik tanggal baru (YYYY-MM-DD):")
+
+    @dp.callback_query(F.data.startswith("email_edit_detail:"))
+    async def handle_email_edit_detail(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = int(callback.data.split(":")[1])
+        if callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        if not email_saved_pages.get(user_id):
+            await callback.answer("Sesi kedaluwarsa.")
+            return
+        email_pending_edit[user_id] = "detail"
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Ketik rincian belanja")
+        await callback.message.answer(
+            "📋 Ketik rincian barang yang dibeli.\n"
+            "Contoh: `sosro fruit tea 350ml x1, indomie goreng rendang 2x + telur 1x`\n\n"
+            "AI akan otomatis menentukan kategori berdasarkan rincian."
+        )
 
     @dp.callback_query(F.data.startswith("email_edit_subcat:"))
     async def handle_email_edit_subcat(callback: CallbackQuery) -> None:
