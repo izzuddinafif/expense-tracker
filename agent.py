@@ -59,7 +59,7 @@ No markdown, no explanation, just JSON.
 
 JSON schema:
 {{
-  "description": "income source or short description (e.g. 'Gaji bulanan', 'Bonus', 'Freelance fee')",
+  "description": "specific income source/purpose — describe what the money was for and from whom (e.g. 'Gaji bulan Maret dari PT ABC', 'Proyek website klien X', 'Refund BPJS Kesehatan'), NOT a generic category label",
   "amount": 0.0,
   "date": "YYYY-MM-DD",
   "subcategory": "best matching income subcategory from the list",
