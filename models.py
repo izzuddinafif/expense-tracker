@@ -82,6 +82,8 @@ class NotionCache:
 
 
 def _fuzzy_match(name: str, options: dict[str, str]) -> tuple[str, str] | None:
+    if not name or not options:
+        return None
     name_lower = name.lower()
     # exact match first
     for k, v in options.items():

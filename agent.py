@@ -332,11 +332,10 @@ class Agent:
         system = f"{QUERY_SYSTEM}\n\n{owner}'s expense data:\n{expenses_text}"
         if assets:
             system += f"\n\n{owner}'s assets:\n{json.dumps(assets, indent=2)}"
-        history.append({"role": "user", "content": question})
-
         messages = [
             {"role": "system", "content": system},
             *history,
+            {"role": "user", "content": question},
         ]
 
         # answer_query returns plain text, not JSON — use _call directly
@@ -347,6 +346,7 @@ class Agent:
         if not answer:
             answer = "Sorry, I couldn't process that."
 
+        history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": answer})
         if len(history) > 20:
             history = history[-20:]
