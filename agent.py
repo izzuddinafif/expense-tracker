@@ -92,6 +92,7 @@ KNOWN EMAIL TYPES AND KEY FIELDS:
 6. Jago "Kamu melakukan transaksi menggunakan kartu debit Jago" → expense (no merchant known). Use description "Jago debit card transaction". Extract amount from body text.
 7. BSI "Transaksi Pembayaran QRIS MPM Kamu Berhasil" → QRIS expense. Fields: Nama Merchant=merchant, Nominal Transaksi=amount, Tanggal=date, Rekening Sumber=source account
 8. BSI "Notifikasi Transaksi Transfer" → transfer. Fields: Rekening Penerima=recipient name+bank, Nominal Transfer=amount. Self-transfer if Rekening Penerima is the account holder
+9. Mandiri "Top-up Berhasil" → top-up/pulsa expense. Fields: Penyedia Jasa=merchant, Total Transaksi=amount (use TOTAL, not Nominal Top-up), Tanggal=date, Rekening Sumber=source account
 
 TRANSACTION TYPES:
 - "expense": payment to merchant or third party (QRIS, debit card, transfer to someone else)
