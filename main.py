@@ -1081,7 +1081,6 @@ async def main() -> None:
         await callback.answer("Ketik tanggal baru")
         await callback.message.answer("✏️ Ketik tanggal baru (YYYY-MM-DD):")
 
-    @dp.callback_query(F.data.startswith("edit_cat:"))
     async def _show_cat_keyboard(callback: CallbackQuery, user_id: int) -> None:
         result = await get_user_notion(user_id)
         if not result:
@@ -1119,6 +1118,7 @@ async def main() -> None:
         await callback.message.edit_reply_markup(reply_markup=markup)
         await callback.answer("Pilih kategori")
 
+    @dp.callback_query(F.data.startswith("edit_cat:"))
     async def handle_edit_cat(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
         user_id = int(callback.data.split(":")[1])
