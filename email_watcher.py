@@ -159,7 +159,7 @@ class EmailWatcher:
         self._notion_fail_streak: int = 0
         self._last_poll_time: float | None = None
         self._total_processed: int = 0
-        self._start_time: float = datetime.now().timestamp()
+        self._start_time: float = time.time()
 
     # ── IMAP (synchronous — called via asyncio.to_thread) ──────────────────────
 
@@ -614,7 +614,7 @@ class EmailWatcher:
                 for uid, sender, subject, body in emails:
                     await self._process(uid, sender, subject, body)
                     self._total_processed += 1
-                self._last_poll_time = datetime.now().timestamp()
+                self._last_poll_time = time.time()
             except Exception as e:
                 log.error(f"Email watcher cycle error: {e}")
 
@@ -624,7 +624,7 @@ class EmailWatcher:
         return {
             "running": True,
             "last_poll": self._last_poll_time,
-            "uptime_seconds": datetime.now().timestamp() - self._start_time,
+            "uptime_seconds": time.time() - self._start_time,
             "total_processed": self._total_processed,
             "notion_fail_streak": self._notion_fail_streak,
             "imap_error": self._last_imap_error,
