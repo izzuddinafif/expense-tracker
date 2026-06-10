@@ -83,21 +83,14 @@ USER'S OWN ACCOUNTS (for self-transfer detection — match by bank suffix):
 - BSI/BYOND ****9400
 - Jago (SDC & pocket)
 
-KNOWN EMAIL TYPES AND KEY FIELDS:
-1. Mandiri "Pembayaran Berhasil!" → QRIS expense. Fields: Penerima=merchant, Nominal Transaksi=amount, Sumber Dana=source account
-2. Mandiri "Transfer Berhasil" → transfer. Fields: Penerima=recipient name+bank, Jumlah Transfer=amount. Self-transfer if Penerima is the account holder themselves
-3. Mandiri "Transfer Tidak Berhasil" → SKIP (failed)
-4. Jago "Kamu telah melakukan transfer💸" → transfer. Fields: Ke=recipient name+bank, Jumlah=amount, Tanggal transaksi=date. Self-transfer if Ke is the account holder
-5. Jago "Kamu telah membayar ke [merchant]💸" → QRIS expense. Merchant in subject and Ke field. Fields: Jumlah=amount, Tanggal Transaksi=date
-6. Jago "Kamu melakukan transaksi menggunakan kartu debit Jago" → expense (no merchant known). Use description "Jago debit card transaction". Extract amount from body text.
-7. BSI "Transaksi Pembayaran QRIS MPM Kamu Berhasil" → QRIS expense. Fields: Nama Merchant=merchant, Nominal Transaksi=amount, Tanggal=date, Rekening Sumber=source account
-8. BSI "Notifikasi Transaksi Transfer" → transfer. Fields: Rekening Penerima=recipient name+bank, Nominal Transfer=amount. Self-transfer if Rekening Penerima is the account holder
-9. Mandiri "Top-up Berhasil" → top-up/pulsa expense. Fields: Penyedia Jasa=merchant, Total Transaksi=amount (use TOTAL, not Nominal Top-up), Tanggal=date, Rekening Sumber=source account
-
 TRANSACTION TYPES:
-- "expense": payment to merchant or third party (QRIS, debit card, transfer to someone else)
-- "self_transfer": money moved between user's own accounts
+- "expense": payment to merchant or third party (QRIS, debit card, transfer to someone else, top-up/pulsa)
+- "self_transfer": money moved between user's own accounts (self-transfer = recipient is the account holder)
 - "skip": failed/declined transaction OR any email that is not a completed transaction
+
+For any email, locate the relevant fields yourself by reading the body:
+- For expense/transfer: find the merchant/recipient, the total amount charged (usually labeled "Total Transaksi", "Nominal Transaksi", "Jumlah Transfer", "Jumlah", "Nominal Transfer" — pick the TOTAL/charged amount, not sub-totals), date, and source account.
+- For skip: if the email indicates a failed/declined/cancelled transaction or is not about a transaction at all, set type=skip.
 
 DATE PARSING (Indonesian months):
 Jan=January, Feb=February, Mar=March, Apr=April, Mei=May, Jun=June,
