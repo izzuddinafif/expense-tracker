@@ -56,10 +56,12 @@ async def main() -> None:
     photo_queue: dict[int, list[str]] = {}
     processing_group: set[int] = set()
     email_cache_holder: list[NotionCache] = []
-    last_saved_page: dict[int, str] = {}  # user_id → notion page_id (for undo)
-    email_saved_pages: dict[int, dict] = {}  # user_id → {page_id, owner, desc, amount, date, subcat, timestamp}
+    watcher_holder: list[EmailWatcher | None] = []
+    last_saved_page: dict[int, str] = await db.get_all_user_undo()  # user_id → notion page_id (for undo), persisted
+    email_saved_pages: dict[int, dict] = await db.get_all_email_saved_pages()  # persisted across restarts
     email_pending_edit: dict[int, str] = {}  # user_id → field being edited (post-save email edit)
     pending_since: dict[int, float] = await db.get_all_pending_since()  # user_id → timestamp when pending expense was created
+    cat_suggestions_cache: dict[tuple[int, str], list[str]] = {}  # (user_id, description) → recommended categories
 
     async def alert_owner(text: str) -> None:
         all_users = await db.get_all_users()
@@ -336,6 +338,7 @@ async def main() -> None:
             "/search <kata kunci> — cari pengeluaran\n"
             "/stats — ringkasan pengeluaran bulan ini\n"
             "/refresh — muat ulang data kategori dari Notion\n"
+            "/status — status email watcher dan bot\n"
             "/linkemail — hubungkan akun bank ke email watcher\n"
             "/help — tampilkan pesan ini",
             parse_mode="Markdown",
@@ -447,6 +450,10 @@ async def main() -> None:
 
         elif cmd == "remove" and len(parts) >= 3:
             pattern = parts[2].strip()
+            owners = await db.get_email_accounts_for_user(user_id)
+            if pattern not in owners:
+                await msg.answer(f"❌ Akun `{pattern}` tidak terdaftar untuk kamu.", parse_mode="Markdown")
+                return
             await db.remove_email_account_owner(pattern)
             await msg.answer(f"✅ Akun `{pattern}` telah diputuskan.", parse_mode="Markdown")
 
@@ -488,6 +495,30 @@ async def main() -> None:
             log.error(f"/refresh failed: {e}")
             await msg.answer(f"❌ Gagal refresh: `{type(e).__name__}: {e}`", parse_mode="Markdown")
 
+    @dp.message(Command("status"))
+    async def handle_status(msg: Message) -> None:
+        user_id = msg.from_user.id
+        lines = ["📊 *Status Bot*\n"]
+        if watcher_holder:
+            w = watcher_holder[0]
+            info = w.status_info()
+            uptime = timedelta(seconds=int(info["uptime_seconds"]))
+            lines.append(f"📧 *Email Watcher:* {'✅ Aktif' if info['running'] else '❌ Mati'}")
+            if info["last_poll"]:
+                last_poll = datetime.fromtimestamp(info["last_poll"])
+                lines.append(f"🕐 Poll terakhir: {last_poll.strftime('%H:%M:%S')}")
+            lines.append(f"⏱ Uptime: {uptime}")
+            lines.append(f"📨 Diproses: {info['total_processed']} email")
+            if info["notion_fail_streak"]:
+                lines.append(f"⚠️ Notion gagal: {info['notion_fail_streak']}x berturut-turut")
+            if info["imap_error"]:
+                lines.append(f"❌ IMAP error: `{info['imap_error'][:80]}`")
+        else:
+            lines.append("📧 *Email Watcher:* ❌ Tidak aktif")
+        total_users = len(await db.get_all_users())
+        lines.append(f"👥 Pengguna: {total_users}")
+        await msg.answer("\n".join(lines), parse_mode="Markdown")
+
     @dp.message(Command("search"))
     async def handle_search(msg: Message) -> None:
         user_id = msg.from_user.id
@@ -519,7 +550,7 @@ async def main() -> None:
             lines.append(f"• Rp {r['amount']:,.0f} — {r['description']} ({r['date']})")
         if len(results) > 10:
             lines.append(f"\n...dan {len(results) - 10} transaksi lainnya.")
-        lines.append(f"\n[Lihat semua di Notion](https://www.notion.so/search?q={keyword})")
+        lines.append(f"\n🔍 *Pencarian selesai.*")
         await msg.answer("\n".join(lines), parse_mode="Markdown")
 
     @dp.message(Command("stats"))
@@ -746,6 +777,7 @@ async def main() -> None:
                 await msg.answer("Tidak ada pengeluaran pending.")
                 return
             if edit_field == "desc":
+                cat_suggestions_cache = {k: v for k, v in cat_suggestions_cache.items() if k[0] != user_id}
                 entry.description = text
             elif edit_field == "amount":
                 try:
@@ -755,6 +787,11 @@ async def main() -> None:
                     await msg.answer("❌ Angka tidak valid. Ketik jumlah angka saja (contoh: 25000):")
                     return
             elif edit_field == "date":
+                try:
+                    datetime.strptime(text, "%Y-%m-%d")
+                except ValueError:
+                    await msg.answer("❌ Format tanggal harus YYYY-MM-DD (contoh: 2026-06-10):")
+                    return
                 entry.date = text
             await db.set_pending_expense(user_id, entry)
             ts = datetime.now().timestamp()
@@ -802,7 +839,10 @@ async def main() -> None:
                             new_subcat = subcats[0]
                             await user_notion.update_expense_subcategory(page_id, new_subcat, user_cache)
                             email_saved_pages[user_id]["subcat"] = new_subcat
+                s = email_saved_pages[user_id]
+                await db.set_email_saved_page(user_id, s["page_id"], s["description"], s["amount"], s["date"], s["subcat"], s["timestamp"])
                 await msg.answer(f"✅ Tersimpan!")
+
             except Exception as e:
                 log.error(f"Email post-save edit failed: {e}")
                 email_pending_edit[user_id] = email_field
@@ -965,21 +1005,29 @@ async def main() -> None:
             pending_rec = await db.get_pending_recurring(user_id)
             rec_page_url = pending_rec["recurring_page_url"] if pending_rec else None
 
-            url = await user_notion.log_expense(entry, owner, user_cache, recurring_page_url=rec_page_url)
+            # Clear before write to prevent double-save on rapid taps
             await db.clear_pending_expense(user_id)
             await db.clear_pending_since(user_id)
             if pending_rec:
                 await db.clear_pending_recurring(user_id)
+
+            url = await user_notion.log_expense(entry, owner, user_cache, recurring_page_url=rec_page_url)
             page_id = _url_to_id(url)
             last_saved_page[user_id] = page_id
+            await db.set_user_undo(user_id, page_id, entry.description, entry.amount, entry.date, entry.subcategory)
             await status_msg.edit_text(
                 f"✅ Tersimpan! [Lihat di Notion]({url})",
                 parse_mode="Markdown",
                 reply_markup=make_undo_keyboard(user_id),
             )
-            asyncio.ensure_future(_process_next_photo(user_id, owner))
+            asyncio.create_task(_process_next_photo(user_id, owner))
         except Exception as e:
             log.error(f"Notion write failed: {e}")
+            # Re-set pending expense if the write failed
+            await db.set_pending_expense(user_id, entry)
+            ts = datetime.now().timestamp()
+            pending_since[user_id] = ts
+            await db.set_pending_since(user_id, ts)
             await status_msg.edit_text(
                 f"❌ Gagal simpan ke Notion.\n`{type(e).__name__}: {str(e)[:80]}`",
                 parse_mode="Markdown",
@@ -1034,12 +1082,7 @@ async def main() -> None:
         await callback.message.answer("✏️ Ketik tanggal baru (YYYY-MM-DD):")
 
     @dp.callback_query(F.data.startswith("edit_cat:"))
-    async def handle_edit_cat(callback: CallbackQuery) -> None:
-        log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
-            await callback.answer("Tidak punya akses.")
-            return
+    async def _show_cat_keyboard(callback: CallbackQuery, user_id: int) -> None:
         result = await get_user_notion(user_id)
         if not result:
             await callback.answer("Ketik /setup untuk menghubungkan Notion.")
@@ -1049,7 +1092,11 @@ async def main() -> None:
         cats = list(user_cache.category_subcategories.keys())
         markup: InlineKeyboardMarkup | None = None
         if entry:
-            recommended = await agent.suggest_categories(entry.description, cats)
+            cache_key = (user_id, entry.description)
+            recommended = cat_suggestions_cache.get(cache_key)
+            if recommended is None:
+                recommended = await agent.suggest_categories(entry.description, cats)
+                cat_suggestions_cache[cache_key] = recommended
             rec_buttons: list[list[InlineKeyboardButton]] = []
             for cat in recommended:
                 if cat in cats:
@@ -1071,6 +1118,14 @@ async def main() -> None:
             markup = InlineKeyboardMarkup(inline_keyboard=all_buttons)
         await callback.message.edit_reply_markup(reply_markup=markup)
         await callback.answer("Pilih kategori")
+
+    async def handle_edit_cat(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = int(callback.data.split(":")[1])
+        if callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        await _show_cat_keyboard(callback, user_id)
 
     @dp.callback_query(F.data.startswith("edit_cat_pick:"))
     async def handle_edit_cat_pick(callback: CallbackQuery) -> None:
@@ -1119,37 +1174,7 @@ async def main() -> None:
         if callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
-        result = await get_user_notion(user_id)
-        if not result:
-            await callback.answer("Ketik /setup untuk menghubungkan Notion.")
-            return
-        _, user_cache = result
-        entry = await db.get_pending_expense(user_id)
-        cats = list(user_cache.category_subcategories.keys())
-        markup: InlineKeyboardMarkup | None = None
-        if entry:
-            recommended = await agent.suggest_categories(entry.description, cats)
-            rec_buttons: list[list[InlineKeyboardButton]] = []
-            for cat in recommended:
-                if cat in cats:
-                    i = cats.index(cat)
-                    rec_buttons.append([InlineKeyboardButton(
-                        text=cat, callback_data=f"edit_cat_pick:{user_id}:{i}",
-                    )])
-            if rec_buttons:
-                rec_buttons.append([InlineKeyboardButton(
-                    text="Lainnya →", callback_data=f"edit_cat_all:{user_id}",
-                )])
-                rec_buttons.append([InlineKeyboardButton(
-                    text="❌ Batal", callback_data=f"edit_cat_cancel:{user_id}",
-                )])
-                markup = InlineKeyboardMarkup(inline_keyboard=rec_buttons)
-        if not markup:
-            all_buttons = [[InlineKeyboardButton(text=cat, callback_data=f"edit_cat_pick:{user_id}:{i}")] for i, cat in enumerate(cats)]
-            all_buttons.append([InlineKeyboardButton(text="❌ Batal", callback_data=f"edit_cat_cancel:{user_id}")])
-            markup = InlineKeyboardMarkup(inline_keyboard=all_buttons)
-        await callback.message.edit_reply_markup(reply_markup=markup)
-        await callback.answer("Kembali")
+        await _show_cat_keyboard(callback, user_id)
 
     @dp.callback_query(F.data.startswith("edit_cat_all:"))
     async def handle_edit_cat_all(callback: CallbackQuery) -> None:
@@ -1282,7 +1307,7 @@ async def main() -> None:
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("Dibatalkan.")
         await callback.message.answer("Dibatalkan ❌")
-        asyncio.ensure_future(_process_next_photo(user_id, user.owner_name))
+        asyncio.create_task(_process_next_photo(user_id, user.owner_name))
 
     @dp.callback_query(F.data.startswith("income_confirm:"))
     async def handle_income_confirm(callback: CallbackQuery) -> None:
@@ -1315,6 +1340,7 @@ async def main() -> None:
             await db.clear_pending_income(user_id)
             page_id = _url_to_id(url)
             last_saved_page[user_id] = page_id
+            await db.set_user_undo(user_id, page_id, income.description, income.amount, income.date, income.subcategory)
             await status_msg.edit_text(
                 f"✅ Pemasukan tersimpan! [Lihat di Notion]({url})",
                 parse_mode="Markdown",
@@ -1357,8 +1383,13 @@ async def main() -> None:
 
         page_id = last_saved_page.pop(user_id, None)
         if not page_id:
-            await callback.answer("Tidak ada yang bisa di-undo.")
-            return
+            record = await db.get_user_undo(user_id)
+            if record:
+                page_id = record["page_id"]
+            else:
+                await callback.answer("Tidak ada yang bisa di-undo.")
+                return
+        await db.clear_user_undo(user_id)
 
         result = await get_user_notion(user_id)
         if not result:
@@ -1602,6 +1633,8 @@ async def main() -> None:
         try:
             await user_notion.update_expense_subcategory(saved["page_id"], subcat_name, user_cache)
             email_saved_pages[user_id]["subcat"] = subcat_name
+            s = email_saved_pages[user_id]
+            await db.set_email_saved_page(user_id, s["page_id"], s["description"], s["amount"], s["date"], s["subcat"], s["timestamp"])
             await callback.message.edit_reply_markup(reply_markup=None)
             await callback.answer("✅ Kategori diubah!")
             await callback.message.answer(
@@ -1729,12 +1762,12 @@ async def main() -> None:
             for user_id, since in list(pending_since.items()):
                 if now - since < 300:
                     continue
-                pending_since.pop(user_id, None)
-                await db.clear_pending_since(user_id)
                 pending_rec = await db.get_pending_recurring(user_id)
                 entry = await db.get_pending_expense(user_id)
                 if not entry:
                     continue
+                pending_since.pop(user_id, None)
+                await db.clear_pending_since(user_id)
                 result = await get_user_notion(user_id)
                 if not result:
                     continue
@@ -1746,6 +1779,7 @@ async def main() -> None:
                     url = await n.log_expense(entry, owner, c, recurring_page_url=rec_url)
                     page_id = _url_to_id(url)
                     last_saved_page[user_id] = page_id
+                    await db.set_user_undo(user_id, page_id, entry.description, entry.amount, entry.date, entry.subcategory)
                     await db.clear_pending_expense(user_id)
                     if pending_rec:
                         await db.clear_pending_recurring(user_id)
@@ -1784,14 +1818,16 @@ async def main() -> None:
 
         async def _on_email_saved(user_id: int, url: str, description: str, amount: float, date: str, subcategory: str) -> None:
             page_id = _url_to_id(url)
+            ts = datetime.now().timestamp()
             email_saved_pages[user_id] = {
                 "page_id": page_id,
                 "description": description,
                 "amount": amount,
                 "date": date,
                 "subcat": subcategory,
-                "timestamp": datetime.now().timestamp(),
+                "timestamp": ts,
             }
+            await db.set_email_saved_page(user_id, page_id, description, amount, date, subcategory, ts)
 
         email_watcher = EmailWatcher(
             config=config,
@@ -1807,6 +1843,7 @@ async def main() -> None:
             pending_since=pending_since,
             alert_fn=alert_owner,
         )
+        watcher_holder.append(email_watcher)
         _watcher_task = asyncio.create_task(email_watcher.run())
         log.info("Email watcher scheduled.")
 
@@ -1819,11 +1856,11 @@ async def main() -> None:
                 await asyncio.sleep(10)
                 _watcher_task = asyncio.create_task(email_watcher.run())
                 _watcher_task.add_done_callback(
-                    lambda t: asyncio.ensure_future(_watch_over(t))
+                    lambda t: asyncio.create_task(_watch_over(t))
                 )
 
         _watcher_task.add_done_callback(
-            lambda t: asyncio.ensure_future(_watch_over(t))
+            lambda t: asyncio.create_task(_watch_over(t))
         )
 
     log.info("Bot starting...")

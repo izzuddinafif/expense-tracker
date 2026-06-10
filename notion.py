@@ -144,6 +144,8 @@ class NotionClient:
             results.extend(data["results"])
             pages += 1
             if not data.get("has_more") or pages >= 100:
+                if pages >= 100:
+                    log.warning("_query_db hit 100-page limit for %s — results truncated", database_id)
                 break
             payload["start_cursor"] = data["next_cursor"]
 

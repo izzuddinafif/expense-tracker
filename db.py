@@ -30,6 +30,7 @@ class Database:
     # ── Schema ──────────────────────────────────────────────────────────────────
 
     async def _init(self) -> None:
+        await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS processed_emails (
                 uid          TEXT PRIMARY KEY,
@@ -95,6 +96,26 @@ class Database:
             CREATE TABLE IF NOT EXISTS pending_since (
                 user_id    INTEGER PRIMARY KEY,
                 created_at REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS user_undo (
+                user_id      INTEGER PRIMARY KEY,
+                page_id      TEXT NOT NULL,
+                description  TEXT NOT NULL DEFAULT '',
+                amount       REAL NOT NULL DEFAULT 0,
+                date         TEXT NOT NULL DEFAULT '',
+                subcat       TEXT NOT NULL DEFAULT '',
+                created_at   REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS email_saved_pages (
+                user_id       INTEGER PRIMARY KEY,
+                page_id       TEXT NOT NULL,
+                description   TEXT NOT NULL DEFAULT '',
+                amount        REAL NOT NULL DEFAULT 0,
+                date          TEXT NOT NULL DEFAULT '',
+                subcat        TEXT NOT NULL DEFAULT '',
+                timestamp     REAL NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS users (
@@ -366,6 +387,92 @@ class Database:
         row = await cur.fetchone()
         return row["created_at"] if row else None
 
+    # ── User undo (persist last_saved_page across restarts) ───────────────────
+
+    async def set_user_undo(self, user_id: int, page_id: str, description: str = "", amount: float = 0, date: str = "", subcat: str = "") -> None:
+        await self._conn.execute(
+            "INSERT OR REPLACE INTO user_undo (user_id, page_id, description, amount, date, subcat, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, page_id, description, amount, date, subcat, datetime.now().timestamp()),
+        )
+        await self._conn.commit()
+
+    async def get_user_undo(self, user_id: int) -> dict | None:
+        cur = await self._conn.execute(
+            "SELECT page_id, description, amount, date, subcat, created_at FROM user_undo WHERE user_id = ?", (user_id,)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "page_id": row["page_id"],
+            "description": row["description"],
+            "amount": row["amount"],
+            "date": row["date"],
+            "subcat": row["subcat"],
+            "created_at": row["created_at"],
+        }
+
+    async def clear_user_undo(self, user_id: int) -> None:
+        await self._conn.execute(
+            "DELETE FROM user_undo WHERE user_id = ?", (user_id,)
+        )
+        await self._conn.commit()
+
+    async def get_all_user_undo(self) -> dict[int, str]:
+        cur = await self._conn.execute(
+            "SELECT user_id, page_id FROM user_undo"
+        )
+        rows = await cur.fetchall()
+        return {row["user_id"]: row["page_id"] for row in rows}
+
+    # ── Email saved pages (persist email_saved_pages across restarts) ─────────
+
+    async def set_email_saved_page(self, user_id: int, page_id: str, description: str, amount: float, date: str, subcat: str, timestamp: float) -> None:
+        await self._conn.execute(
+            "INSERT OR REPLACE INTO email_saved_pages (user_id, page_id, description, amount, date, subcat, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, page_id, description, amount, date, subcat, timestamp),
+        )
+        await self._conn.commit()
+
+    async def get_email_saved_page(self, user_id: int) -> dict | None:
+        cur = await self._conn.execute(
+            "SELECT * FROM email_saved_pages WHERE user_id = ?", (user_id,)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "page_id": row["page_id"],
+            "description": row["description"],
+            "amount": row["amount"],
+            "date": row["date"],
+            "subcat": row["subcat"],
+            "timestamp": row["timestamp"],
+        }
+
+    async def clear_email_saved_page(self, user_id: int) -> None:
+        await self._conn.execute(
+            "DELETE FROM email_saved_pages WHERE user_id = ?", (user_id,)
+        )
+        await self._conn.commit()
+
+    async def get_all_email_saved_pages(self) -> dict[int, dict]:
+        cur = await self._conn.execute(
+            "SELECT * FROM email_saved_pages"
+        )
+        rows = await cur.fetchall()
+        result: dict[int, dict] = {}
+        for row in rows:
+            result[row["user_id"]] = {
+                "page_id": row["page_id"],
+                "description": row["description"],
+                "amount": row["amount"],
+                "date": row["date"],
+                "subcat": row["subcat"],
+                "timestamp": row["timestamp"],
+            }
+        return result
+
     # ── Email account owners (multi-user email watcher) ───────────────────────
 
     async def set_email_account_owner(self, account_pattern: str, telegram_id: int) -> None:
@@ -471,27 +578,18 @@ class Database:
 
     async def upsert_user(self, telegram_id: int, **fields) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        # Check if user exists
-        existing = await self.get_user(telegram_id)
-        if existing is None:
-            # Insert new user
-            cols = ["telegram_id", "created_at", "updated_at"] + list(fields.keys())
-            vals = [telegram_id, now, now] + list(fields.values())
-            placeholders = ", ".join(["?"] * len(cols))
-            col_names = ", ".join(cols)
-            await self._conn.execute(
-                f"INSERT INTO users ({col_names}) VALUES ({placeholders})",
-                vals,
-            )
-        else:
-            # Update existing user
-            if fields:
-                set_clause = ", ".join(f"{k} = ?" for k in fields)
-                vals = list(fields.values()) + [now, telegram_id]
-                await self._conn.execute(
-                    f"UPDATE users SET {set_clause}, updated_at = ? WHERE telegram_id = ?",
-                    vals,
-                )
+        all_cols = list(fields.keys())
+        cols = ["telegram_id", "created_at", "updated_at", *all_cols]
+        vals = [telegram_id, now, now, *(fields[k] for k in all_cols)]
+        placeholders = ", ".join(["?"] * len(cols))
+        col_names = ", ".join(cols)
+        set_parts = [f"updated_at = excluded.updated_at", *(f"{k} = excluded.{k}" for k in all_cols)]
+        set_clause = ", ".join(set_parts)
+        await self._conn.execute(
+            f"INSERT INTO users ({col_names}) VALUES ({placeholders}) "
+            f"ON CONFLICT(telegram_id) DO UPDATE SET {set_clause}",
+            vals,
+        )
         await self._conn.commit()
 
     async def set_user_setup_step(self, telegram_id: int, step: str) -> None:

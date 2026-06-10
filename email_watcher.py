@@ -157,6 +157,9 @@ class EmailWatcher:
         self._imap: imaplib.IMAP4_SSL | None = None
         self._last_imap_error: str | None = None
         self._notion_fail_streak: int = 0
+        self._last_poll_time: float | None = None
+        self._total_processed: int = 0
+        self._start_time: float = datetime.now().timestamp()
 
     # ── IMAP (synchronous — called via asyncio.to_thread) ──────────────────────
 
@@ -610,7 +613,19 @@ class EmailWatcher:
                     log.info(f"Found {len(emails)} new bank email(s) to process")
                 for uid, sender, subject, body in emails:
                     await self._process(uid, sender, subject, body)
+                    self._total_processed += 1
+                self._last_poll_time = datetime.now().timestamp()
             except Exception as e:
                 log.error(f"Email watcher cycle error: {e}")
 
             await asyncio.sleep(interval)
+
+    def status_info(self) -> dict:
+        return {
+            "running": True,
+            "last_poll": self._last_poll_time,
+            "uptime_seconds": datetime.now().timestamp() - self._start_time,
+            "total_processed": self._total_processed,
+            "notion_fail_streak": self._notion_fail_streak,
+            "imap_error": self._last_imap_error,
+        }

@@ -58,14 +58,14 @@ Given a text description of income received, extract the details and respond ONL
 No markdown, no explanation, just JSON.
 
 JSON schema:
-{{
+{
   "description": "specific income source/purpose — describe what the money was for and from whom (e.g. 'Gaji bulan Maret dari PT ABC', 'Proyek website klien X', 'Refund BPJS Kesehatan'), NOT a generic category label",
   "amount": 0.0,
   "date": "YYYY-MM-DD",
   "subcategory": "best matching income subcategory from the list",
   "account": "best matching account from the list",
   "confidence": 0.95
-}}
+}
 
 Rules:
 - amount must be a number in IDR (no currency symbols). k/rb = thousand, jt/juta = million.
@@ -75,23 +75,23 @@ Rules:
 - confidence: 1.0 = all fields clearly stated, 0.5 = some fields guessed
 """
 
-EMAIL_PARSE_SYSTEM = """You are a bank email parser for an Indonesian user named IZZUDDIN AHMAD AFIF.
+EMAIL_PARSE_SYSTEM = """You are a bank email parser for an Indonesian bank user.
 Parse the bank notification email and return ONLY valid JSON (no markdown, no explanation).
 
-USER'S OWN ACCOUNTS (for self-transfer detection):
-- Mandiri ****1854 (full: 1400025491854)
+USER'S OWN ACCOUNTS (for self-transfer detection — match by bank suffix):
+- Mandiri ****1854
 - BSI/BYOND ****9400
-- Jago SDC 500904947426 / pocket 503874467003
+- Jago (SDC & pocket)
 
 KNOWN EMAIL TYPES AND KEY FIELDS:
 1. Mandiri "Pembayaran Berhasil!" → QRIS expense. Fields: Penerima=merchant, Nominal Transaksi=amount, Sumber Dana=source account
-2. Mandiri "Transfer Berhasil" → transfer. Fields: Penerima=recipient name+bank, Jumlah Transfer=amount. Self-transfer if Penerima name = IZZUDDIN AHMAD AFIF
+2. Mandiri "Transfer Berhasil" → transfer. Fields: Penerima=recipient name+bank, Jumlah Transfer=amount. Self-transfer if Penerima is the account holder themselves
 3. Mandiri "Transfer Tidak Berhasil" → SKIP (failed)
-4. Jago "Kamu telah melakukan transfer💸" → transfer. Fields: Ke=recipient name+bank, Jumlah=amount, Tanggal transaksi=date. Self-transfer if Ke name = IZZUDDIN AHMAD AFIF
+4. Jago "Kamu telah melakukan transfer💸" → transfer. Fields: Ke=recipient name+bank, Jumlah=amount, Tanggal transaksi=date. Self-transfer if Ke is the account holder
 5. Jago "Kamu telah membayar ke [merchant]💸" → QRIS expense. Merchant in subject and Ke field. Fields: Jumlah=amount, Tanggal Transaksi=date
 6. Jago "Kamu melakukan transaksi menggunakan kartu debit Jago" → expense (no merchant known). Use description "Jago debit card transaction". Extract amount from body text.
 7. BSI "Transaksi Pembayaran QRIS MPM Kamu Berhasil" → QRIS expense. Fields: Nama Merchant=merchant, Nominal Transaksi=amount, Tanggal=date, Rekening Sumber=source account
-8. BSI "Notifikasi Transaksi Transfer" → transfer. Fields: Rekening Penerima=recipient name+bank, Nominal Transfer=amount. Self-transfer if Rekening Penerima name = IZZUDDIN AHMAD AFIF
+8. BSI "Notifikasi Transaksi Transfer" → transfer. Fields: Rekening Penerima=recipient name+bank, Nominal Transfer=amount. Self-transfer if Rekening Penerima is the account holder
 
 TRANSACTION TYPES:
 - "expense": payment to merchant or third party (QRIS, debit card, transfer to someone else)
