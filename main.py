@@ -262,7 +262,8 @@ async def main() -> None:
             file = await bot.get_file(file_id)
             image_bytes = await bot.download_file(file.file_path)
             today = date.today().isoformat()
-            entry = await agent.extract_from_image(image_bytes.read(), user_cache, today)
+            recent = await user_notion.fetch_recent_expenses(owner, user_cache, 10)
+            entry = await agent.extract_from_image(image_bytes.read(), user_cache, today, recent_expenses=recent)
         except Exception as e:
             log.error(f"Next photo failed: {e}")
             await status_msg.delete()
@@ -701,9 +702,10 @@ async def main() -> None:
         file = await bot.get_file(photo.file_id)
         image_bytes = await bot.download_file(file.file_path)
         today = date.today().isoformat()
+        recent = await user_notion.fetch_recent_expenses(owner, user_cache, 10)
 
         try:
-            entry = await agent.extract_from_image(image_bytes.read(), user_cache, today)
+            entry = await agent.extract_from_image(image_bytes.read(), user_cache, today, recent_expenses=recent)
         except Exception as e:
             log.error(f"extract_from_image failed: {e}")
             await status_msg.delete()
@@ -919,8 +921,9 @@ async def main() -> None:
 
         elif intent.type == "log_text":
             today = date.today().isoformat()
+            recent = await user_notion.fetch_recent_expenses(owner, user_cache, 10)
             try:
-                entry = await agent.extract_from_text(text, user_cache, today)
+                entry = await agent.extract_from_text(text, user_cache, today, recent_expenses=recent)
             except Exception as e:
                 log.error(f"extract_from_text failed: {e}")
                 await msg.answer(

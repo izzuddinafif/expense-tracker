@@ -565,6 +565,36 @@ class NotionClient:
             })
         return result
 
+    async def fetch_recent_expenses(self, owner: str, cache: NotionCache | None = None, limit: int = 10) -> list[dict]:
+        payload = {
+            "filter": {
+                "property": "Description",
+                "title": {"contains": f"[{owner}]"},
+            },
+            "sorts": [{"property": "Date of Expense", "direction": "descending"}],
+            "page_size": limit,
+        }
+        pages = await self._query_db(self._db_ids["expenses_ds"], extra_payload=payload)
+        sub_id_to_name = {_url_to_id(url): name for name, url in (cache.subcategories.items() if cache else {})}
+        result = []
+        for p in pages:
+            title_prop = p["properties"].get("Description", {})
+            title = "".join(t["plain_text"] for t in title_prop.get("title", []))
+            amount = p["properties"].get("Amount", {}).get("number", 0)
+            date_prop = p["properties"].get("Date of Expense", {}).get("date") or {}
+            sub_rel = p["properties"].get("Expenses Sub-categories", {}).get("relation", [])
+            sub_name = ""
+            if sub_rel:
+                sid = sub_rel[0]["id"]
+                sub_name = sub_id_to_name.get(sid, "")
+            result.append({
+                "description": title.replace(f"[{owner}] ", ""),
+                "amount": amount,
+                "date": date_prop.get("start", ""),
+                "subcategory": sub_name,
+            })
+        return result
+
     async def search_expenses(self, owner: str, keyword: str) -> list[dict]:
         payload = {
             "filter": {

@@ -34,6 +34,7 @@ Rules:
 - subcategory MUST be chosen verbatim from the provided subcategory list — do not invent names
 - account must be chosen from the provided list
 - confidence: 1.0 = all fields clearly visible, 0.5 = some fields guessed
+- Recent transactions are provided for reference. If this expense matches a recent one (same merchant, similar amount), use the same subcategory and description pattern (e.g. "Bakso langganan") for consistency.
 """
 
 QUERY_SYSTEM = """You are a personal finance assistant.
@@ -226,15 +227,29 @@ class Agent:
 
     # ── Public methods ─────────────────────────────────────────────────────────
 
+    def _format_recent(self, recent: list[dict] | None) -> str:
+        if not recent:
+            return ""
+        lines = ["\nRecent transactions (for reference):"]
+        for r in recent[:10]:
+            desc = r.get("description", "")
+            amt = r.get("amount", 0)
+            dt = r.get("date", "")
+            sub = r.get("subcategory", "")
+            lines.append(f"- {dt} {desc} Rp {amt:,.0f} [{sub}]")
+        return "\n".join(lines)
+
     async def extract_from_image(
         self,
         image_bytes: bytes,
         cache: NotionCache,
         today: str,
+        recent_expenses: list[dict] | None = None,
     ) -> ExpenseEntry:
         subcats = ", ".join(cache.subcategories.keys())
         accounts = ", ".join(cache.accounts.keys())
         system = EXTRACT_SYSTEM.replace("{today}", today)
+        recent = self._format_recent(recent_expenses)
 
         messages = [
             {"role": "system", "content": system},
@@ -243,7 +258,7 @@ class Agent:
                 "content": [
                     {
                         "type": "text",
-                        "text": f"Available subcategories: {subcats}\nAvailable accounts: {accounts}\n\nExtract the expense from this receipt:",
+                        "text": f"Available subcategories: {subcats}\nAvailable accounts: {accounts}{recent}\n\nExtract the expense from this receipt:",
                     },
                     {
                         "type": "image_url",
@@ -264,16 +279,18 @@ class Agent:
         text: str,
         cache: NotionCache,
         today: str,
+        recent_expenses: list[dict] | None = None,
     ) -> ExpenseEntry:
         subcats = ", ".join(cache.subcategories.keys())
         accounts = ", ".join(cache.accounts.keys())
         system = EXTRACT_SYSTEM.replace("{today}", today)
+        recent = self._format_recent(recent_expenses)
 
         messages = [
             {"role": "system", "content": system},
             {
                 "role": "user",
-                "content": f"Available subcategories: {subcats}\nAvailable accounts: {accounts}\n\nExtract expense from: {text}",
+                "content": f"Available subcategories: {subcats}\nAvailable accounts: {accounts}{recent}\n\nExtract expense from: {text}",
             },
         ]
         return await self._call_json(
