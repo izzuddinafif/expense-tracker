@@ -1000,6 +1000,25 @@ async def main() -> None:
             return
 
         await callback.message.edit_reply_markup(reply_markup=None)
+
+        # Re-check duplicates before saving — email may have logged it in the meantime
+        try:
+            matches = await user_notion.fetch_duplicates(owner, entry.amount, entry.date)
+            if matches:
+                is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date)
+                if is_dup:
+                    await db.clear_pending_expense(user_id)
+                    await db.clear_pending_since(user_id)
+                    await callback.answer("Duplikat — sudah tercatat.")
+                    await callback.message.answer(
+                        "⚠️ *Duplikat terdeteksi!* Transaksi ini sudah tercatat sebelumnya.\n"
+                        "Pending expense dihapus.",
+                        parse_mode="Markdown",
+                    )
+                    return
+        except Exception as e:
+            log.warning(f"Confirm duplicate check failed: {e}")
+
         await callback.answer("Menyimpan...")
 
         status_msg = await callback.message.answer("⏳ Menyimpan ke Notion...")
@@ -1779,6 +1798,22 @@ async def main() -> None:
                 owner = user_record.owner_name if user_record else ""
                 try:
                     rec_url = pending_rec["recurring_page_url"] if pending_rec else None
+                    # Re-check duplicates — email may have logged it
+                    matches = await n.fetch_duplicates(owner, entry.amount, entry.date)
+                    is_dup = False
+                    if matches:
+                        is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date)
+                    if is_dup:
+                        await db.clear_pending_expense(user_id)
+                        if pending_rec:
+                            await db.clear_pending_recurring(user_id)
+                        await bot.send_message(
+                            user_id,
+                            "⚠️ *Duplikat terdeteksi!* Transaksi ini sudah tercatat sebelumnya.\n"
+                            "Pending otomatis dihapus.",
+                            parse_mode="Markdown",
+                        )
+                        continue
                     url = await n.log_expense(entry, owner, c, recurring_page_url=rec_url)
                     page_id = _url_to_id(url)
                     last_saved_page[user_id] = page_id

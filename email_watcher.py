@@ -484,7 +484,20 @@ class EmailWatcher:
                         account=tx.account,
                         confidence=0.95,
                     )
-                    # Duplicate check before auto-logging
+                    # Duplicate check — skip if user has a pending expense with same amount+date
+                    pending = await self._db.get_pending_expense(target_id)
+                    if pending and pending.amount == tx.amount and pending.date == tx.date:
+                        log.info(f"[email] Pending expense matches [{uid}]: {tx.description} Rp {tx.amount:,.0f} — skipping")
+                        await self._notify(
+                            f"📧 *Email — sudah pending*\n"
+                            f"📝 {tx.description}\n"
+                            f"💰 Rp {tx.amount:,.0f}\n"
+                            f"📅 {tx.date}\n\n"
+                            f"Transaksi ini sudah tercatat manual dan menunggu konfirmasi.",
+                            user_id=target_id,
+                        )
+                        await self._db.mark_processed(uid, sender)
+                        return
                     try:
                         matches = await target_notion.fetch_duplicates(target_owner, tx.amount, tx.date)
                         if matches:
