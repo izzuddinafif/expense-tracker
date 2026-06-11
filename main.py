@@ -63,6 +63,16 @@ async def main() -> None:
     pending_since: dict[int, float] = await db.get_all_pending_since()  # user_id → timestamp when pending expense was created
     cat_suggestions_cache: dict[tuple[int, str], list[str]] = {}  # (user_id, description) → recommended categories
 
+    async def _get_email_saved(user_id: int) -> dict | None:
+        saved = email_saved_pages.get(user_id)
+        if not saved:
+            return None
+        if datetime.now().timestamp() - saved["timestamp"] > 600:
+            email_saved_pages.pop(user_id, None)
+            await db.clear_email_saved_page(user_id)
+            return None
+        return saved
+
     async def alert_owner(text: str) -> None:
         all_users = await db.get_all_users()
         for uid in all_users:
@@ -1441,13 +1451,8 @@ async def main() -> None:
         if callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
-        saved = email_saved_pages.get(user_id)
+        saved = await _get_email_saved(user_id)
         if not saved:
-            await callback.answer("Tidak ada yang bisa diedit.")
-            return
-        # Check 10-minute expiry
-        age = datetime.now().timestamp() - saved["timestamp"]
-        if age > 600:
             await callback.answer("Waktu edit sudah habis (10 menit).")
             await callback.message.edit_reply_markup(reply_markup=None)
             return
@@ -1470,8 +1475,8 @@ async def main() -> None:
         if callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
-        if not email_saved_pages.get(user_id):
-            await callback.answer("Sesi kedaluwarsa.")
+        if not await _get_email_saved(user_id):
+            await callback.answer("Waktu edit sudah habis (10 menit).")
             return
         email_pending_edit[user_id] = "desc"
         await callback.message.edit_reply_markup(reply_markup=None)
@@ -1485,8 +1490,8 @@ async def main() -> None:
         if callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
-        if not email_saved_pages.get(user_id):
-            await callback.answer("Sesi kedaluwarsa.")
+        if not await _get_email_saved(user_id):
+            await callback.answer("Waktu edit sudah habis (10 menit).")
             return
         email_pending_edit[user_id] = "amount"
         await callback.message.edit_reply_markup(reply_markup=None)
@@ -1500,8 +1505,8 @@ async def main() -> None:
         if callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
-        if not email_saved_pages.get(user_id):
-            await callback.answer("Sesi kedaluwarsa.")
+        if not await _get_email_saved(user_id):
+            await callback.answer("Waktu edit sudah habis (10 menit).")
             return
         email_pending_edit[user_id] = "date"
         await callback.message.edit_reply_markup(reply_markup=None)
@@ -1515,8 +1520,8 @@ async def main() -> None:
         if callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
-        if not email_saved_pages.get(user_id):
-            await callback.answer("Sesi kedaluwarsa.")
+        if not await _get_email_saved(user_id):
+            await callback.answer("Waktu edit sudah habis (10 menit).")
             return
         email_pending_edit[user_id] = "detail"
         await callback.message.edit_reply_markup(reply_markup=None)
@@ -1534,9 +1539,9 @@ async def main() -> None:
         if callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
-        saved = email_saved_pages.get(user_id)
+        saved = await _get_email_saved(user_id)
         if not saved:
-            await callback.answer("Sesi kedaluwarsa.")
+            await callback.answer("Waktu edit sudah habis (10 menit).")
             return
         result = await get_user_notion(user_id)
         if not result:
@@ -1562,7 +1567,7 @@ async def main() -> None:
         if callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
-        saved = email_saved_pages.get(user_id)
+        saved = await _get_email_saved(user_id)
         if not saved:
             await callback.answer("Sesi kedaluwarsa.")
             return
@@ -1605,7 +1610,7 @@ async def main() -> None:
         if callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
-        saved = email_saved_pages.get(user_id)
+        saved = await _get_email_saved(user_id)
         if not saved:
             await callback.answer("Sesi kedaluwarsa.")
             return
@@ -1634,7 +1639,7 @@ async def main() -> None:
         if callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
-        saved = email_saved_pages.get(user_id)
+        saved = await _get_email_saved(user_id)
         if not saved:
             await callback.answer("Sesi kedaluwarsa.")
             return
@@ -1782,7 +1787,7 @@ async def main() -> None:
             await asyncio.sleep(60)
             now = datetime.now().timestamp()
             for user_id, since in list(pending_since.items()):
-                if now - since < 300:
+                if now - since < 600:
                     continue
                 pending_rec = await db.get_pending_recurring(user_id)
                 entry = await db.get_pending_expense(user_id)
