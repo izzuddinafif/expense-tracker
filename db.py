@@ -118,6 +118,14 @@ class Database:
                 timestamp     REAL NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS debit_merchant_cache (
+                user_id    INTEGER NOT NULL,
+                amount     INTEGER NOT NULL,
+                description TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, amount)
+            );
+
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id              INTEGER PRIMARY KEY,
                 owner_name               TEXT NOT NULL,
@@ -301,19 +309,18 @@ class Database:
         await self._conn.commit()
 
     async def pop_debit(self, user_id: int) -> EmailTransaction | None:
-        """Pop the oldest queued debit tx for this user. Returns None if empty."""
+        """Pop the oldest queued debit tx for this user. Returns None if empty.
+        Uses DELETE ... RETURNING to prevent SELECT-then-DELETE race."""
         cur = await self._conn.execute(
-            "SELECT id, tx_json FROM pending_debit_queue "
-            "WHERE user_id = ? ORDER BY id ASC LIMIT 1",
+            "DELETE FROM pending_debit_queue WHERE id IN ("
+            "SELECT id FROM pending_debit_queue WHERE user_id = ? ORDER BY id ASC LIMIT 1"
+            ") RETURNING tx_json",
             (user_id,),
         )
         row = await cur.fetchone()
+        await self._conn.commit()
         if row is None:
             return None
-        await self._conn.execute(
-            "DELETE FROM pending_debit_queue WHERE id = ?", (row["id"],)
-        )
-        await self._conn.commit()
         return EmailTransaction.model_validate_json(row["tx_json"])
 
     async def debit_queue_depth(self, user_id: int) -> int:
@@ -327,6 +334,23 @@ class Database:
     async def clear_debit_queue(self, user_id: int) -> None:
         await self._conn.execute(
             "DELETE FROM pending_debit_queue WHERE user_id = ?", (user_id,)
+        )
+        await self._conn.commit()
+
+    # ── Debit merchant cache (auto-learned descriptions) ───────────────────────
+
+    async def get_debit_merchant(self, user_id: int, amount: float) -> str | None:
+        cur = await self._conn.execute(
+            "SELECT description FROM debit_merchant_cache WHERE user_id = ? AND amount = ?",
+            (user_id, int(round(amount))),
+        )
+        row = await cur.fetchone()
+        return row["description"] if row else None
+
+    async def set_debit_merchant(self, user_id: int, amount: float, description: str) -> None:
+        await self._conn.execute(
+            "INSERT OR REPLACE INTO debit_merchant_cache (user_id, amount, description, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, int(round(amount)), description, datetime.now(timezone.utc).isoformat()),
         )
         await self._conn.commit()
 
@@ -577,6 +601,17 @@ class Database:
         )
 
     async def upsert_user(self, telegram_id: int, **fields) -> None:
+        allowed = {
+            "owner_name", "notion_token", "setup_step",
+            "expenses_ds", "subcategories_ds", "accounts_ds",
+            "months_ds", "years_ds", "recurring_ds", "assets_ds",
+            "income_ds", "income_subcategories_ds",
+            "income_months_ds", "income_years_ds",
+            "budget_ds", "categories_ds",
+        }
+        bad = set(fields) - allowed
+        if bad:
+            raise ValueError(f"Unexpected user columns: {bad}")
         now = datetime.now(timezone.utc).isoformat()
         all_cols = list(fields.keys())
         cols = ["telegram_id", "created_at", "updated_at", *all_cols]

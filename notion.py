@@ -5,6 +5,10 @@ from models import NotionCache, ExpenseEntry, IncomeEntry, UserRecord
 
 log = logging.getLogger(__name__)
 
+# Locks to prevent TOCTOU race on auto-creating month/year pages
+_month_locks: dict[str, asyncio.Lock] = {}
+_year_locks: dict[str, asyncio.Lock] = {}
+
 
 NOTION_VERSION = "2022-06-28"
 _HTTP_TIMEOUT = 30.0  # seconds
@@ -143,9 +147,9 @@ class NotionClient:
             data = await self._notion_post(url, json=payload)
             results.extend(data["results"])
             pages += 1
-            if not data.get("has_more") or pages >= 100:
-                if pages >= 100:
-                    log.warning("_query_db hit 100-page limit for %s — results truncated", database_id)
+            if not data.get("has_more") or pages >= 200:
+                if pages >= 200:
+                    log.warning("_query_db hit 200-page limit for %s (%d results so far) — truncated", database_id, len(results))
                 break
             payload["start_cursor"] = data["next_cursor"]
 
@@ -264,23 +268,29 @@ class NotionClient:
         match = cache.month_url(month_name)
         if match:
             return match[1]
-        payload = {
-            "parent": {"database_id": db_id},
-            "properties": {
-                "title": {"title": [{"text": {"content": month_name}}]}
-            },
-        }
-        try:
-            data = await self._notion_post(
-                "https://api.notion.com/v1/pages", json=payload,
-            )
-            url = data["url"]
-            cache.months[month_name] = url
-            log.info("Notion WRITE auto-create month: %s → %s", month_name, url)
-            return url
-        except Exception as e:
-            log.warning("Failed to auto-create month page %s: %s", month_name, e)
-            return None
+        # Lock to prevent TOCTOU race — check again after acquiring
+        lock = _month_locks.setdefault(month_name, asyncio.Lock())
+        async with lock:
+            match = cache.month_url(month_name)
+            if match:
+                return match[1]
+            payload = {
+                "parent": {"database_id": db_id},
+                "properties": {
+                    "title": {"title": [{"text": {"content": month_name}}]}
+                },
+            }
+            try:
+                data = await self._notion_post(
+                    "https://api.notion.com/v1/pages", json=payload,
+                )
+                url = data["url"]
+                cache.months[month_name] = url
+                log.info("Notion WRITE auto-create month: %s → %s", month_name, url)
+                return url
+            except Exception as e:
+                log.warning("Failed to auto-create month page %s: %s", month_name, e)
+                return None
 
     async def _ensure_year(self, year_str: str, cache: NotionCache) -> str | None:
         db_id = self._db_ids.get("years_ds")
@@ -289,23 +299,28 @@ class NotionClient:
         match = cache.year_url(year_str)
         if match:
             return match[1]
-        payload = {
-            "parent": {"database_id": db_id},
-            "properties": {
-                "title": {"title": [{"text": {"content": year_str}}]}
-            },
-        }
-        try:
-            data = await self._notion_post(
-                "https://api.notion.com/v1/pages", json=payload,
-            )
-            url = data["url"]
-            cache.years[year_str] = url
-            log.info("Notion WRITE auto-create year: %s → %s", year_str, url)
-            return url
-        except Exception as e:
-            log.warning("Failed to auto-create year page %s: %s", year_str, e)
-            return None
+        lock = _year_locks.setdefault(year_str, asyncio.Lock())
+        async with lock:
+            match = cache.year_url(year_str)
+            if match:
+                return match[1]
+            payload = {
+                "parent": {"database_id": db_id},
+                "properties": {
+                    "title": {"title": [{"text": {"content": year_str}}]}
+                },
+            }
+            try:
+                data = await self._notion_post(
+                    "https://api.notion.com/v1/pages", json=payload,
+                )
+                url = data["url"]
+                cache.years[year_str] = url
+                log.info("Notion WRITE auto-create year: %s → %s", year_str, url)
+                return url
+            except Exception as e:
+                log.warning("Failed to auto-create year page %s: %s", year_str, e)
+                return None
 
     async def log_expense(
         self,
@@ -515,19 +530,26 @@ class NotionClient:
         log.info("Notion WRITE update subcategory: %s → %s", page_id, subcategory_name)
 
     async def fetch_duplicates(
-        self, owner: str, amount: float, date: str
+        self, owner: str, amount: float, date: str, db_key: str = "expenses_ds"
     ) -> list[str]:
-        """Find existing expenses with the same amount + date + owner."""
+        """Find existing entries with similar amount + same date + owner.
+        Uses a range (±1 IDR) to avoid float precision issues.
+        db_key: \"expenses_ds\" (default) or \"income_ds\" for income entries."""
+        _, date_prop = {
+            "expenses_ds": ("Amount", "Date of Expense"),
+            "income_ds": ("Amount", "Date of Income"),
+        }.get(db_key, ("Amount", "Date of Expense"))
         payload = {
             "filter": {
                 "and": [
                     {"property": "Description", "title": {"contains": f"[{owner}]"}},
-                    {"property": "Amount", "number": {"equals": amount}},
-                    {"property": "Date of Expense", "date": {"equals": date}},
+                    {"property": amount_prop, "number": {"greater_or_equal": amount - 1}},
+                    {"property": amount_prop, "number": {"less_or_equal": amount + 1}},
+                    {"property": date_prop, "date": {"equals": date}},
                 ]
             }
         }
-        pages = await self._query_db(self._db_ids["expenses_ds"], extra_payload=payload)
+        pages = await self._query_db(self._db_ids[db_key], extra_payload=payload)
         result = []
         for p in pages:
             title_prop = p["properties"].get("Description", {})
@@ -595,7 +617,7 @@ class NotionClient:
             })
         return result
 
-    async def search_expenses(self, owner: str, keyword: str) -> list[dict]:
+    async def search_expenses(self, owner: str, keyword: str, cache: NotionCache | None = None) -> list[dict]:
         payload = {
             "filter": {
                 "and": [
@@ -605,6 +627,7 @@ class NotionClient:
             }
         }
         pages = await self._query_db(self._db_ids["expenses_ds"], extra_payload=payload)
+        sub_id_to_name = {_url_to_id(url): name for name, url in (cache.subcategories.items() if cache else {})}
         result = []
         for p in pages:
             title_prop = p["properties"].get("Description", {})
@@ -612,11 +635,14 @@ class NotionClient:
             amount = p["properties"].get("Amount", {}).get("number", 0)
             date_prop = p["properties"].get("Date of Expense", {}).get("date") or {}
             sub_rel = p["properties"].get("Expenses Sub-categories", {}).get("relation", [])
+            sub_name = ""
+            if sub_rel and sub_id_to_name:
+                sub_name = sub_id_to_name.get(sub_rel[0]["id"], "")
             result.append({
                 "description": title.replace(f"[{owner}] ", ""),
                 "amount": amount,
                 "date": date_prop.get("start", ""),
-                "url": p["url"],
+                "subcategory": sub_name,
             })
         return result
 

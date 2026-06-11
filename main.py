@@ -1,4 +1,5 @@
 import asyncio
+import math
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import date, datetime, timedelta
@@ -57,11 +58,40 @@ async def main() -> None:
     processing_group: set[int] = set()
     email_cache_holder: list[NotionCache] = []
     watcher_holder: list[EmailWatcher | None] = []
+    watcher_task_ref: asyncio.Task | None = None
     last_saved_page: dict[int, str] = await db.get_all_user_undo()  # user_id → notion page_id (for undo), persisted
     email_saved_pages: dict[int, dict] = await db.get_all_email_saved_pages()  # persisted across restarts
     email_pending_edit: dict[int, str] = {}  # user_id → field being edited (post-save email edit)
     pending_since: dict[int, float] = await db.get_all_pending_since()  # user_id → timestamp when pending expense was created
     cat_suggestions_cache: dict[tuple[int, str], list[str]] = {}  # (user_id, description) → recommended categories
+    saving_locks: dict[int, asyncio.Lock] = {}  # per-user lock to prevent confirm vs auto-confirm double-save
+
+    def _parse_cb(data: str, idx: int = 1) -> int | None:
+        try:
+            return int(data.split(":")[idx])
+        except (IndexError, ValueError):
+            return None
+
+    def _search_keyword(text: str) -> str | None:
+        """Extract a merchant-like keyword from user expense text.
+        Strips amounts, payment methods, and short noise tokens."""
+        tokens = text.split()
+        meaningful = []
+        for t in tokens:
+            clean = t.lower().replace("rp", "").replace(",", "").strip()
+            # Skip numeric tokens
+            try:
+                float(clean.replace(".", ""))
+                continue
+            except ValueError:
+                pass
+            # Skip known payment-method tokens
+            if clean in ("cash", "cas", "transfer", "tf", "debit", "kredit", "cashless", "gojek", "gopay", "ovo", "dana", "shopeepay", "qris", "kartu", "jago", "mandiri", "bsi", "bca", "bni", "bri", "cimb"):
+                continue
+            if len(clean) < 3 and not clean.isalpha():
+                continue
+            meaningful.append(t)
+        return " ".join(meaningful[:4]) if meaningful else None
 
     async def _get_email_saved(user_id: int) -> dict | None:
         saved = email_saved_pages.get(user_id)
@@ -252,55 +282,66 @@ async def main() -> None:
         await get_user_notion(user_id)
 
     async def _process_next_photo(user_id: int, owner: str) -> None:
-        q = photo_queue.get(user_id, [])
-        if not q:
-            processing_group.discard(user_id)
-            return
-        file_id = q.pop(0)
-        chat_id = user_id
-        status_msg = await bot.send_message(chat_id, "🔍 Membaca struk berikutnya...")
-        
-        # Get per-user Notion client and cache
-        result = await get_user_notion(user_id)
-        if not result:
-            await status_msg.delete()
-            await bot.send_message(chat_id, "Ketik /setup untuk menghubungkan Notion workspace kamu.")
-            return
-        user_notion, user_cache = result
-        
-        try:
-            file = await bot.get_file(file_id)
-            image_bytes = await bot.download_file(file.file_path)
-            today = date.today().isoformat()
-            recent = await user_notion.fetch_recent_expenses(owner, user_cache, 10)
-            entry = await agent.extract_from_image(image_bytes.read(), user_cache, today, recent_expenses=recent)
-        except Exception as e:
-            log.error(f"Next photo failed: {e}")
-            await status_msg.delete()
-            await bot.send_message(chat_id, f"❌ Gagal baca struk: `{type(e).__name__}`", parse_mode="Markdown")
-            await _process_next_photo(user_id, owner)
-            return
-        await db.set_pending_expense(user_id, entry)
-        ts = datetime.now().timestamp()
-        pending_since[user_id] = ts
-        await db.set_pending_since(user_id, ts)
-        confidence_emoji = "✅" if entry.confidence >= 0.8 else "⚠️"
-        await status_msg.delete()
-        dup_warning = ""
-        try:
-            matches = await user_notion.fetch_duplicates(owner, entry.amount, entry.date)
-            if matches:
-                is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date)
-                if is_dup:
-                    dup_warning = "\n\n⚠️ *Duplikat terdeteksi!* Transaksi serupa sudah tercatat sebelumnya."
-        except Exception as e:
-            log.warning(f"Duplicate check failed: {e}")
-        await bot.send_message(
-            chat_id,
-            f"{confidence_emoji} Oke! Konfirmasi:{dup_warning}\n\n{format_entry(entry, user_cache)}",
-            parse_mode="Markdown",
-            reply_markup=make_confirm_keyboard(user_id),
-        )
+        while True:
+            q = photo_queue.get(user_id, [])
+            if not q:
+                processing_group.discard(user_id)
+                return
+
+            # Get per-user Notion client and cache
+            result = await get_user_notion(user_id)
+            if not result:
+                await bot.send_message(user_id, "Ketik /setup untuk menghubungkan Notion workspace kamu.")
+                processing_group.discard(user_id)
+                return
+
+            file_id = q[0]
+            user_notion, user_cache = result
+            retries = 0
+            while retries < 3:
+                status_msg = await bot.send_message(user_id, "🔍 Membaca struk berikutnya...")
+                try:
+                    file = await bot.get_file(file_id)
+                    image_bytes = await bot.download_file(file.file_path)
+                    today = date.today().isoformat()
+                    recent = await user_notion.fetch_recent_expenses(owner, user_cache, 10)
+                    entry = await agent.extract_from_image(image_bytes.read(), user_cache, today, recent_expenses=recent)
+                except Exception as e:
+                    retries += 1
+                    log.error(f"Next photo failed (attempt {retries}/3): {e}")
+                    await status_msg.delete()
+                    if retries >= 3:
+                        await bot.send_message(user_id, f"❌ Gagal baca struk setelah 3x: `{type(e).__name__}`", parse_mode="Markdown")
+                    else:
+                        await bot.send_message(user_id, f"⚠️ Gagal baca struk, coba lagi... ({retries}/3)")
+                        continue
+                    break
+                else:
+                    q.pop(0)
+                    await db.set_pending_expense(user_id, entry)
+                    ts = datetime.now().timestamp()
+                    pending_since[user_id] = ts
+                    await db.set_pending_since(user_id, ts)
+                    confidence_emoji = "✅" if entry.confidence >= 0.8 else "⚠️"
+                    await status_msg.delete()
+                    dup_warning = ""
+                    try:
+                        matches = await user_notion.fetch_duplicates(owner, entry.amount, entry.date)
+                        if matches:
+                            is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date)
+                            if is_dup:
+                                dup_warning = "\n\n⚠️ *Duplikat terdeteksi!* Transaksi serupa sudah tercatat sebelumnya."
+                    except Exception as e:
+                        log.warning(f"Duplicate check failed: {e}")
+                    await bot.send_message(
+                        user_id,
+                        f"{confidence_emoji} Oke! Konfirmasi:{dup_warning}\n\n{format_entry(entry, user_cache)}",
+                        parse_mode="Markdown",
+                        reply_markup=make_confirm_keyboard(user_id),
+                    )
+                    break
+            if retries >= 3:
+                q.pop(0)  # discard failed photo after 3 retries
 
     # ── Handlers ──────────────────────────────────────────────────────────────
 
@@ -752,6 +793,8 @@ async def main() -> None:
     @dp.message(F.text)
     async def handle_text(msg: Message) -> None:
         user_id = msg.from_user.id
+        if not msg.text:
+            return
         text = msg.text.strip()
 
         # ── Setup flow (check before anything else) ───────────────────────────
@@ -789,11 +832,16 @@ async def main() -> None:
                 await msg.answer("Tidak ada pengeluaran pending.")
                 return
             if edit_field == "desc":
-                cat_suggestions_cache = {k: v for k, v in cat_suggestions_cache.items() if k[0] != user_id}
+                for k in list(cat_suggestions_cache):
+                    if k[0] == user_id:
+                        del cat_suggestions_cache[k]
                 entry.description = text
             elif edit_field == "amount":
                 try:
-                    entry.amount = float(text.replace(",", "").replace("Rp", "").replace("rp", "").strip())
+                    amount_val = float(text.replace(",", "").replace("Rp", "").replace("rp", "").strip())
+                    if not math.isfinite(amount_val) or amount_val <= 0:
+                        raise ValueError
+                    entry.amount = amount_val
                 except ValueError:
                     pending_edit[user_id] = "amount"
                     await msg.answer("❌ Angka tidak valid. Ketik jumlah angka saja (contoh: 25000):")
@@ -833,6 +881,8 @@ async def main() -> None:
                     email_saved_pages[user_id]["description"] = text
                 elif email_field == "amount":
                     amount = float(text.replace(",", "").replace("Rp", "").replace("rp", "").strip())
+                    if not math.isfinite(amount) or amount <= 0:
+                        raise ValueError("Jumlah tidak valid")
                     await user_notion.update_expense_amount(page_id, amount)
                     email_saved_pages[user_id]["amount"] = amount
                 elif email_field == "date":
@@ -840,7 +890,14 @@ async def main() -> None:
                     email_saved_pages[user_id]["date"] = text
                 elif email_field == "detail":
                     cats = list(user_cache.category_subcategories.keys())
-                    recommended = await agent.suggest_categories(text, cats)
+                    past = None
+                    try:
+                        kw = _search_keyword(text)
+                        if kw:
+                            past = await user_notion.search_expenses(owner, kw, user_cache)
+                    except Exception as e:
+                        log.warning(f"Past suggest-category search failed: {e}")
+                    recommended = await agent.suggest_categories(text, cats, past_similar=past)
                     new_desc = f"{saved['description']} — {text}"
                     await user_notion.update_expense_title(page_id, new_desc, owner)
                     email_saved_pages[user_id]["description"] = new_desc
@@ -870,6 +927,8 @@ async def main() -> None:
                 await msg.answer("Transaksi debit dibatalkan ❌")
                 return
             await db.clear_pending_email_expense(user_id)
+            # Learn the merchant name for this amount (Jago debit cache)
+            await db.set_debit_merchant(user_id, pending_tx.amount, text)
             entry = ExpenseEntry(
                 description=text,
                 amount=pending_tx.amount,
@@ -932,8 +991,16 @@ async def main() -> None:
         elif intent.type == "log_text":
             today = date.today().isoformat()
             recent = await user_notion.fetch_recent_expenses(owner, user_cache, 10)
+            # Search past transactions with same merchant for context
+            past = None
             try:
-                entry = await agent.extract_from_text(text, user_cache, today, recent_expenses=recent)
+                kw = _search_keyword(text)
+                if kw:
+                    past = await user_notion.search_expenses(owner, kw, user_cache)
+            except Exception as e:
+                log.warning(f"Past expense search failed: {e}")
+            try:
+                entry = await agent.extract_from_text(text, user_cache, today, recent_expenses=recent, past_similar=past)
             except Exception as e:
                 log.error(f"extract_from_text failed: {e}")
                 await msg.answer(
@@ -995,6 +1062,14 @@ async def main() -> None:
             await callback.answer("Tidak punya akses.")
             return
 
+        lock = saving_locks.setdefault(user_id, asyncio.Lock())
+        if lock.locked():
+            await callback.answer("Sedang diproses...")
+            return
+        async with lock:
+            await _do_confirm(callback, user_id)
+
+    async def _do_confirm(callback: CallbackQuery, user_id: int) -> None:
         result = await get_user_notion(user_id)
         if not result:
             await callback.answer("Ketik /setup untuk menghubungkan Notion.")
@@ -1006,10 +1081,16 @@ async def main() -> None:
         entry = await db.get_pending_expense(user_id)
         if not entry:
             await callback.answer("Tidak ada pengeluaran pending.")
-            await callback.message.edit_reply_markup(reply_markup=None)
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
             return
 
-        await callback.message.edit_reply_markup(reply_markup=None)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
 
         # Re-check duplicates before saving — email may have logged it in the meantime
         try:
@@ -1030,22 +1111,23 @@ async def main() -> None:
             log.warning(f"Confirm duplicate check failed: {e}")
 
         await callback.answer("Menyimpan...")
-
         status_msg = await callback.message.answer("⏳ Menyimpan ke Notion...")
         try:
-            # Check for recurring expense link before logging
             pending_rec = await db.get_pending_recurring(user_id)
             rec_page_url = pending_rec["recurring_page_url"] if pending_rec else None
 
-            # Clear before write to prevent double-save on rapid taps
+            url = await user_notion.log_expense(entry, owner, user_cache, recurring_page_url=rec_page_url)
+            page_id = _url_to_id(url)
+            last_saved_page[user_id] = page_id
+
+            if pending_rec:
+                await db.mark_processed(pending_rec["uid"], pending_rec["sender"])
+
             await db.clear_pending_expense(user_id)
             await db.clear_pending_since(user_id)
             if pending_rec:
                 await db.clear_pending_recurring(user_id)
 
-            url = await user_notion.log_expense(entry, owner, user_cache, recurring_page_url=rec_page_url)
-            page_id = _url_to_id(url)
-            last_saved_page[user_id] = page_id
             await db.set_user_undo(user_id, page_id, entry.description, entry.amount, entry.date, entry.subcategory)
             await status_msg.edit_text(
                 f"✅ Tersimpan! [Lihat di Notion]({url})",
@@ -1055,7 +1137,6 @@ async def main() -> None:
             asyncio.create_task(_process_next_photo(user_id, owner))
         except Exception as e:
             log.error(f"Notion write failed: {e}")
-            # Re-set pending expense if the write failed
             await db.set_pending_expense(user_id, entry)
             ts = datetime.now().timestamp()
             pending_since[user_id] = ts
@@ -1127,6 +1208,10 @@ async def main() -> None:
             recommended = cat_suggestions_cache.get(cache_key)
             if recommended is None:
                 recommended = await agent.suggest_categories(entry.description, cats)
+                # LRU eviction: keep cache under 500 entries
+                if len(cat_suggestions_cache) >= 500:
+                    oldest = next(iter(cat_suggestions_cache))
+                    del cat_suggestions_cache[oldest]
                 cat_suggestions_cache[cache_key] = recommended
             rec_buttons: list[list[InlineKeyboardButton]] = []
             for cat in recommended:
@@ -1331,6 +1416,10 @@ async def main() -> None:
             await callback.answer("Tidak punya akses.")
             return
 
+        pending_rec = await db.get_pending_recurring(user_id)
+        if pending_rec:
+            await db.mark_processed(pending_rec["uid"], pending_rec["sender"])
+
         await db.clear_pending_expense(user_id)
         await db.clear_pending_since(user_id)
         await db.clear_pending_email_expense(user_id)
@@ -1364,8 +1453,24 @@ async def main() -> None:
             return
 
         await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.answer("Menyimpan pemasukan...")
 
+        # Re-check duplicates before saving
+        try:
+            income_matches = await user_notion.fetch_duplicates(owner, income.amount, income.date, db_key="income_ds")
+            if income_matches:
+                is_dup = await agent.check_duplicate(income_matches, income.description, income.amount, income.date)
+                if is_dup:
+                    await db.clear_pending_income(user_id)
+                    await callback.answer("Duplikat — sudah tercatat.")
+                    await callback.message.answer(
+                        "⚠️ *Duplikat terdeteksi!* Pemasukan ini sudah tercatat sebelumnya.",
+                        parse_mode="Markdown",
+                    )
+                    return
+        except Exception as e:
+            log.warning(f"Income confirm duplicate check failed: {e}")
+
+        await callback.answer("Menyimpan pemasukan...")
         status_msg = await callback.message.answer("⏳ Menyimpan pemasukan ke Notion...")
         try:
             url = await user_notion.log_income(income, owner, user_cache)
@@ -1771,6 +1876,7 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("cat_cancel:"))
     async def handle_cat_cancel(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
+        # page_id is embedded in callback data but unused
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("Dibatalkan")
 
@@ -1788,6 +1894,10 @@ async def main() -> None:
             now = datetime.now().timestamp()
             for user_id, since in list(pending_since.items()):
                 if now - since < 600:
+                    continue
+                # Skip if user is currently confirming (lock held by handle_confirm)
+                user_lock = saving_locks.get(user_id)
+                if user_lock and user_lock.locked():
                     continue
                 pending_rec = await db.get_pending_recurring(user_id)
                 entry = await db.get_pending_expense(user_id)
@@ -1822,6 +1932,8 @@ async def main() -> None:
                     url = await n.log_expense(entry, owner, c, recurring_page_url=rec_url)
                     page_id = _url_to_id(url)
                     last_saved_page[user_id] = page_id
+                    if pending_rec:
+                        await db.mark_processed(pending_rec["uid"], pending_rec["sender"])
                     await db.set_user_undo(user_id, page_id, entry.description, entry.amount, entry.date, entry.subcategory)
                     await db.clear_pending_expense(user_id)
                     if pending_rec:
@@ -1887,22 +1999,24 @@ async def main() -> None:
             alert_fn=alert_owner,
         )
         watcher_holder.append(email_watcher)
-        _watcher_task = asyncio.create_task(email_watcher.run())
+        watcher_task_ref = asyncio.create_task(email_watcher.run())
         log.info("Email watcher scheduled.")
 
         async def _watch_over(task: asyncio.Task) -> None:
-            nonlocal _watcher_task
+            nonlocal watcher_task_ref
             try:
                 await task
+            except asyncio.CancelledError:
+                pass  # clean shutdown
             except Exception:
                 log.critical("Email watcher died, restarting in 10s...", exc_info=True)
                 await asyncio.sleep(10)
-                _watcher_task = asyncio.create_task(email_watcher.run())
-                _watcher_task.add_done_callback(
+                watcher_task_ref = asyncio.create_task(email_watcher.run())
+                watcher_task_ref.add_done_callback(
                     lambda t: asyncio.create_task(_watch_over(t))
                 )
 
-        _watcher_task.add_done_callback(
+        watcher_task_ref.add_done_callback(
             lambda t: asyncio.create_task(_watch_over(t))
         )
 
@@ -1911,6 +2025,9 @@ async def main() -> None:
     try:
         await dp.start_polling(bot)
     finally:
+        # Cancel watcher task before closing DB
+        if watcher_task_ref:
+            watcher_task_ref.cancel()
         await db.close()
         log.info("Database connection closed.")
 

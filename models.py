@@ -1,5 +1,12 @@
+import math
 from dataclasses import dataclass, field
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+
+def _validate_amount(cls, v: float) -> float:
+    if not math.isfinite(v) or v <= 0:
+        raise ValueError(f"Amount must be a positive finite number, got {v}")
+    return v
 
 
 # ── LLM output models ────────────────────────────────────────────────────────
@@ -12,6 +19,8 @@ class ExpenseEntry(BaseModel):
     account: str        # must match a name in NotionCache.accounts
     confidence: float   # 0.0–1.0, how confident the model is in the extraction
 
+    _validate_amount = field_validator("amount")(_validate_amount)
+
 
 class IncomeEntry(BaseModel):
     description: str
@@ -20,6 +29,8 @@ class IncomeEntry(BaseModel):
     subcategory: str    # must match a name in NotionCache.income_subcategories
     account: str        # must match a name in NotionCache.accounts
     confidence: float   # 0.0–1.0
+
+    _validate_amount = field_validator("amount")(_validate_amount)
 
 
 class QueryIntent(BaseModel):
@@ -89,7 +100,14 @@ def _fuzzy_match(name: str, options: dict[str, str]) -> tuple[str, str] | None:
     for k, v in options.items():
         if k.lower() == name_lower:
             return k, v
-    # among partial matches prefer the longest key (most specific)
+    # prefix match (minimum 2 chars to avoid single-letter accidental matches)
+    if len(name_lower) >= 2:
+        for k, v in options.items():
+            if k.lower().startswith(name_lower) or name_lower.startswith(k.lower()):
+                return k, v
+    # partial match with minimum length guard to avoid single-char matches
+    if len(name_lower) < 3:
+        return None
     candidates = [
         (k, v) for k, v in options.items()
         if name_lower in k.lower() or k.lower() in name_lower

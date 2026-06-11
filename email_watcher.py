@@ -56,7 +56,7 @@ SKIP_SUBJECT_KEYWORDS = [
 ]
 
 IMAP_HOST = "imap.gmail.com"
-LOOKBACK_DAYS = 1    # only scan today's and yesterday's emails
+LOOKBACK_DAYS = 3    # scan last 3 days — catches emails after brief downtime
 
 # Description the AI returns for Jago debit card emails (no merchant info)
 JAGO_DEBIT_DESCRIPTION = "jago debit card transaction"
@@ -330,16 +330,48 @@ class EmailWatcher:
     async def _ask_debit_merchant(self, tx: EmailTransaction, user_id: int | None = None) -> bool:
         """
         For a Jago debit card tx with no merchant info:
-        - if no tx is currently pending, promote this one and notify
+        - check cache for known merchant name for this amount
+        - if found, auto-create pending expense (no notification needed)
+        - if not found: promote to pending_email_expense and notify
         - if a tx is already pending, queue it
-
-        Returns True if the transaction was successfully handled (notified or queued).
-        Returns False if Telegram notification failed for a newly-promoted tx,
-        so the caller can avoid marking the email as processed.
         """
         target = user_id or self._owner_id
         if target is None:
             return False
+
+        # Check cache for auto-learned merchant name
+        cached = await self._db.get_debit_merchant(target, tx.amount)
+        if cached:
+            entry = ExpenseEntry(
+                description=cached,
+                amount=tx.amount,
+                date=tx.date,
+                subcategory=tx.subcategory,
+                account=tx.account,
+                confidence=0.9,
+            )
+            await self._db.set_pending_expense(target, entry)
+            subcat_match = self._cache_getter().closest_subcategory(entry.subcategory)
+            sub_text = subcat_match[0] if subcat_match else entry.subcategory
+            acc_match = self._cache_getter().closest_account(entry.account)
+            acc_text = acc_match[0] if acc_match else entry.account
+            if self._bot and target:
+                try:
+                    await self._bot.send_message(
+                        target,
+                        f"💳 *Kartu debit Jago* — Rp {tx.amount:,.0f}\n"
+                        f"🏷 {sub_text} · 🏦 {acc_text}\n"
+                        f"📅 {tx.date}\n\n"
+                        f"🔁 Merchant otomatis: *{cached}*\n"
+                        f"Konfirmasi:",
+                        parse_mode="Markdown",
+                        reply_markup=make_confirm_keyboard(target),
+                    )
+                except Exception as e:
+                    log.error(f"Telegram notify failed for cached debit: {e}")
+                    await self._db.clear_pending_expense(target)
+                    return False
+            return True
 
         current = await self._db.get_pending_email_expense(target)
         if current is None:
@@ -429,6 +461,21 @@ class EmailWatcher:
                     recurring = target_cache.recurring_payments.get(int(round(tx.amount)))
 
                     if recurring:
+                        # Check if user already has a pending entry for this
+                        existing_pending = await self._db.get_pending_expense(target_id)
+                        if existing_pending and existing_pending.amount == tx.amount:
+                            log.info(f"[email] Recurring already pending [{uid}]: skipping duplicate")
+                            await self._notify(
+                                f"📧 *Email — pembayaran rutin sudah pending*\n"
+                                f"📝 {recurring['name']}\n"
+                                f"💰 Rp {tx.amount:,.0f}\n"
+                                f"📅 {tx.date}\n\n"
+                                f"Sudah ada transaksi ini yang menunggu konfirmasi.",
+                                user_id=target_id,
+                            )
+                            await self._db.mark_processed(uid, sender)
+                            return
+
                         entry = ExpenseEntry(
                             description=recurring["name"],
                             amount=tx.amount,
@@ -464,7 +511,7 @@ class EmailWatcher:
                             f"[email] Recurring Rp {tx.amount:,.0f} ({recurring['name']}) "
                             f"— waiting for user confirmation via Simpan/Edit/Batal"
                         )
-                        await self._db.mark_processed(uid, sender)
+                        # Don't mark_processed yet — wait for user confirm/cancel
                         return
                     else:
                         log.info(
@@ -550,6 +597,7 @@ class EmailWatcher:
                 dest = tx.recipient_bank or "rekening sendiri"
                 log.info(f"[email] Self-transfer Rp {tx.amount:,.0f} → {dest}")
 
+                skip_admin_fee = False
                 if tx.admin_fee > 0:
                     fee_entry = ExpenseEntry(
                         description=f"Admin fee – transfer ke {dest}",
@@ -559,18 +607,43 @@ class EmailWatcher:
                         account=tx.account,
                         confidence=0.9,
                     )
-                    url = await target_notion.log_expense(fee_entry, target_owner, target_cache)
-                    if self._on_save_fn:
-                        await self._on_save_fn(
-                            target_id, url, fee_entry.description, fee_entry.amount, fee_entry.date, fee_entry.subcategory,
-                        )
-                    log.info(f"[email→Notion] Admin fee Rp {tx.admin_fee:,.0f} logged")
-                    await self._notify_with_markup(
+                    # Duplicate check for admin fee
+                    try:
+                        fee_matches = await target_notion.fetch_duplicates(target_owner, tx.admin_fee, tx.date)
+                        if fee_matches:
+                            is_fee_dup = await self._agent.check_duplicate(
+                                fee_matches, fee_entry.description, tx.admin_fee, tx.date,
+                            )
+                            if is_fee_dup:
+                                log.info(f"[email] Admin fee duplicate skipped [{uid}]: Rp {tx.admin_fee:,.0f}")
+                                await self._notify(
+                                    f"📧 *Admin fee duplikat, dilewati*\n"
+                                    f"💰 Rp {tx.admin_fee:,.0f}\n"
+                                    f"📅 {tx.date}\n\n"
+                                    f"Biaya admin ini sudah tercatat sebelumnya.",
+                                    user_id=target_id,
+                                )
+                                skip_admin_fee = True
+                    except Exception as e:
+                        log.warning(f"[email] Admin fee duplicate check failed: {e}")
+
+                    url = None
+                    if not skip_admin_fee:
+                        url = await target_notion.log_expense(fee_entry, target_owner, target_cache)
+                        if self._on_save_fn:
+                            await self._on_save_fn(
+                                target_id, url, fee_entry.description, fee_entry.amount, fee_entry.date, fee_entry.subcategory,
+                            )
+                        log.info(f"[email→Notion] Admin fee Rp {tx.admin_fee:,.0f} logged")
+
+                    notify_text = (
                         f"📧 *Transfer sendiri* Rp {tx.amount:,.0f} → {dest}\n"
-                        f"Biaya admin tercatat: 💰 Rp {tx.admin_fee:,.0f}\n"
-                        f"[Lihat di Notion]({url})",
-                        make_email_edit_keyboard(target_id),
-                        user_id=target_id,
+                        f"Biaya admin {'tercatat' if url else 'duplikat, dilewati'}: 💰 Rp {tx.admin_fee:,.0f}\n"
+                    )
+                    if url:
+                        notify_text += f"[Lihat di Notion]({url})"
+                    await self._notify_with_markup(
+                        notify_text, make_email_edit_keyboard(target_id), user_id=target_id,
                     )
                 else:
                     await self._notify(
@@ -613,7 +686,15 @@ class EmailWatcher:
 
                 processed = await self._db.get_all_processed_uids()
                 self._last_imap_error = None
-                emails = await asyncio.to_thread(self._imap_fetch, processed)
+                try:
+                    emails = await asyncio.wait_for(
+                        asyncio.to_thread(self._imap_fetch, processed),
+                        timeout=60,
+                    )
+                except asyncio.TimeoutError:
+                    log.error("IMAP fetch timed out after 60s")
+                    self._last_imap_error = "timeout"
+                    emails = []
 
                 if self._last_imap_error:
                     await self._alert(

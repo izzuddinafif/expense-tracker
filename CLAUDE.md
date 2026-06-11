@@ -103,3 +103,7 @@ User ID mapping is hardcoded in `config.py` `load_config()` — not env-var driv
 - Dates in **ISO format** (YYYY-MM-DD).
 - Bank email parsing handles Indonesian-language email bodies (Indonesian month abbreviations, IDR amount formatting with periods as thousands separators).
 - SQLite database stored at `data/expense_tracker.db` (persisted via Docker volume).
+
+## Active Plans
+
+See `audit-plan.md` for the current code audit progress and remaining work items.
