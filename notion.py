@@ -510,6 +510,27 @@ class NotionClient:
         )
         log.info("Notion WRITE update date: %s → %s", page_id, date)
 
+    async def update_expense_account(
+        self, page_id: str, account_name: str, cache: NotionCache
+    ) -> str:
+        match = cache.closest_account(account_name)
+        if not match:
+            raise ValueError(f"Account not found: {account_name}")
+        _, acc_url = match
+        data = await self._notion_patch(
+            f"https://api.notion.com/v1/pages/{page_id}",
+            {
+                "properties": {
+                    "Accounts": {
+                        "relation": [{"id": _url_to_id(acc_url)}]
+                    }
+                }
+            },
+        )
+        url = data.get("url", page_id)
+        log.info("Notion WRITE update account: %s → %s (%s)", page_id, account_name, url)
+        return url
+
     async def update_expense_subcategory(
         self, page_id: str, subcategory_name: str, cache: NotionCache
     ) -> None:
@@ -628,6 +649,7 @@ class NotionClient:
         }
         pages = await self._query_db(self._db_ids["expenses_ds"], extra_payload=payload)
         sub_id_to_name = {_url_to_id(url): name for name, url in (cache.subcategories.items() if cache else {})}
+        acc_id_to_name = {_url_to_id(url): name for name, url in (cache.accounts.items() if cache else {})}
         result = []
         for p in pages:
             title_prop = p["properties"].get("Description", {})
@@ -638,11 +660,16 @@ class NotionClient:
             sub_name = ""
             if sub_rel and sub_id_to_name:
                 sub_name = sub_id_to_name.get(sub_rel[0]["id"], "")
+            acc_rel = p["properties"].get("Accounts", {}).get("relation", [])
+            acc_name = ""
+            if acc_rel and acc_id_to_name:
+                acc_name = acc_id_to_name.get(acc_rel[0]["id"], "")
             result.append({
                 "description": title.replace(f"[{owner}] ", ""),
                 "amount": amount,
                 "date": date_prop.get("start", ""),
                 "subcategory": sub_name,
+                "account": acc_name,
             })
         return result
 
