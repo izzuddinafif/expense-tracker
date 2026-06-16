@@ -355,12 +355,16 @@ class NotionClient:
             properties["Expenses Sub-categories"] = {
                 "relation": [{"id": _url_to_id(sub_url)}]
             }
+        else:
+            log.warning("Expense '%s' — subcategory '%s' did not match any cache entry", entry.description, entry.subcategory)
 
         if account_match:
             _, acc_url = account_match
             properties["Accounts"] = {
                 "relation": [{"id": _url_to_id(acc_url)}]
             }
+        else:
+            log.warning("Expense '%s' — account '%s' did not match any cache entry", entry.description, entry.account)
 
         if month_url:
             properties["Month"] = {

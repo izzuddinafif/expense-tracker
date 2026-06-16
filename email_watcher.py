@@ -576,18 +576,20 @@ class EmailWatcher:
                             target_id, url, tx.description, tx.amount, tx.date, tx.subcategory,
                         )
                     subcat_match = target_cache.closest_subcategory(tx.subcategory)
+                    acc_match = target_cache.closest_account(tx.account)
                     log.info(
                         f"[email→Notion] {tx.description} "
                         f"Rp {tx.amount:,.0f} [{tx.subcategory}]"
                     )
                     sub_text = subcat_match[0] if subcat_match else f"❓ {tx.subcategory}"
+                    acc_text = acc_match[0] if acc_match else f"❓ {tx.account}"
                     await self._notify_with_markup(
                         f"📧 *Otomatis tercatat dari email*\n"
                         f"📝 {tx.description}\n"
                         f"💰 Rp {tx.amount:,.0f}\n"
                         f"📅 {tx.date}\n"
                         f"🏷 {sub_text}\n"
-                        f"🏦 {tx.account}\n"
+                        f"🏦 {acc_text}\n"
                         f"[Lihat di Notion]({url})",
                         make_email_edit_keyboard(target_id),
                         user_id=target_id,
