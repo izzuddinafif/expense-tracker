@@ -227,6 +227,45 @@ Phase 2 — Security                 → 3/3  ✅
 Phase 3 — Robustness               → 13/13 ✅
 Phase 4 — Features                 → 3/3  ✅
 Total                              → 24/24 ✅
+
+---
+
+## Phase 5 — Daily Audit Improvements (2026-06-16)
+
+### [x] 🟣 5.1 — `/export` CSV command
+
+**`main.py`**
+
+New command: `/export [filter]` — exports expenses to CSV and sends as document.
+- `/export` or `/export thismonth` — current month
+- `/export 2026-05` — specific month
+- `/export all` — all expenses
+- Columns: Tanggal, Deskripsi, Jumlah (IDR), Kategori
+- UTF-8 with BOM for Excel compatibility
+
+### [x] 🟣 5.2 — Dockerfile hardening
+
+**`Dockerfile`**
+- Non-root `appuser`
+- `.dockerignore` added
+- HEALTHCHECK instruction
+
+### [x] 🟣 5.3 — docker-compose healthcheck
+
+**`docker-compose.yaml`**
+- Added healthcheck block (Python process alive check)
+
+### [x] ⚪ 5.4 — Cleanup repo root
+
+- Removed `fix_notion.py` (stale Python helper)
+- Removed `fix_notion.sh` (stale bash helper)
+- Cleaned `__pycache__/`
+- Updated `.gitignore` with missing entries (`fix_notion.*`, `bot.log`, `.DS_Store`)
+
+### [x] 🔵 5.5 — `handle_confirm` uses `_parse_cb` helper
+
+**`main.py:handle_confirm`**
+- Replaced manual `int(callback.data.split(':')[1])` with `_parse_cb(callback.data, 1)` + `None` guard
 ```
 
 

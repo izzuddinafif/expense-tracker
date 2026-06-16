@@ -1,7 +1,14 @@
 .git
+.gitignore
+.env
 .venv
 __pycache__
-.env
-*.db
-*.migrated
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache
+data/
+fix_notion.py
+fix_notion.sh
+*.md
+LICENSE

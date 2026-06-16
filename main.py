@@ -1,4 +1,6 @@
 import asyncio
+import csv
+import io
 import math
 import logging
 from logging.handlers import RotatingFileHandler
@@ -11,6 +13,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     CallbackQuery,
+    InputFile,
 )
 
 from config import load_config
@@ -389,6 +392,7 @@ async def main() -> None:
             "/budget — cek status anggaran bulanan\n"
             "/search <kata kunci> — cari pengeluaran\n"
             "/stats — ringkasan pengeluaran bulan ini\n"
+            "/export — ekspor pengeluaran ke CSV (thismonth / YYYY-MM / all)\n"
             "/refresh — muat ulang data kategori dari Notion\n"
             "/status — status email watcher dan bot\n"
             "/linkemail — hubungkan akun bank ke email watcher\n"
@@ -722,6 +726,64 @@ async def main() -> None:
                 lines.append(f"  {emoji} {b['name']}: Rp {spent:,.0f} / {budget:,.0f} ({pct:.0f}%{warn})")
 
         await msg.answer("\n".join(lines), parse_mode="Markdown")
+
+    @dp.message(Command("export"))
+    async def handle_export(msg: Message) -> None:
+        user_id = msg.from_user.id
+        result = await get_user_notion(user_id)
+        if not result:
+            await msg.answer("Ketik /setup untuk menghubungkan Notion workspace kamu.")
+            return
+        user_notion, user_cache = result
+        user = await db.get_user(user_id)
+        owner = user.owner_name
+
+        parts = msg.text.split(maxsplit=1)
+        # Optional filter: /export thismonth | /export <month> | /export all
+        filter_type = parts[1].lower().strip() if len(parts) > 1 else "thismonth"
+
+        try:
+            expenses = await user_notion.fetch_expenses(owner, user_cache)
+        except Exception as e:
+            log.error(f"/export fetch_expenses failed: {e}")
+            await msg.answer(f"❌ Gagal ambil data.\n`{type(e).__name__}: {str(e)[:80]}`", parse_mode="Markdown")
+            return
+
+        if not expenses:
+            await msg.answer("Belum ada pengeluaran untuk diekspor.")
+            return
+
+        # Filter by date
+        now = datetime.now()
+        if filter_type == "thismonth":
+            prefix = now.strftime("%Y-%m")
+            expenses = [e for e in expenses if e["date"].startswith(prefix)]
+            filename = f"expenses_{prefix}.csv"
+        elif filter_type.strip().count("-") == 1 and len(filter_type.strip()) == 7:
+            # looks like YYYY-MM
+            expenses = [e for e in expenses if e["date"].startswith(filter_type.strip())]
+            filename = f"expenses_{filter_type.strip()}.csv"
+        else:
+            filename = "expenses_all.csv"
+
+        if not expenses:
+            await msg.answer(f"Tidak ada data untuk filter `{filter_type}`.")
+            return
+
+        # Build CSV in memory
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Tanggal", "Deskripsi", "Jumlah (IDR)", "Kategori"])
+        for e in expenses:
+            writer.writerow([e["date"], e.get("description", ""), int(e["amount"]), e.get("subcategory", "-")])
+
+        csv_bytes = output.getvalue().encode("utf-8-sig")  # BOM for Excel compatibility
+
+        await msg.answer_document(
+            io.BytesIO(csv_bytes),
+            filename=filename,
+            caption=f"📊 *Export {len(expenses)} transaksi*\n{filter_type}"
+        )
 
     @dp.message(F.photo)
     async def handle_photo(msg: Message) -> None:
@@ -1057,8 +1119,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("confirm:"))
     async def handle_confirm(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
 

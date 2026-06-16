@@ -1,7 +1,14 @@
 .env
 .venv/
 __pycache__/
-expense_tracker.db
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+data/
 processed_emails.json
 processed_emails.json.migrated
-data/
+fix_notion.py
+fix_notion.sh
+bot.log
+.DS_Store
