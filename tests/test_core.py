@@ -1,0 +1,466 @@
+"""
+Tests for db.py and models.py — core data layer.
+
+Run with: .venv/bin/pytest tests/ -v
+"""
+import asyncio
+import math
+import os
+import tempfile
+
+import pytest
+import pytest_asyncio
+
+from models import ExpenseEntry, IncomeEntry, QueryIntent, EmailTransaction, NotionCache, _fuzzy_match
+from db import Database
+
+
+# ── models.py tests ────────────────────────────────────────────────────────────
+
+class TestExpenseEntry:
+    def test_valid_entry(self):
+        e = ExpenseEntry(
+            description="Nasi goreng",
+            amount=25000,
+            date="2026-06-17",
+            subcategory="Food",
+            account="Cash",
+            confidence=0.95,
+        )
+        assert e.amount == 25000
+        assert e.description == "Nasi goreng"
+
+    def test_amount_must_be_positive(self):
+        with pytest.raises(Exception):
+            ExpenseEntry(
+                description="Test",
+                amount=-100,
+                date="2026-06-17",
+                subcategory="Food",
+                account="Cash",
+                confidence=0.5,
+            )
+
+    def test_amount_must_be_finite(self):
+        with pytest.raises(Exception):
+            ExpenseEntry(
+                description="Test",
+                amount=math.inf,
+                date="2026-06-17",
+                subcategory="Food",
+                account="Cash",
+                confidence=0.5,
+            )
+
+    def test_amount_rejects_nan(self):
+        with pytest.raises(Exception):
+            ExpenseEntry(
+                description="Test",
+                amount=math.nan,
+                date="2026-06-17",
+                subcategory="Food",
+                account="Cash",
+                confidence=0.5,
+            )
+
+    def test_amount_rejects_zero(self):
+        with pytest.raises(Exception):
+            ExpenseEntry(
+                description="Test",
+                amount=0,
+                date="2026-06-17",
+                subcategory="Food",
+                account="Cash",
+                confidence=0.5,
+            )
+
+    def test_model_dump_json_roundtrip(self):
+        e = ExpenseEntry(
+            description="Indomie",
+            amount=5000,
+            date="2026-06-17",
+            subcategory="Food",
+            account="Jago",
+            confidence=0.9,
+        )
+        raw = e.model_dump_json()
+        e2 = ExpenseEntry.model_validate_json(raw)
+        assert e2.amount == 5000
+        assert e2.description == "Indomie"
+        assert e2.date == "2026-06-17"
+
+
+class TestIncomeEntry:
+    def test_valid_income(self):
+        e = IncomeEntry(
+            description="Gaji Juni",
+            amount=3000000,
+            date="2026-06-01",
+            subcategory="Salary",
+            account="Mandiri",
+            confidence=1.0,
+        )
+        assert e.amount == 3000000
+
+    def test_amount_validation(self):
+        with pytest.raises(Exception):
+            IncomeEntry(
+                description="Bad",
+                amount=-1,
+                date="2026-06-01",
+                subcategory="Other",
+                account="Cash",
+                confidence=0.5,
+            )
+
+
+class TestQueryIntent:
+    def test_from_json(self):
+        obj = QueryIntent(type="query", text="Berapa pengeluaran bulan ini?")
+        assert obj.type == "query"
+        assert "pengeluaran" in obj.text
+
+
+class TestEmailTransaction:
+    def test_expense_type(self):
+        tx = EmailTransaction(
+            type="expense",
+            description="Warung Padang",
+            amount=35000,
+            admin_fee=0,
+            date="2026-06-17",
+            subcategory="Food",
+            account="Mandiri",
+        )
+        assert tx.type == "expense"
+        assert tx.admin_fee == 0
+
+    def test_self_transfer(self):
+        tx = EmailTransaction(
+            type="self_transfer",
+            description="Transfer ke BSI",
+            amount=500000,
+            admin_fee=2500,
+            date="2026-06-17",
+            subcategory="Transfer of Wealth",
+            account="Mandiri",
+            recipient_bank="BSI",
+        )
+        assert tx.admin_fee == 2500
+        assert tx.recipient_bank == "BSI"
+
+    def test_skip(self):
+        tx = EmailTransaction(
+            type="skip",
+            description="",
+            amount=0,
+            admin_fee=0,
+            date="2026-06-17",
+            subcategory="",
+            account="",
+            skip_reason="failed transaction",
+        )
+        assert tx.type == "skip"
+
+
+class TestFuzzyMatch:
+    def test_exact_match(self):
+        options = {"Food": "url1", "Transport": "url2"}
+        result = _fuzzy_match("food", options)
+        assert result is not None
+        assert result[0] == "Food"
+
+    def test_case_insensitive(self):
+        options = {"Food": "url1"}
+        result = _fuzzy_match("FOOD", options)
+        assert result is not None
+        assert result[0] == "Food"
+
+    def test_prefix_match(self):
+        options = {"Food & Beverage": "url1", "Transport": "url2"}
+        result = _fuzzy_match("food", options)
+        assert result is not None
+        assert "Food" in result[0]
+
+    def test_no_match(self):
+        options = {"Food": "url1"}
+        assert _fuzzy_match("xyz", options) is None
+
+    def test_empty_name(self):
+        options = {"Food": "url1"}
+        assert _fuzzy_match("", options) is None
+
+    def test_empty_options(self):
+        assert _fuzzy_match("food", {}) is None
+
+    def test_single_char_no_partial(self):
+        """Single char should not match partial (min 2 chars for prefix, 3 for partial)."""
+        options = {"Food": "url1"}
+        assert _fuzzy_match("f", options) is None
+
+    def test_two_char_prefix_match(self):
+        """2-char prefix should work (>= 2 char minimum for prefix match)."""
+        options = {"Food": "url1", "Transport": "url2"}
+        result = _fuzzy_match("fo", options)
+        assert result is not None
+        assert "Food" in result[0]
+
+    def test_partial_match_min_3_chars(self):
+        """Partial match requires >= 3 chars."""
+        options = {"Food & Beverage": "url1"}
+        result = _fuzzy_match("bev", options)
+        assert result is not None
+
+    def test_partial_match_2_chars_rejected(self):
+        """2-char partial match should NOT match (needs 3+)."""
+        options = {"Food": "url1"}
+        assert _fuzzy_match("od", options) is None
+
+
+class TestNotionCache:
+    def test_closest_subcategory(self):
+        cache = NotionCache(subcategories={"Food": "url1", "Transport": "url2"})
+        result = cache.closest_subcategory("food")
+        assert result is not None
+        assert result[0] == "Food"
+
+    def test_closest_account(self):
+        cache = NotionCache(accounts={"Mandiri": "url1", "Jago": "url2"})
+        result = cache.closest_account("jago")
+        assert result is not None
+        assert result[0] == "Jago"
+
+    def test_month_url(self):
+        cache = NotionCache(months={"January": "url1"})
+        result = cache.month_url("January")
+        assert result is not None
+
+    def test_year_url(self):
+        cache = NotionCache(years={"2026": "url1"})
+        result = cache.year_url("2026")
+        assert result is not None
+
+    def test_empty_cache_returns_none(self):
+        cache = NotionCache()
+        assert cache.closest_subcategory("food") is None
+        assert cache.closest_account("mandiri") is None
+        assert cache.month_url("January") is None
+        assert cache.year_url("2026") is None
+
+
+# ── db.py tests (async, require SQLite) ───────────────────────────────────────
+
+@pytest_asyncio.fixture
+async def db():
+    """Create a temporary database for each test."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        path = f.name
+    database = await Database.connect(path)
+    yield database
+    await database.close()
+    os.unlink(path)
+
+
+@pytest.mark.asyncio
+async def test_processed_emails(db):
+    assert not await db.is_processed("uid1")
+    await db.mark_processed("uid1", "sender@test.com")
+    assert await db.is_processed("uid1")
+
+
+@pytest.mark.asyncio
+async def test_processed_emails_idempotent(db):
+    await db.mark_processed("uid1", "sender@test.com")
+    await db.mark_processed("uid1", "sender@test.com")  # should not raise
+    assert await db.is_processed("uid1")
+
+
+@pytest.mark.asyncio
+async def test_pending_expense_crud(db):
+    entry = ExpenseEntry(
+        description="Nasi goreng",
+        amount=25000,
+        date="2026-06-17",
+        subcategory="Food",
+        account="Cash",
+        confidence=0.95,
+    )
+    await db.set_pending_expense(12345, entry)
+    loaded = await db.get_pending_expense(12345)
+    assert loaded is not None
+    assert loaded.description == "Nasi goreng"
+    assert loaded.amount == 25000
+
+    await db.clear_pending_expense(12345)
+    assert await db.get_pending_expense(12345) is None
+
+
+@pytest.mark.asyncio
+async def test_pending_expense_overwrite(db):
+    """INSERT OR REPLACE — second write for same user_id overwrites."""
+    e1 = ExpenseEntry(description="First", amount=1000, date="2026-06-17", subcategory="Food", account="Cash", confidence=0.5)
+    e2 = ExpenseEntry(description="Second", amount=2000, date="2026-06-17", subcategory="Food", account="Cash", confidence=0.5)
+    await db.set_pending_expense(111, e1)
+    await db.set_pending_expense(111, e2)
+    loaded = await db.get_pending_expense(111)
+    assert loaded.description == "Second"
+    assert loaded.amount == 2000
+
+
+@pytest.mark.asyncio
+async def test_pending_income_crud(db):
+    entry = IncomeEntry(
+        description="Gaji",
+        amount=3000000,
+        date="2026-06-01",
+        subcategory="Salary",
+        account="Mandiri",
+        confidence=1.0,
+    )
+    await db.set_pending_income(12345, entry)
+    loaded = await db.get_pending_income(12345)
+    assert loaded is not None
+    assert loaded.amount == 3000000
+
+    await db.clear_pending_income(12345)
+    assert await db.get_pending_income(12345) is None
+
+
+@pytest.mark.asyncio
+async def test_conversation_history(db):
+    await db.append_history(12345, "user", "Hello")
+    await db.append_history(12345, "assistant", "Hi!")
+    history = await db.get_history(12345)
+    assert len(history) == 2
+    assert history[0]["role"] == "user"
+    assert history[0]["content"] == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_conversation_history_limit(db):
+    for i in range(25):
+        await db.append_history(12345, "user", f"msg {i}")
+    history = await db.get_history(12345, limit=20)
+    assert len(history) == 20
+
+
+@pytest.mark.asyncio
+async def test_debit_queue_fifo(db):
+    tx1 = EmailTransaction(type="expense", description="First", amount=10000, admin_fee=0, date="2026-06-17", subcategory="Food", account="Jago")
+    tx2 = EmailTransaction(type="expense", description="Second", amount=20000, admin_fee=0, date="2026-06-17", subcategory="Food", account="Jago")
+    await db.push_debit(12345, tx1)
+    await db.push_debit(12345, tx2)
+
+    assert await db.debit_queue_depth(12345) == 2
+
+    popped = await db.pop_debit(12345)
+    assert popped.description == "First"
+
+    popped2 = await db.pop_debit(12345)
+    assert popped2.description == "Second"
+
+    assert await db.debit_queue_depth(12345) == 0
+    assert await db.pop_debit(12345) is None
+
+
+@pytest.mark.asyncio
+async def test_debit_merchant_cache(db):
+    assert await db.get_debit_merchant(12345, 50000) is None
+    await db.set_debit_merchant(12345, 50000, "Starbucks")
+    assert await db.get_debit_merchant(12345, 50000) == "Starbucks"
+
+
+@pytest.mark.asyncio
+async def test_user_undo(db):
+    await db.set_user_undo(12345, "page-id-123", "Nasi goreng", 25000, "2026-06-17", "Food")
+    record = await db.get_user_undo(12345)
+    assert record is not None
+    assert record["page_id"] == "page-id-123"
+    assert record["description"] == "Nasi goreng"
+
+    await db.clear_user_undo(12345)
+    assert await db.get_user_undo(12345) is None
+
+
+@pytest.mark.asyncio
+async def test_upsert_user(db):
+    await db.upsert_user(99999, owner_name="TestUser", notion_token="ntn_test123")
+    user = await db.get_user(99999)
+    assert user is not None
+    assert user.owner_name == "TestUser"
+    assert user.notion_token == "ntn_test123"
+    assert user.setup_step == "start"
+
+
+@pytest.mark.asyncio
+async def test_upsert_user_rejects_bad_columns(db):
+    with pytest.raises(ValueError, match="Unexpected user columns"):
+        await db.upsert_user(99999, bad_field="oops")
+
+
+@pytest.mark.asyncio
+async def test_set_user_setup_step(db):
+    # upsert_user requires owner_name and notion_token on first insert
+    await db.upsert_user(88888, owner_name="Test", notion_token="ntn_x", setup_step="await_name")
+    await db.set_user_setup_step(88888, "done")
+    user = await db.get_user(88888)
+    assert user.setup_step == "done"
+
+
+@pytest.mark.asyncio
+async def test_get_all_users(db):
+    await db.upsert_user(111, owner_name="Alice", notion_token="ntn_a")
+    await db.upsert_user(222, owner_name="Bob", notion_token="ntn_b")
+    users = await db.get_all_users()
+    assert len(users) == 2
+    assert users[111].owner_name == "Alice"
+    assert users[222].owner_name == "Bob"
+
+
+@pytest.mark.asyncio
+async def test_pending_since(db):
+    await db.set_pending_since(12345, 1700000000.0)
+    ts = await db.get_pending_since(12345)
+    assert ts == 1700000000.0
+
+    all_since = await db.get_all_pending_since()
+    assert 12345 in all_since
+
+    await db.clear_pending_since(12345)
+    assert await db.get_pending_since(12345) is None
+
+
+@pytest.mark.asyncio
+async def test_email_account_owners(db):
+    await db.set_email_account_owner("Mandiri", 12345)
+    await db.set_email_account_owner("Jago", 12345)
+    accounts = await db.get_email_accounts_for_user(12345)
+    assert "Mandiri" in accounts
+    assert "Jago" in accounts
+
+    owner = await db.get_email_owner_for_account("Mandiri")
+    assert owner == 12345
+
+    # substring match
+    owner2 = await db.get_email_owner_for_account("Mandiri 1854")
+    assert owner2 == 12345
+
+    await db.remove_email_account_owner("Mandiri")
+    assert await db.get_email_owner_for_account("Mandiri") is None
+
+
+@pytest.mark.asyncio
+async def test_prune_processed(db):
+    """Old entries should be prunable."""
+    # Insert an old entry directly
+    old_ts = "2020-01-01T00:00:00+00:00"
+    await db._conn.execute(
+        "INSERT OR REPLACE INTO processed_emails (uid, sender, processed_at) VALUES (?, ?, ?)",
+        ("old-uid", "test@test.com", old_ts),
+    )
+    await db._conn.commit()
+    assert await db.is_processed("old-uid")
+
+    pruned = await db.prune_processed(days=90)
+    assert pruned >= 1
+    assert not await db.is_processed("old-uid")

@@ -613,17 +613,27 @@ class Database:
         if bad:
             raise ValueError(f"Unexpected user columns: {bad}")
         now = datetime.now(timezone.utc).isoformat()
+        # Always include NOT NULL columns in the INSERT to avoid constraint violations
+        # when only a subset of fields is provided (e.g. set_user_setup_step).
+        required_cols = ["owner_name", "notion_token"]
         all_cols = list(fields.keys())
-        cols = ["telegram_id", "created_at", "updated_at", *all_cols]
-        vals = [telegram_id, now, now, *(fields[k] for k in all_cols)]
-        placeholders = ", ".join(["?"] * len(cols))
-        col_names = ", ".join(cols)
-        set_parts = [f"updated_at = excluded.updated_at", *(f"{k} = excluded.{k}" for k in all_cols)]
+        insert_cols = ["telegram_id", "created_at", "updated_at"]
+        insert_vals = [telegram_id, now, now]
+        for col in all_cols:
+            insert_cols.append(col)
+            insert_vals.append(fields[col])
+        for col in required_cols:
+            if col not in all_cols:
+                insert_cols.append(col)
+                insert_vals.append(fields.get(col, ""))
+        placeholders = ", ".join(["?"] * len(insert_cols))
+        col_names = ", ".join(insert_cols)
+        set_parts = ["updated_at = excluded.updated_at"] + [f"{k} = excluded.{k}" for k in all_cols]
         set_clause = ", ".join(set_parts)
         await self._conn.execute(
             f"INSERT INTO users ({col_names}) VALUES ({placeholders}) "
             f"ON CONFLICT(telegram_id) DO UPDATE SET {set_clause}",
-            vals,
+            insert_vals,
         )
         await self._conn.commit()
 
