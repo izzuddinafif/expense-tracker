@@ -393,6 +393,7 @@ async def main() -> None:
             "/search <kata kunci> — cari pengeluaran\n"
             "/stats — ringkasan pengeluaran bulan ini\n"
             "/export — ekspor pengeluaran ke CSV (thismonth / YYYY-MM / all)\n"
+            "/recurring — lihat daftar pembayaran rutin aktif\n"
             "/refresh — muat ulang data kategori dari Notion\n"
             "/status — status email watcher dan bot\n"
             "/linkemail — hubungkan akun bank ke email watcher\n"
@@ -473,6 +474,40 @@ async def main() -> None:
         except Exception as e:
             log.error(f"/budget failed: {e}")
             await msg.answer(f"❌ Gagal ambil data anggaran.\n`{type(e).__name__}: {str(e)[:80]}`", parse_mode="Markdown")
+
+    @dp.message(Command("recurring"))
+    async def handle_recurring(msg: Message) -> None:
+        user_id = msg.from_user.id
+        result = await get_user_notion(user_id)
+        if not result:
+            await msg.answer("Ketik /setup untuk menghubungkan Notion workspace kamu.")
+            return
+        _, user_cache = result
+        recurring = user_cache.recurring_payments
+        if not recurring:
+            await msg.answer(
+                "🔁 *Pembayaran Rutin*\n\n"
+                "Belum ada pembayaran rutin aktif.\n"
+                "Tambahkan di database Recurring Payment di Notion.",
+                parse_mode="Markdown",
+            )
+            return
+        lines = ["🔁 *Pembayaran Rutin Aktif*\n"]
+        total = 0
+        for amount, info in sorted(recurring.items()):
+            name = info.get("name", "-")
+            sub = info.get("subcategory", "")
+            acc = info.get("account", "")
+            parts = []
+            if sub:
+                parts.append(f"🏷 {sub}")
+            if acc:
+                parts.append(f"🏦 {acc}")
+            extra = " · ".join(parts)
+            lines.append(f"• *{name}* — Rp {amount:,.0f} {extra}")
+            total += amount
+        lines.append(f"\n💰 *Total: Rp {total:,.0f}/bulan*")
+        await msg.answer("\n".join(lines), parse_mode="Markdown")
 
     @dp.message(Command("linkemail"))
     async def handle_linkemail(msg: Message) -> None:
