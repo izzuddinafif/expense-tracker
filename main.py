@@ -1246,8 +1246,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("edit:"))
     async def handle_edit(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
         await callback.message.edit_reply_markup(
@@ -1258,8 +1258,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("edit_desc:"))
     async def handle_edit_desc(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
         pending_edit[user_id] = "desc"
@@ -1270,8 +1270,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("edit_amount:"))
     async def handle_edit_amount(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
         pending_edit[user_id] = "amount"
@@ -1282,8 +1282,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("edit_date:"))
     async def handle_edit_date(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
         pending_edit[user_id] = "date"
@@ -1335,8 +1335,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("edit_cat:"))
     async def handle_edit_cat(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
         await _show_cat_keyboard(callback, user_id)
@@ -1384,8 +1384,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("edit_cat_back:"))
     async def handle_edit_cat_back(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
         await _show_cat_keyboard(callback, user_id)
@@ -1393,8 +1393,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("edit_cat_all:"))
     async def handle_edit_cat_all(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
         result = await get_user_notion(user_id)
@@ -1455,8 +1455,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("edit_cat_cancel:"))
     async def handle_edit_cat_cancel(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
         entry = await db.get_pending_expense(user_id)
@@ -1479,8 +1479,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("edit_cancel:"))
     async def handle_edit_cancel(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
         entry = await db.get_pending_expense(user_id)
@@ -1503,8 +1503,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("cancel:"))
     async def handle_cancel(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
 
@@ -1530,8 +1530,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("income_confirm:"))
     async def handle_income_confirm(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
 
@@ -1590,8 +1590,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("income_cancel:"))
     async def handle_income_cancel(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
 
@@ -1610,8 +1610,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("undo:"))
     async def handle_undo(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
 
@@ -1649,8 +1649,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("email_edit:"))
     async def handle_email_edit(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
         saved = await _get_email_saved(user_id)
@@ -1673,8 +1673,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("email_edit_desc:"))
     async def handle_email_edit_desc(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
         if not await _get_email_saved(user_id):
@@ -1688,8 +1688,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("email_edit_amount:"))
     async def handle_email_edit_amount(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
         if not await _get_email_saved(user_id):
@@ -1703,8 +1703,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("email_edit_date:"))
     async def handle_email_edit_date(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
         if not await _get_email_saved(user_id):
@@ -1718,8 +1718,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("email_edit_detail:"))
     async def handle_email_edit_detail(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
         if not await _get_email_saved(user_id):
@@ -1737,8 +1737,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("email_edit_subcat:"))
     async def handle_email_edit_subcat(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
         saved = await _get_email_saved(user_id)
@@ -1808,8 +1808,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("email_edit_subcat_back:"))
     async def handle_email_edit_subcat_back(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
         saved = await _get_email_saved(user_id)
@@ -1877,8 +1877,8 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("email_edit_cancel:"))
     async def handle_email_edit_cancel(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        user_id = int(callback.data.split(":")[1])
-        if callback.from_user.id != user_id:
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
         email_pending_edit.pop(user_id, None)
