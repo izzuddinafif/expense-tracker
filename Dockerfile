@@ -14,8 +14,8 @@ RUN adduser --disabled-password --gecos '' appuser \
     && chown -R appuser:appuser /app
 USER appuser
 
-# Healthcheck
+# Healthcheck — verify bot process is actually running
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import sys; sys.exit(0)" || exit 1
+    CMD python healthcheck.py
 
 CMD ["python", "main.py"]
