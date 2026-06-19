@@ -1344,9 +1344,15 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("edit_cat_pick:"))
     async def handle_edit_cat_pick(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        _, user_id_str, cat_idx_str = callback.data.split(":", 2)
-        user_id = int(user_id_str)
-        cat_index = int(cat_idx_str)
+        split_data = callback.data.split(":", 2)
+        if len(split_data) != 3:
+            await callback.answer("Data tidak valid.")
+            return
+        user_id = _parse_cb(callback.data, 1)
+        cat_index = _parse_cb(callback.data, 2)
+        if user_id is None or cat_index is None:
+            await callback.answer("Data tidak valid.")
+            return
         if callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
@@ -1413,10 +1419,16 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("edit_subcat_pick:"))
     async def handle_edit_subcat_pick(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        _, user_id_str, cat_idx_str, subcat_idx_str = callback.data.split(":", 3)
-        user_id = int(user_id_str)
-        cat_index = int(cat_idx_str)
-        subcat_index = int(subcat_idx_str)
+        split_data = callback.data.split(":", 3)
+        if len(split_data) != 4:
+            await callback.answer("Data tidak valid.")
+            return
+        user_id = _parse_cb(callback.data, 1)
+        cat_index = _parse_cb(callback.data, 2)
+        subcat_index = _parse_cb(callback.data, 3)
+        if user_id is None or cat_index is None or subcat_index is None:
+            await callback.answer("Data tidak valid.")
+            return
         if callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
@@ -1763,9 +1775,15 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("email_edit_cat_pick:"))
     async def handle_email_edit_cat_pick(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        _, user_id_str, cat_idx_str = callback.data.split(":", 2)
-        user_id = int(user_id_str)
-        cat_index = int(cat_idx_str)
+        split_data = callback.data.split(":", 2)
+        if len(split_data) != 3:
+            await callback.answer("Data tidak valid.")
+            return
+        user_id = _parse_cb(callback.data, 1)
+        cat_index = _parse_cb(callback.data, 2)
+        if user_id is None or cat_index is None:
+            await callback.answer("Data tidak valid.")
+            return
         if callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
@@ -1834,10 +1852,16 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("email_edit_subcat_pick:"))
     async def handle_email_edit_subcat_pick(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        _, user_id_str, cat_idx_str, subcat_idx_str = callback.data.split(":", 3)
-        user_id = int(user_id_str)
-        cat_index = int(cat_idx_str)
-        subcat_index = int(subcat_idx_str)
+        split_data = callback.data.split(":", 3)
+        if len(split_data) != 4:
+            await callback.answer("Data tidak valid.")
+            return
+        user_id = _parse_cb(callback.data, 1)
+        cat_index = _parse_cb(callback.data, 2)
+        subcat_index = _parse_cb(callback.data, 3)
+        if user_id is None or cat_index is None or subcat_index is None:
+            await callback.answer("Data tidak valid.")
+            return
         if callback.from_user.id != user_id:
             await callback.answer("Tidak punya akses.")
             return
@@ -1890,8 +1914,15 @@ async def main() -> None:
     async def handle_cat_pick(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
         user_id = callback.from_user.id
-        _, page_id, cat_idx_str = callback.data.split(":", 2)
-        cat_index = int(cat_idx_str)
+        split_data = callback.data.split(":", 2)
+        if len(split_data) != 3:
+            await callback.answer("Data tidak valid.")
+            return
+        page_id = split_data[1]
+        cat_index = _parse_cb(callback.data, 2)
+        if cat_index is None:
+            await callback.answer("Data tidak valid.")
+            return
         result = await get_user_notion(user_id)
         if not result:
             await callback.answer("Ketik /setup untuk menghubungkan Notion.")
@@ -1933,9 +1964,16 @@ async def main() -> None:
     @dp.callback_query(F.data.startswith("subcat_pick:"))
     async def handle_subcat_pick(callback: CallbackQuery) -> None:
         log.debug(f"Callback received: {callback.data}")
-        _, page_id, cat_idx_str, subcat_idx_str = callback.data.split(":", 3)
-        cat_index = int(cat_idx_str)
-        subcat_index = int(subcat_idx_str)
+        split_data = callback.data.split(":", 3)
+        if len(split_data) != 4:
+            await callback.answer("Data tidak valid.")
+            return
+        page_id = split_data[1]
+        cat_index = _parse_cb(callback.data, 2)
+        subcat_index = _parse_cb(callback.data, 3)
+        if cat_index is None or subcat_index is None:
+            await callback.answer("Data tidak valid.")
+            return
 
         # Find user by callback.from_user.id
         user_id = callback.from_user.id
