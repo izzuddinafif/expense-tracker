@@ -580,7 +580,7 @@ class NotionClient:
         """Find existing entries with similar amount + same date + owner.
         Uses a range (±1 IDR) to avoid float precision issues.
         db_key: \"expenses_ds\" (default) or \"income_ds\" for income entries."""
-        _, date_prop = {
+        amount_prop, date_prop = {
             "expenses_ds": ("Amount", "Date of Expense"),
             "income_ds": ("Amount", "Date of Income"),
         }.get(db_key, ("Amount", "Date of Expense"))

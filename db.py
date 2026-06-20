@@ -21,6 +21,7 @@ class Database:
         conn.row_factory = aiosqlite.Row
         db = cls(conn)
         await db._init()
+        await db._migrate_schema()
         await db._migrate_from_json(path, conn)
         return db
 
@@ -150,7 +151,24 @@ class Database:
                 updated_at               TEXT NOT NULL
             );
         """)
-        await self._conn.commit()
+
+    async def _migrate_schema(self) -> None:
+        """Add new columns to existing tables for backward compatibility."""
+        # Add merchant column to user_undo if missing
+        try:
+            await self._conn.execute("SELECT merchant FROM user_undo LIMIT 1")
+        except Exception:
+            log.info("Migrating: adding merchant column to user_undo")
+            await self._conn.execute("ALTER TABLE user_undo ADD COLUMN merchant TEXT NOT NULL DEFAULT ''")
+            await self._conn.commit()
+
+        # Add merchant column to email_saved_pages if missing
+        try:
+            await self._conn.execute("SELECT merchant FROM email_saved_pages LIMIT 1")
+        except Exception:
+            log.info("Migrating: adding merchant column to email_saved_pages")
+            await self._conn.execute("ALTER TABLE email_saved_pages ADD COLUMN merchant TEXT NOT NULL DEFAULT ''")
+            await self._conn.commit()
 
     @staticmethod
     async def _migrate_from_json(path: str, conn: aiosqlite.Connection) -> None:
