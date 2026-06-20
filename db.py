@@ -105,6 +105,7 @@ class Database:
                 amount       REAL NOT NULL DEFAULT 0,
                 date         TEXT NOT NULL DEFAULT '',
                 subcat       TEXT NOT NULL DEFAULT '',
+                merchant     TEXT NOT NULL DEFAULT '',
                 created_at   REAL NOT NULL
             );
 
@@ -115,6 +116,7 @@ class Database:
                 amount        REAL NOT NULL DEFAULT 0,
                 date          TEXT NOT NULL DEFAULT '',
                 subcat        TEXT NOT NULL DEFAULT '',
+                merchant      TEXT NOT NULL DEFAULT '',
                 timestamp     REAL NOT NULL
             );
 
@@ -413,16 +415,16 @@ class Database:
 
     # ── User undo (persist last_saved_page across restarts) ───────────────────
 
-    async def set_user_undo(self, user_id: int, page_id: str, description: str = "", amount: float = 0, date: str = "", subcat: str = "") -> None:
+    async def set_user_undo(self, user_id: int, page_id: str, description: str = "", amount: float = 0, date: str = "", subcat: str = "", merchant: str = "") -> None:
         await self._conn.execute(
-            "INSERT OR REPLACE INTO user_undo (user_id, page_id, description, amount, date, subcat, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (user_id, page_id, description, amount, date, subcat, datetime.now().timestamp()),
+            "INSERT OR REPLACE INTO user_undo (user_id, page_id, description, amount, date, subcat, merchant, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, page_id, description, amount, date, subcat, merchant, datetime.now().timestamp()),
         )
         await self._conn.commit()
 
     async def get_user_undo(self, user_id: int) -> dict | None:
         cur = await self._conn.execute(
-            "SELECT page_id, description, amount, date, subcat, created_at FROM user_undo WHERE user_id = ?", (user_id,)
+            "SELECT page_id, description, amount, date, subcat, merchant, created_at FROM user_undo WHERE user_id = ?", (user_id,)
         )
         row = await cur.fetchone()
         if row is None:
@@ -433,6 +435,7 @@ class Database:
             "amount": row["amount"],
             "date": row["date"],
             "subcat": row["subcat"],
+            "merchant": row["merchant"],
             "created_at": row["created_at"],
         }
 
@@ -451,10 +454,10 @@ class Database:
 
     # ── Email saved pages (persist email_saved_pages across restarts) ─────────
 
-    async def set_email_saved_page(self, user_id: int, page_id: str, description: str, amount: float, date: str, subcat: str, timestamp: float) -> None:
+    async def set_email_saved_page(self, user_id: int, page_id: str, description: str, amount: float, date: str, subcat: str, timestamp: float, merchant: str = "") -> None:
         await self._conn.execute(
-            "INSERT OR REPLACE INTO email_saved_pages (user_id, page_id, description, amount, date, subcat, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (user_id, page_id, description, amount, date, subcat, timestamp),
+            "INSERT OR REPLACE INTO email_saved_pages (user_id, page_id, description, amount, date, subcat, merchant, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, page_id, description, amount, date, subcat, merchant, timestamp),
         )
         await self._conn.commit()
 
@@ -471,6 +474,7 @@ class Database:
             "amount": row["amount"],
             "date": row["date"],
             "subcat": row["subcat"],
+            "merchant": row["merchant"],
             "timestamp": row["timestamp"],
         }
 
@@ -493,6 +497,7 @@ class Database:
                 "amount": row["amount"],
                 "date": row["date"],
                 "subcat": row["subcat"],
+                "merchant": row["merchant"],
                 "timestamp": row["timestamp"],
             }
         return result

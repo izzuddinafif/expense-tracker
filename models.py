@@ -18,6 +18,7 @@ class ExpenseEntry(BaseModel):
     subcategory: str    # must match a name in NotionCache.subcategories
     account: str        # must match a name in NotionCache.accounts
     confidence: float   # 0.0–1.0, how confident the model is in the extraction
+    merchant: str = ""  # merchant/business name (extracted from email or parsed by LLM)
 
     _validate_amount = field_validator("amount")(_validate_amount)
 
@@ -47,6 +48,7 @@ class EmailTransaction(BaseModel):
     date: str           # YYYY-MM-DD parsed from email
     subcategory: str    # suggested subcategory name (matched against cache)
     account: str        # source account name (matched against cache)
+    merchant: str = ""  # merchant/business name as written in the email (for matching duplicates)
     recipient_name: str = ""   # for transfers: recipient's name
     recipient_bank: str = ""   # for transfers: recipient's bank name
     skip_reason: str = ""      # why skipped (if type == "skip")

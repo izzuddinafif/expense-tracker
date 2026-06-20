@@ -381,6 +381,13 @@ class NotionClient:
                 "relation": [{"id": _url_to_id(recurring_page_url)}]
             }
 
+        # Merchant field
+        merchant_name = entry.merchant or _extract_merchant_from_description(entry.description)
+        if merchant_name:
+            properties["Merchant"] = {
+                "rich_text": [{"text": {"content": merchant_name}}]
+            }
+
         payload = {
             "parent": {"database_id": self._db_ids["expenses_ds"]},
             "properties": properties,
@@ -499,6 +506,19 @@ class NotionClient:
             },
         )
         log.info("Notion WRITE update title: %s → %s", page_id, description)
+
+    async def update_expense_merchant(self, page_id: str, merchant: str) -> None:
+        await self._notion_patch(
+            f"https://api.notion.com/v1/pages/{page_id}",
+            {
+                "properties": {
+                    "Merchant": {
+                        "rich_text": [{"text": {"content": merchant}}]
+                    }
+                }
+            },
+        )
+        log.info("Notion WRITE update merchant: %s → %s", page_id, merchant)
 
     async def update_expense_amount(self, page_id: str, amount: float) -> None:
         await self._notion_patch(
@@ -738,6 +758,99 @@ class NotionClient:
                 })
         return result
 
+    async def find_similar_by_merchant(
+        self, owner: str, merchant: str, amount: float, date: str, cache: NotionCache
+    ) -> list[dict]:
+        """
+        Find past expenses with the same merchant and similar amount (±20%).
+        Used for merchant-based purchase prediction / duplicate detection.
+        Returns list of matching expense pages with their properties.
+        """
+        if not merchant:
+            return []
+
+        # Query expenses filtered by owner and date range (last 90 days)
+        from datetime import date as date_type, timedelta
+        try:
+            d = date_type.fromisoformat(date)
+        except (ValueError, TypeError):
+            return []
+        since = (d - timedelta(days=90)).isoformat()
+
+        filter_payload = {
+            "and": [
+                {
+                    "property": "Description",
+                    "title": {"contains": f"[{owner}]"}
+                },
+                {
+                    "property": "Date of Expense",
+                    "date": {"on_or_after": since}
+                }
+            ]
+        }
+
+        try:
+            pages = await self._query_db(
+                self._db_ids["expenses_ds"],
+                extra_payload={"filter": filter_payload}
+            )
+        except Exception as e:
+            log.warning(f"find_similar_by_merchant query failed: {e}")
+            return []
+
+        matches = []
+        merchant_lower = merchant.lower().strip()
+        for p in pages:
+            props = p.get("properties", {})
+
+            # Check merchant field
+            merchant_text = ""
+            for rt in props.get("Merchant", {}).get("rich_text", []):
+                merchant_text += rt.get("plain_text", "")
+
+            # Fallback: extract from description
+            if not merchant_text:
+                desc_text = ""
+                for rt in props.get("Description", {}).get("title", []):
+                    desc_text += rt.get("plain_text", "")
+                merchant_text = _extract_merchant_from_description(desc_text)
+
+            if not merchant_text:
+                continue
+
+            # Fuzzy merchant match
+            if merchant_lower not in merchant_text.lower() and merchant_text.lower() not in merchant_lower:
+                continue
+
+            # Amount match within ±20%
+            page_amount = props.get("Amount", {}).get("number")
+            if page_amount is None:
+                continue
+            if abs(page_amount - amount) / max(amount, 1) > 0.2:
+                continue
+
+            # Get subcategory
+            subcat_names = []
+            for rel in props.get("Expenses Sub-categories", {}).get("relation", []):
+                sub_id = rel.get("id", "")
+                for name, url in cache.subcategories.items():
+                    if _url_to_id(url) == sub_id:
+                        subcat_names.append(name)
+                        break
+
+            matches.append({
+                "id": p["id"],
+                "url": p.get("url", ""),
+                "description": self._extract_title(p),
+                "amount": page_amount,
+                "date": props.get("Date of Expense", {}).get("date", {}).get("start", ""),
+                "merchant": merchant_text,
+                "subcategories": subcat_names,
+            })
+
+        return matches
+
 
 _MONTH_NAMES = [
     "January", "February", "March", "April", "May", "June",
@@ -770,3 +883,15 @@ def _url_to_id(url: str) -> str:
     if "-" not in part and len(part) == 32:
         return f"{part[:8]}-{part[8:12]}-{part[12:16]}-{part[16:20]}-{part[20:]}"
     return part
+
+
+def _extract_merchant_from_description(description: str) -> str:
+    """Extract merchant name from a description like '[Afif] SAKINAH SUPERMARKET' or '[Afif] Warung Emak Keputih'."""
+    import re
+    # Remove owner prefix [Name]
+    desc = re.sub(r"^\[[^\]]+\]\s*", "", description).strip()
+    # If it contains ' — ' or ' - ', the part before the first dash is likely the merchant
+    for sep in [" — ", " - "]:
+        if sep in desc:
+            return desc.split(sep)[0].strip()
+    return desc

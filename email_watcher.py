@@ -349,6 +349,7 @@ class EmailWatcher:
                 subcategory=tx.subcategory,
                 account=tx.account,
                 confidence=0.9,
+                merchant=cached,
             )
             await self._db.set_pending_expense(target, entry)
             subcat_match = self._cache_getter().closest_subcategory(entry.subcategory)
@@ -483,6 +484,7 @@ class EmailWatcher:
                             subcategory=recurring["subcategory"] or tx.subcategory,
                             account=recurring["account"] or tx.account,
                             confidence=1.0,
+                            merchant=tx.merchant or recurring["name"],
                         )
                         # Store in both pending_expenses (for edit/confirm flow)
                         # and pending_recurring (to mark email processed on confirm)
@@ -530,6 +532,7 @@ class EmailWatcher:
                         subcategory=tx.subcategory,
                         account=tx.account,
                         confidence=0.95,
+                        merchant=tx.merchant,
                     )
                     # Duplicate check — skip if user has a pending expense with same amount+date
                     pending = await self._db.get_pending_expense(target_id)
@@ -549,7 +552,8 @@ class EmailWatcher:
                         matches = await target_notion.fetch_duplicates(target_owner, tx.amount, tx.date)
                         if matches:
                             is_dup = await self._agent.check_duplicate(
-                                matches, tx.description, tx.amount, tx.date
+                                matches, tx.description, tx.amount, tx.date,
+                                new_merchant=tx.merchant,
                             )
                             if is_dup:
                                 log.info(f"[email] Duplicate skipped [{uid}]: {tx.description} Rp {tx.amount:,.0f}")
@@ -569,6 +573,22 @@ class EmailWatcher:
                                 return
                     except Exception as e:
                         log.warning(f"[email] Duplicate check failed for [{uid}]: {e}")
+
+                    # Merchant-based prediction: check for same merchant + similar amount
+                    if tx.merchant:
+                        try:
+                            similar = await target_notion.find_similar_by_merchant(
+                                target_owner, tx.merchant, tx.amount, tx.date, target_cache
+                            )
+                            if similar:
+                                prev = similar[0]
+                                log.info(
+                                    f"[email] Merchant match [{uid}]: {tx.merchant} "
+                                    f"Rp {tx.amount:,.0f} — previously Rp {prev['amount']:,.0f} on {prev['date']}"
+                                )
+                        except Exception as e:
+                            log.warning(f"[email] Merchant similarity check failed [{uid}]: {e}")
+
                     url = await target_notion.log_expense(entry, target_owner, target_cache)
                     asyncio.create_task(self._check_budget_alert(entry, notion=target_notion, cache=target_cache))
                     if self._on_save_fn:
@@ -608,6 +628,7 @@ class EmailWatcher:
                         subcategory=tx.subcategory,
                         account=tx.account,
                         confidence=0.9,
+                        merchant="",
                     )
                     # Duplicate check for admin fee
                     try:
@@ -615,6 +636,7 @@ class EmailWatcher:
                         if fee_matches:
                             is_fee_dup = await self._agent.check_duplicate(
                                 fee_matches, fee_entry.description, tx.admin_fee, tx.date,
+                                new_merchant="",
                             )
                             if is_fee_dup:
                                 log.info(f"[email] Admin fee duplicate skipped [{uid}]: Rp {tx.admin_fee:,.0f}")

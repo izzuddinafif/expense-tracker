@@ -23,12 +23,14 @@ class TestExpenseEntry:
             description="Nasi goreng",
             amount=25000,
             date="2026-06-17",
-            subcategory="Food",
+            subcategory="Warung/Makan Siap Saji",
             account="Cash",
             confidence=0.95,
+            merchant="Warung Pak Kumis",
         )
         assert e.amount == 25000
         assert e.description == "Nasi goreng"
+        assert e.merchant == "Warung Pak Kumis"
 
     def test_amount_must_be_positive(self):
         with pytest.raises(Exception):
@@ -36,7 +38,7 @@ class TestExpenseEntry:
                 description="Test",
                 amount=-100,
                 date="2026-06-17",
-                subcategory="Food",
+                subcategory="Groceries",
                 account="Cash",
                 confidence=0.5,
             )
@@ -47,7 +49,7 @@ class TestExpenseEntry:
                 description="Test",
                 amount=math.inf,
                 date="2026-06-17",
-                subcategory="Food",
+                subcategory="Groceries",
                 account="Cash",
                 confidence=0.5,
             )
@@ -58,7 +60,7 @@ class TestExpenseEntry:
                 description="Test",
                 amount=math.nan,
                 date="2026-06-17",
-                subcategory="Food",
+                subcategory="Groceries",
                 account="Cash",
                 confidence=0.5,
             )
@@ -69,7 +71,7 @@ class TestExpenseEntry:
                 description="Test",
                 amount=0,
                 date="2026-06-17",
-                subcategory="Food",
+                subcategory="Groceries",
                 account="Cash",
                 confidence=0.5,
             )
@@ -79,7 +81,7 @@ class TestExpenseEntry:
             description="Indomie",
             amount=5000,
             date="2026-06-17",
-            subcategory="Food",
+            subcategory="Groceries",
             account="Jago",
             confidence=0.9,
         )
@@ -129,7 +131,7 @@ class TestEmailTransaction:
             amount=35000,
             admin_fee=0,
             date="2026-06-17",
-            subcategory="Food",
+            subcategory="Groceries",
             account="Mandiri",
         )
         assert tx.type == "expense"
@@ -165,64 +167,64 @@ class TestEmailTransaction:
 
 class TestFuzzyMatch:
     def test_exact_match(self):
-        options = {"Food": "url1", "Transport": "url2"}
-        result = _fuzzy_match("food", options)
+        options = {"Groceries": "url1", "Transport": "url2"}
+        result = _fuzzy_match("groceries", options)
         assert result is not None
-        assert result[0] == "Food"
+        assert result[0] == "Groceries"
 
     def test_case_insensitive(self):
-        options = {"Food": "url1"}
-        result = _fuzzy_match("FOOD", options)
+        options = {"Groceries": "url1"}
+        result = _fuzzy_match("GROCERIES", options)
         assert result is not None
-        assert result[0] == "Food"
+        assert result[0] == "Groceries"
 
     def test_prefix_match(self):
-        options = {"Food & Beverage": "url1", "Transport": "url2"}
-        result = _fuzzy_match("food", options)
+        options = {"Groceries & More": "url1", "Transport": "url2"}
+        result = _fuzzy_match("groceries", options)
         assert result is not None
-        assert "Food" in result[0]
+        assert "Groceries" in result[0]
 
     def test_no_match(self):
-        options = {"Food": "url1"}
+        options = {"Groceries": "url1"}
         assert _fuzzy_match("xyz", options) is None
 
     def test_empty_name(self):
-        options = {"Food": "url1"}
+        options = {"Groceries": "url1"}
         assert _fuzzy_match("", options) is None
 
     def test_empty_options(self):
-        assert _fuzzy_match("food", {}) is None
+        assert _fuzzy_match("groceries", {}) is None
 
     def test_single_char_no_partial(self):
         """Single char should not match partial (min 2 chars for prefix, 3 for partial)."""
-        options = {"Food": "url1"}
-        assert _fuzzy_match("f", options) is None
+        options = {"Groceries": "url1"}
+        assert _fuzzy_match("g", options) is None
 
     def test_two_char_prefix_match(self):
         """2-char prefix should work (>= 2 char minimum for prefix match)."""
-        options = {"Food": "url1", "Transport": "url2"}
-        result = _fuzzy_match("fo", options)
+        options = {"Groceries": "url1", "Transport": "url2"}
+        result = _fuzzy_match("gr", options)
         assert result is not None
-        assert "Food" in result[0]
+        assert "Groceries" in result[0]
 
     def test_partial_match_min_3_chars(self):
         """Partial match requires >= 3 chars."""
-        options = {"Food & Beverage": "url1"}
-        result = _fuzzy_match("bev", options)
+        options = {"Groceries & More": "url1"}
+        result = _fuzzy_match("mor", options)
         assert result is not None
 
     def test_partial_match_2_chars_rejected(self):
         """2-char partial match should NOT match (needs 3+)."""
-        options = {"Food": "url1"}
-        assert _fuzzy_match("od", options) is None
+        options = {"Groceries": "url1"}
+        assert _fuzzy_match("es", options) is None
 
 
 class TestNotionCache:
     def test_closest_subcategory(self):
-        cache = NotionCache(subcategories={"Food": "url1", "Transport": "url2"})
-        result = cache.closest_subcategory("food")
+        cache = NotionCache(subcategories={"Groceries": "url1", "Transport": "url2"})
+        result = cache.closest_subcategory("groceries")
         assert result is not None
-        assert result[0] == "Food"
+        assert result[0] == "Groceries"
 
     def test_closest_account(self):
         cache = NotionCache(accounts={"Mandiri": "url1", "Jago": "url2"})
@@ -281,7 +283,7 @@ async def test_pending_expense_crud(db):
         description="Nasi goreng",
         amount=25000,
         date="2026-06-17",
-        subcategory="Food",
+        subcategory="Warung/Makan Siap Saji",
         account="Cash",
         confidence=0.95,
     )
@@ -290,6 +292,7 @@ async def test_pending_expense_crud(db):
     assert loaded is not None
     assert loaded.description == "Nasi goreng"
     assert loaded.amount == 25000
+    assert loaded.merchant == ""
 
     await db.clear_pending_expense(12345)
     assert await db.get_pending_expense(12345) is None
@@ -298,8 +301,8 @@ async def test_pending_expense_crud(db):
 @pytest.mark.asyncio
 async def test_pending_expense_overwrite(db):
     """INSERT OR REPLACE — second write for same user_id overwrites."""
-    e1 = ExpenseEntry(description="First", amount=1000, date="2026-06-17", subcategory="Food", account="Cash", confidence=0.5)
-    e2 = ExpenseEntry(description="Second", amount=2000, date="2026-06-17", subcategory="Food", account="Cash", confidence=0.5)
+    e1 = ExpenseEntry(description="First", amount=1000, date="2026-06-17", subcategory="Groceries", account="Cash", confidence=0.5)
+    e2 = ExpenseEntry(description="Second", amount=2000, date="2026-06-17", subcategory="Groceries", account="Cash", confidence=0.5)
     await db.set_pending_expense(111, e1)
     await db.set_pending_expense(111, e2)
     loaded = await db.get_pending_expense(111)
@@ -346,8 +349,8 @@ async def test_conversation_history_limit(db):
 
 @pytest.mark.asyncio
 async def test_debit_queue_fifo(db):
-    tx1 = EmailTransaction(type="expense", description="First", amount=10000, admin_fee=0, date="2026-06-17", subcategory="Food", account="Jago")
-    tx2 = EmailTransaction(type="expense", description="Second", amount=20000, admin_fee=0, date="2026-06-17", subcategory="Food", account="Jago")
+    tx1 = EmailTransaction(type="expense", description="First", amount=10000, admin_fee=0, date="2026-06-17", subcategory="Groceries", account="Jago", merchant="")
+    tx2 = EmailTransaction(type="expense", description="Second", amount=20000, admin_fee=0, date="2026-06-17", subcategory="Groceries", account="Jago", merchant="")
     await db.push_debit(12345, tx1)
     await db.push_debit(12345, tx2)
 
@@ -372,7 +375,7 @@ async def test_debit_merchant_cache(db):
 
 @pytest.mark.asyncio
 async def test_user_undo(db):
-    await db.set_user_undo(12345, "page-id-123", "Nasi goreng", 25000, "2026-06-17", "Food")
+    await db.set_user_undo(12345, "page-id-123", "Nasi goreng", 25000, "2026-06-17", "Warung/Makan Siap Saji")
     record = await db.get_user_undo(12345)
     assert record is not None
     assert record["page_id"] == "page-id-123"

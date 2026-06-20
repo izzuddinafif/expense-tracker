@@ -332,7 +332,7 @@ async def main() -> None:
                     try:
                         matches = await user_notion.fetch_duplicates(owner, entry.amount, entry.date)
                         if matches:
-                            is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date)
+                            is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date, new_merchant=entry.merchant)
                             if is_dup:
                                 dup_warning = "\n\n⚠️ *Duplikat terdeteksi!* Transaksi serupa sudah tercatat sebelumnya."
                     except Exception as e:
@@ -901,7 +901,7 @@ async def main() -> None:
         try:
             matches = await user_notion.fetch_duplicates(owner, entry.amount, entry.date)
             if matches:
-                is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date)
+                is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date, new_merchant=entry.merchant)
                 if is_dup:
                     dup_warning = "\n\n⚠️ *Duplikat terdeteksi!* Transaksi serupa sudah tercatat sebelumnya."
         except Exception as e:
@@ -1059,6 +1059,7 @@ async def main() -> None:
                 subcategory=pending_tx.subcategory,
                 account=pending_tx.account,
                 confidence=0.9,
+                merchant=text,
             )
             await db.set_pending_expense(user_id, entry)
             ts = datetime.now().timestamp()
@@ -1141,7 +1142,7 @@ async def main() -> None:
             try:
                 matches = await user_notion.fetch_duplicates(owner, entry.amount, entry.date)
                 if matches:
-                    is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date)
+                    is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date, new_merchant=entry.merchant)
                     if is_dup:
                         dup_warning = "\n\n⚠️ *Duplikat terdeteksi!* Transaksi serupa sudah tercatat sebelumnya."
             except Exception as e:
@@ -1219,7 +1220,7 @@ async def main() -> None:
         try:
             matches = await user_notion.fetch_duplicates(owner, entry.amount, entry.date)
             if matches:
-                is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date)
+                is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date, new_merchant=entry.merchant)
                 if is_dup:
                     await db.clear_pending_expense(user_id)
                     await db.clear_pending_since(user_id)
@@ -1593,7 +1594,7 @@ async def main() -> None:
         try:
             income_matches = await user_notion.fetch_duplicates(owner, income.amount, income.date, db_key="income_ds")
             if income_matches:
-                is_dup = await agent.check_duplicate(income_matches, income.description, income.amount, income.date)
+                is_dup = await agent.check_duplicate(income_matches, income.description, income.amount, income.date, new_merchant="")
                 if is_dup:
                     await db.clear_pending_income(user_id)
                     await callback.answer("Duplikat — sudah tercatat.")
@@ -2078,7 +2079,7 @@ async def main() -> None:
                     matches = await n.fetch_duplicates(owner, entry.amount, entry.date)
                     is_dup = False
                     if matches:
-                        is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date)
+                        is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date, new_merchant=entry.merchant)
                     if is_dup:
                         await db.clear_pending_expense(user_id)
                         if pending_rec:
