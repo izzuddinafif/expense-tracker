@@ -68,6 +68,7 @@ async def main() -> None:
     pending_since: dict[int, float] = await db.get_all_pending_since()  # user_id → timestamp when pending expense was created
     cat_suggestions_cache: dict[tuple[int, str], list[str]] = {}  # (user_id, description) → recommended categories
     saving_locks: dict[int, asyncio.Lock] = {}  # per-user lock to prevent confirm vs auto-confirm double-save
+    auto_confirm_task: asyncio.Task | None = None  # background task handle for graceful shutdown
 
     def _parse_cb(data: str, idx: int = 1) -> int | None:
         try:
@@ -396,6 +397,7 @@ async def main() -> None:
             "/recurring — lihat daftar pembayaran rutin aktif\n"
             "/refresh — muat ulang data kategori dari Notion\n"
             "/status — status email watcher dan bot\n"
+            "/health — health check (DB, Notion, Watcher)\n"
             "/linkemail — hubungkan akun bank ke email watcher\n"
             "/help — tampilkan pesan ini",
             parse_mode="Markdown",
@@ -609,6 +611,30 @@ async def main() -> None:
         total_users = len(await db.get_all_users())
         lines.append(f"👥 Pengguna: {total_users}")
         await msg.answer("\n".join(lines), parse_mode="Markdown")
+
+    @dp.message(Command("health"))
+    async def handle_health(msg: Message) -> None:
+        user_id = msg.from_user.id
+        user = await db.get_user(user_id)
+        if not user or user.setup_step != "done":
+            await msg.answer("Ketik /setup untuk menghubungkan Notion workspace kamu.")
+            return
+        try:
+            # Quick DB check
+            user_count = len(await db.get_all_users())
+            # Quick Notion check
+            result = await get_user_notion(user_id)
+            notion_ok = result is not None
+            watcher_running = watcher_holder[0].status_info()["running"] if watcher_holder else False
+            lines = [
+                "🩺 *Health Check*\\n",
+                f"✅ Database: OK ({user_count} pengguna)",
+                f"✅ Notion: {'OK' if notion_ok else '❌ Gagal'}",
+                f"✅ Email Watcher: {'Aktif' if watcher_running else '❌ Mati'}",
+            ]
+            await msg.answer("\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            await msg.answer(f"❌ Health check gagal.\n`{type(e).__name__}: {str(e)[:80]}`", parse_mode="Markdown")
 
     @dp.message(Command("search"))
     async def handle_search(msg: Message) -> None:
@@ -2156,13 +2182,15 @@ async def main() -> None:
         )
 
     log.info("Bot starting...")
-    asyncio.create_task(_auto_confirm_stale())
+    auto_confirm_task = asyncio.create_task(_auto_confirm_stale())
     try:
         await dp.start_polling(bot)
     finally:
-        # Cancel watcher task before closing DB
+        # Cancel background tasks before closing DB
         if watcher_task_ref:
             watcher_task_ref.cancel()
+        if auto_confirm_task:
+            auto_confirm_task.cancel()
         await db.close()
         log.info("Database connection closed.")
 

@@ -266,6 +266,19 @@ New command: `/export [filter]` — exports expenses to CSV and sends as documen
 
 **`main.py:handle_confirm`**
 - Replaced manual `int(callback.data.split(':')[1])` with `_parse_cb(callback.data, 1)` + `None` guard
+
+---
+
+## Phase 6 — Daily Audit Improvements (2026-06-20)
+
+### [x] 🟣 6.1 — `/health` command + graceful auto-confirm shutdown
+
+**`main.py`**
+- Added `/health` command: quick DB + Notion + Watcher status check
+- Fixed `_auto_confirm_stale` task not being cancelled on shutdown (now tracked in `auto_confirm_task`)
+- Added `/health` to `/help` command list
+- Cleaned root `__pycache__` directory
+
 ```
 
 
