@@ -333,3 +333,30 @@ All 32 audit items across 7 phases are complete. The codebase is now:
 - Well-structured (detailed categories/subcategories, merchant tracking)
 - Merchant-aware (merchant extraction, merchant-based prediction, duplicate detection)
 - Production-ready (Docker healthcheck, non-root user, DB migrations)
+
+---
+
+## Phase 8 — Daily Audit (2026-06-21)
+
+### [x] 🔵 8.1 — Fix `/health` command newline rendering
+
+**`main.py:630`**
+
+`"🩺 *Health Check*\\\\n"` used double backslash, producing literal `\n` in Markdown output instead of a real newline. Fixed to use actual `\n`.
+
+### [x] 🔴 8.2 — Fix `_url_to_id()` truncating dashed Notion IDs
+
+**`notion.py:875-885`**
+
+When a Notion URL contained an already-dashed ID (36 chars, e.g. `https://www.notion.so/385c2adf-8454-8161-a518-e2a4536f22b8`), the `len(part) > 32` check would take the last 32 chars, truncating the first 4 characters. Added early return for 36-char dashed IDs.
+
+### [x] ⚪ 8.3 — Add tests for notion.py helpers
+
+**`tests/test_core.py`**
+
+Added 17 new tests:
+- `_extract_merchant_from_description` (7 tests): owner prefix stripping, em-dash/hyphen splitting, empty strings
+- `_url_to_id` (4 tests): bare ID, dashed URL, slug URL, trailing slash
+- `_parse_date` (5 tests): valid dates, edge months, invalid format, out-of-range month
+
+Total: 60 tests, all passing.
