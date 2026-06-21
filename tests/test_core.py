@@ -467,3 +467,97 @@ async def test_prune_processed(db):
     pruned = await db.prune_processed(days=90)
     assert pruned >= 1
     assert not await db.is_processed("old-uid")
+
+
+# ── notion.py helper tests ────────────────────────────────────────────────────
+
+class TestExtractMerchantFromDescription:
+    def test_with_owner_prefix_and_dash(self):
+        from notion import _extract_merchant_from_description
+        result = _extract_merchant_from_description("[Afif] SAKINAH SUPERMARKET")
+        assert result == "SAKINAH SUPERMARKET"
+
+    def test_with_owner_prefix_and_em_dash(self):
+        from notion import _extract_merchant_from_description
+        result = _extract_merchant_from_description("[Afif] Warung Emak Keputih — nasi padang")
+        assert result == "Warung Emak Keputih"
+
+    def test_with_owner_prefix_and_hyphen(self):
+        from notion import _extract_merchant_from_description
+        result = _extract_merchant_from_description("[Afif] Starbucks - kopi susu")
+        assert result == "Starbucks"
+
+    def test_no_owner_prefix(self):
+        from notion import _extract_merchant_from_description
+        result = _extract_merchant_from_description("SAKINAH SUPERMARKET")
+        assert result == "SAKINAH SUPERMARKET"
+
+    def test_empty_string(self):
+        from notion import _extract_merchant_from_description
+        result = _extract_merchant_from_description("")
+        assert result == ""
+
+    def test_only_owner_prefix(self):
+        from notion import _extract_merchant_from_description
+        result = _extract_merchant_from_description("[Afif] ")
+        assert result == ""
+
+    def test_no_dash_returns_full(self):
+        from notion import _extract_merchant_from_description
+        result = _extract_merchant_from_description("[Afif] Indomaret")
+        assert result == "Indomaret"
+
+
+class TestUrlToId:
+    def test_bare_id(self):
+        from notion import _url_to_id
+        result = _url_to_id("385c2adf84548161a518e2a4536f22b8")
+        assert result == "385c2adf-8454-8161-a518-e2a4536f22b8"
+
+    def test_url_with_dashes(self):
+        from notion import _url_to_id
+        url = "https://www.notion.so/385c2adf-8454-8161-a518-e2a4536f22b8"
+        result = _url_to_id(url)
+        assert result == "385c2adf-8454-8161-a518-e2a4536f22b8"
+
+    def test_url_with_slug(self):
+        from notion import _url_to_id
+        url = "https://www.notion.so/Some-Title-385c2adf84548161a518e2a4536f22b8"
+        result = _url_to_id(url)
+        assert result == "385c2adf-8454-8161-a518-e2a4536f22b8"
+
+    def test_url_with_trailing_slash(self):
+        from notion import _url_to_id
+        url = "https://www.notion.so/385c2adf-8454-8161-a518-e2a4536f22b8/"
+        result = _url_to_id(url)
+        assert result == "385c2adf-8454-8161-a518-e2a4536f22b8"
+
+
+class TestParseDate:
+    def test_valid_date(self):
+        from notion import _parse_date
+        year, month = _parse_date("2026-06-17")
+        assert year == "2026"
+        assert month == "June"
+
+    def test_january(self):
+        from notion import _parse_date
+        year, month = _parse_date("2026-01-15")
+        assert month == "January"
+
+    def test_december(self):
+        from notion import _parse_date
+        year, month = _parse_date("2026-12-31")
+        assert month == "December"
+
+    def test_invalid_format(self):
+        from notion import _parse_date
+        import pytest
+        with pytest.raises(ValueError):
+            _parse_date("not-a-date")
+
+    def test_month_out_of_range(self):
+        from notion import _parse_date
+        import pytest
+        with pytest.raises(ValueError):
+            _parse_date("2026-13-01")

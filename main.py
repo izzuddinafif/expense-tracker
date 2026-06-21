@@ -627,7 +627,7 @@ async def main() -> None:
             notion_ok = result is not None
             watcher_running = watcher_holder[0].status_info()["running"] if watcher_holder else False
             lines = [
-                "🩺 *Health Check*\\n",
+                "🩺 *Health Check*\n",
                 f"✅ Database: OK ({user_count} pengguna)",
                 f"✅ Notion: {'OK' if notion_ok else '❌ Gagal'}",
                 f"✅ Email Watcher: {'Aktif' if watcher_running else '❌ Mati'}",

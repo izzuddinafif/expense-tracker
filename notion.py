@@ -876,10 +876,13 @@ def _url_to_id(url: str) -> str:
     """Extract Notion page ID (with dashes) from a URL or bare ID."""
     clean = url.rstrip("/")
     part = clean.split("/")[-1].split("?")[0]
-    # strip any title slug prefix (slug-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX)
+    # If the ID already has dashes (format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx), return as-is
+    if "-" in part and len(part) == 36:
+        return part
+    # Strip any title slug prefix (slug-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX)
     if len(part) > 32:
         part = part[-32:]
-    # insert dashes if the ID has none
+    # Insert dashes if the ID has none
     if "-" not in part and len(part) == 32:
         return f"{part[:8]}-{part[8:12]}-{part[12:16]}-{part[16:20]}-{part[20:]}"
     return part
