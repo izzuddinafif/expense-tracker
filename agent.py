@@ -124,6 +124,7 @@ SUBCATEGORY RULES:
 - For bills/subscriptions: Streaming, Software/App Subscription
 - CRITICAL: NEVER use "Transfer Antar Rekening" for QRIS purchases — only use that for actual bank transfers between accounts/people.
 - CRITICAL: NEVER use income-related subcategories (Salary, Bonus, etc.) — those don't exist in expense subcategories.
+- CRITICAL: If the email only says "QRIS" or "QRIS Payment" or "Ref. QRIS" with no merchant info, do NOT use "Ref. QRIS" as the subcategory. Instead, pick the most likely subcategory based on context, or use "📦 Miscellaneous" if truly unknown.
 
 Available accounts: {accounts}
 
@@ -494,6 +495,33 @@ class Agent:
                 ),
             },
         ]
-        return await self._call_json(
+        tx = await self._call_json(
             EmailTransaction, messages, model=self._config.query_model
         )
+
+        # Validate subcategory against cache — retry once if it doesn't match
+        if tx.type == "expense" and tx.subcategory:
+            matched = cache.closest_subcategory(tx.subcategory)
+            if matched is None:
+                log.warning(
+                    f"[agent] Subcategory '{tx.subcategory}' not in Notion cache — retrying with feedback"
+                )
+                retry_messages = messages + [
+                    {"role": "assistant", "content": f"{{'subcategory': '{tx.subcategory}'}}"},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"The subcategory '{tx.subcategory}' is not in the available list. "
+                            f"You MUST pick exactly one from this list: {subcats}\n"
+                            f"Reply with the full corrected JSON."
+                        ),
+                    },
+                ]
+                try:
+                    tx = await self._call_json(
+                        EmailTransaction, retry_messages, model=self._config.query_model
+                    )
+                except Exception as e:
+                    log.warning(f"[agent] Subcategory retry failed: {e} — keeping original")
+
+        return tx

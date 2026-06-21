@@ -558,12 +558,14 @@ class EmailWatcher:
                             if is_dup:
                                 log.info(f"[email] Duplicate skipped [{uid}]: {tx.description} Rp {tx.amount:,.0f}")
                                 subcat_match = target_cache.closest_subcategory(tx.subcategory)
-                                sub_text = subcat_match[0] if subcat_match else f"❓ {tx.subcategory}"
+                                sub_text = subcat_match[0] if subcat_match else "📦 Miscellaneous"
+                                merchant_line = f"🏪 {tx.merchant}\n" if tx.merchant else ""
                                 await self._notify(
                                     f"📧 *Email — duplikat, dilewati*\n"
                                     f"📝 {tx.description}\n"
                                     f"💰 Rp {tx.amount:,.0f}\n"
                                     f"📅 {tx.date}\n"
+                                    f"{merchant_line}"
                                     f"🏷 {sub_text}\n"
                                     f"🏦 {tx.account}\n\n"
                                     f"Transaksi ini sudah tercatat sebelumnya.",
@@ -601,13 +603,15 @@ class EmailWatcher:
                         f"[email→Notion] {tx.description} "
                         f"Rp {tx.amount:,.0f} [{tx.subcategory}]"
                     )
-                    sub_text = subcat_match[0] if subcat_match else f"❓ {tx.subcategory}"
+                    sub_text = subcat_match[0] if subcat_match else "📦 Miscellaneous"
                     acc_text = acc_match[0] if acc_match else f"❓ {tx.account}"
+                    merchant_line = f"🏪 {tx.merchant}\n" if tx.merchant else ""
                     await self._notify_with_markup(
                         f"📧 *Otomatis tercatat dari email*\n"
                         f"📝 {tx.description}\n"
                         f"💰 Rp {tx.amount:,.0f}\n"
                         f"📅 {tx.date}\n"
+                        f"{merchant_line}"
                         f"🏷 {sub_text}\n"
                         f"🏦 {acc_text}\n"
                         f"[Lihat di Notion]({url})",
