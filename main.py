@@ -961,7 +961,26 @@ async def main() -> None:
                 entry.description = text
             elif edit_field == "amount":
                 try:
-                    amount_val = float(text.replace(",", "").replace("Rp", "").replace("rp", "").strip())
+                    cleaned = text.replace("Rp", "").replace("rp", "").replace(" ", "").strip()
+                    # Handle Indonesian format: 25.000 → 25000, 1.500.000 → 1500000
+                    # If periods are used as thousands separators (always groups of 3),
+                    # strip them. If a comma is the decimal separator, replace with dot.
+                    if "," in cleaned and "." in cleaned:
+                        # e.g. "1.500.000,00" → "1500000.00"
+                        cleaned = cleaned.replace(".", "").replace(",", ".")
+                    elif "," in cleaned and "." not in cleaned:
+                        # Could be "25000,00" (decimal) or "25,000" (thousands)
+                        # If exactly 1-2 digits after comma, treat as decimal; else thousands
+                        parts = cleaned.split(",")
+                        if len(parts) == 2 and len(parts[1]) <= 2:
+                            cleaned = parts[0] + "." + parts[1]
+                        else:
+                            cleaned = cleaned.replace(",", "")
+                    else:
+                        # Only dots or no separator: strip dots (thousands separators)
+                        # "25.000" → "25000", "1.500.000" → "1500000"
+                        cleaned = cleaned.replace(".", "")
+                    amount_val = float(cleaned)
                     if not math.isfinite(amount_val) or amount_val <= 0:
                         raise ValueError
                     entry.amount = amount_val
@@ -2164,23 +2183,23 @@ async def main() -> None:
         watcher_task_ref = asyncio.create_task(email_watcher.run())
         log.info("Email watcher scheduled.")
 
-        async def _watch_over(task: asyncio.Task) -> None:
+        async def _watch_over() -> None:
+            """Supervise the email watcher, restarting on crash."""
             nonlocal watcher_task_ref
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass  # clean shutdown
-            except Exception:
-                log.critical("Email watcher died, restarting in 10s...", exc_info=True)
-                await asyncio.sleep(10)
-                watcher_task_ref = asyncio.create_task(email_watcher.run())
-                watcher_task_ref.add_done_callback(
-                    lambda t: asyncio.create_task(_watch_over(t))
-                )
+            while True:
+                task = watcher_task_ref
+                if task is None:
+                    break
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    break  # clean shutdown
+                except Exception:
+                    log.critical("Email watcher died, restarting in 10s...", exc_info=True)
+                    await asyncio.sleep(10)
+                    watcher_task_ref = asyncio.create_task(email_watcher.run())
 
-        watcher_task_ref.add_done_callback(
-            lambda t: asyncio.create_task(_watch_over(t))
-        )
+        asyncio.create_task(_watch_over())
 
     log.info("Bot starting...")
     auto_confirm_task = asyncio.create_task(_auto_confirm_stale())
@@ -2192,6 +2211,11 @@ async def main() -> None:
             watcher_task_ref.cancel()
         if auto_confirm_task:
             auto_confirm_task.cancel()
+        # Allow cancelled tasks to process their CancelledError
+        await asyncio.gather(
+            *(t for t in [watcher_task_ref, auto_confirm_task] if t),
+            return_exceptions=True,
+        )
         await db.close()
         log.info("Database connection closed.")
 
