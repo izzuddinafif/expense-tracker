@@ -1272,6 +1272,10 @@ async def main() -> None:
                 await db.clear_pending_recurring(user_id)
 
             await db.set_user_undo(user_id, page_id, entry.description, entry.amount, entry.date, entry.subcategory)
+            await db.record_pattern(
+                user_id, entry.description, entry.subcategory,
+                entry.account, entry.amount, entry.date,
+            )
             await status_msg.edit_text(
                 f"✅ Tersimpan! [Lihat di Notion]({url})",
                 parse_mode="Markdown",

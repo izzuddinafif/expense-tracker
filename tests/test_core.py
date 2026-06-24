@@ -561,3 +561,32 @@ class TestParseDate:
         import pytest
         with pytest.raises(ValueError):
             _parse_date("2026-13-01")
+
+
+# ── merchant_patterns tests (async, require SQLite) ──────────────────────────
+
+class TestMerchantPatterns:
+    @pytest.mark.asyncio
+    async def test_record_pattern_creates(self, db):
+        await db.record_pattern(12345, "Starbucks", "Cafe/Coffee Shop", "Jago", 50000, "2026-06-24")
+        result = await db.find_pattern(12345, 55000)
+        assert result is not None
+        assert result["merchant"] == "Starbucks"
+
+    @pytest.mark.asyncio
+    async def test_record_pattern_increments(self, db):
+        await db.record_pattern(12345, "Starbucks", "Cafe/Coffee Shop", "Jago", 50000, "2026-06-20")
+        await db.record_pattern(12345, "Starbucks", "Cafe/Coffee Shop", "Jago", 52000, "2026-06-24")
+        result = await db.find_pattern(12345, 51000)
+        assert result["merchant"] == "Starbucks"
+
+    @pytest.mark.asyncio
+    async def test_find_pattern_no_match(self, db):
+        await db.record_pattern(12345, "Starbucks", "Cafe/Coffee Shop", "Jago", 50000, "2026-06-24")
+        result = await db.find_pattern(12345, 999999)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_find_pattern_no_patterns(self, db):
+        result = await db.find_pattern(12345, 50000)
+        assert result is None

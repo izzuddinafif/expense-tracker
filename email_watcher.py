@@ -374,6 +374,41 @@ class EmailWatcher:
                     return False
             return True
 
+        # Check learned patterns for similar amounts
+        pattern = await self._db.find_pattern(target, tx.amount)
+        if pattern:
+            entry = ExpenseEntry(
+                description=pattern["merchant"],
+                amount=tx.amount,
+                date=tx.date,
+                subcategory=pattern["subcategory"] or tx.subcategory,
+                account=pattern["account"] or tx.account,
+                confidence=0.8,
+                merchant=pattern["merchant"],
+            )
+            await self._db.set_pending_expense(target, entry)
+            subcat_match = self._cache_getter().closest_subcategory(entry.subcategory)
+            sub_text = subcat_match[0] if subcat_match else entry.subcategory
+            acc_match = self._cache_getter().closest_account(entry.account)
+            acc_text = acc_match[0] if acc_match else entry.account
+            if self._bot and target:
+                try:
+                    await self._bot.send_message(
+                        target,
+                        f"💳 *Kartu debit Jago* — Rp {tx.amount:,.0f}\n"
+                        f"🏷 {sub_text} · 🏦 {acc_text}\n"
+                        f"📅 {tx.date}\n\n"
+                        f"🔁 *Pola terdeteksi: {pattern['merchant']}*\n"
+                        f"Konfirmasi:",
+                        parse_mode="Markdown",
+                        reply_markup=make_confirm_keyboard(target),
+                    )
+                except Exception as e:
+                    log.error(f"Telegram notify failed for pattern match: {e}")
+                    await self._db.clear_pending_expense(target)
+                    return False
+            return True
+
         current = await self._db.get_pending_email_expense(target)
         if current is None:
             await self._db.set_pending_email_expense(target, tx)

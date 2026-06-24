@@ -129,6 +129,28 @@ class Database:
                 PRIMARY KEY (user_id, amount)
             );
 
+            CREATE TABLE IF NOT EXISTS merchant_patterns (
+                user_id       INTEGER NOT NULL,
+                merchant      TEXT NOT NULL DEFAULT "",
+                subcategory   TEXT NOT NULL DEFAULT "",
+                account       TEXT NOT NULL DEFAULT "",
+                amount_bucket INTEGER NOT NULL,
+                count         INTEGER NOT NULL DEFAULT 1,
+                last_seen     TEXT NOT NULL,
+                PRIMARY KEY (user_id, merchant, amount_bucket)
+            );
+
+            CREATE TABLE IF NOT EXISTS merchant_patterns (
+                user_id       INTEGER NOT NULL,
+                merchant      TEXT NOT NULL DEFAULT "",
+                subcategory   TEXT NOT NULL DEFAULT "",
+                account       TEXT NOT NULL DEFAULT "",
+                amount_bucket INTEGER NOT NULL,
+                count         INTEGER NOT NULL DEFAULT 1,
+                last_seen     TEXT NOT NULL,
+                PRIMARY KEY (user_id, merchant, amount_bucket)
+            );
+
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id              INTEGER PRIMARY KEY,
                 owner_name               TEXT NOT NULL,
@@ -373,6 +395,40 @@ class Database:
             (user_id, int(round(amount)), description, datetime.now(timezone.utc).isoformat()),
         )
         await self._conn.commit()
+
+    # ── Merchant patterns (amount-bucketed auto-detection) ─────────────────────
+
+    async def record_pattern(self, user_id: int, merchant: str, subcategory: str, account: str, amount: float, date: str) -> None:
+        bucket = round(amount / 10000) * 10000
+        cur = await self._conn.execute(
+            "SELECT count FROM merchant_patterns WHERE user_id = ? AND merchant = ? AND amount_bucket = ?",
+            (user_id, merchant, bucket),
+        )
+        row = await cur.fetchone()
+        if row:
+            await self._conn.execute(
+                "UPDATE merchant_patterns SET count = count + 1, last_seen = ? WHERE user_id = ? AND merchant = ? AND amount_bucket = ?",
+                (date, user_id, merchant, bucket),
+            )
+        else:
+            await self._conn.execute(
+                "INSERT INTO merchant_patterns (user_id, merchant, subcategory, account, amount_bucket, count, last_seen) VALUES (?, ?, ?, ?, ?, 1, ?)",
+                (user_id, merchant, subcategory, account, bucket, date),
+            )
+        await self._conn.commit()
+
+    async def find_pattern(self, user_id: int, amount: float) -> dict | None:
+        bucket = round(amount / 10000) * 10000
+        cur = await self._conn.execute(
+            "SELECT merchant, subcategory, account, count FROM merchant_patterns "
+            "WHERE user_id = ? AND amount_bucket BETWEEN ? AND ? "
+            "ORDER BY count DESC LIMIT 1",
+            (user_id, bucket - 10000, bucket + 10000),
+        )
+        row = await cur.fetchone()
+        if row:
+            return {"merchant": row["merchant"], "subcategory": row["subcategory"], "account": row["account"]}
+        return None
 
     # ── Conversation history ────────────────────────────────────────────────────
 
