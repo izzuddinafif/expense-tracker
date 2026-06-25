@@ -140,17 +140,6 @@ class Database:
                 PRIMARY KEY (user_id, merchant, amount_bucket)
             );
 
-            CREATE TABLE IF NOT EXISTS merchant_patterns (
-                user_id       INTEGER NOT NULL,
-                merchant      TEXT NOT NULL DEFAULT "",
-                subcategory   TEXT NOT NULL DEFAULT "",
-                account       TEXT NOT NULL DEFAULT "",
-                amount_bucket INTEGER NOT NULL,
-                count         INTEGER NOT NULL DEFAULT 1,
-                last_seen     TEXT NOT NULL,
-                PRIMARY KEY (user_id, merchant, amount_bucket)
-            );
-
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id              INTEGER PRIMARY KEY,
                 owner_name               TEXT NOT NULL,

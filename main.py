@@ -2095,7 +2095,9 @@ async def main() -> None:
                     continue
                 n, c = result
                 user_record = await db.get_user(user_id)
-                owner = user_record.owner_name if user_record else ""
+                if not user_record:
+                    continue
+                owner = user_record.owner_name
                 try:
                     rec_url = pending_rec["recurring_page_url"] if pending_rec else None
                     # Re-check duplicates — email may have logged it

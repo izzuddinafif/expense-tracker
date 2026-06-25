@@ -484,6 +484,9 @@ class Agent:
             .replace("{accounts}", accounts)
         )
 
+        body_text = body[:4000]
+        if len(body) > 4000:
+            log.warning(f"Email body truncated from {len(body)} to 4000 chars for sender={sender}")
         messages = [
             {"role": "system", "content": system},
             {
@@ -491,7 +494,7 @@ class Agent:
                 "content": (
                     f"From: {sender}\n"
                     f"Subject: {subject}\n\n"
-                    f"Body:\n{body[:4000]}"
+                    f"Body:\n{body_text}"
                 ),
             },
         ]
