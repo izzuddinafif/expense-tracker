@@ -1273,7 +1273,7 @@ async def main() -> None:
 
             await db.set_user_undo(user_id, page_id, entry.description, entry.amount, entry.date, entry.subcategory)
             await db.record_pattern(
-                user_id, entry.description, entry.subcategory,
+                user_id, entry.merchant, entry.subcategory,
                 entry.account, entry.amount, entry.date,
             )
             await status_msg.edit_text(

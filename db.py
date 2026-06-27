@@ -1,19 +1,83 @@
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
+from cryptography.fernet import Fernet, InvalidToken
 
 from models import ExpenseEntry, EmailTransaction, IncomeEntry, UserRecord
 
 log = logging.getLogger(__name__)
 
 
+def _get_fernet() -> Fernet | None:
+    """Return a Fernet instance from TOKEN_ENCRYPTION_KEY env var, or None if unset."""
+    key = os.getenv("TOKEN_ENCRYPTION_KEY", "").strip()
+    if not key:
+        return None
+    try:
+        return Fernet(key.encode())
+    except Exception as e:
+        log.warning(f"Invalid TOKEN_ENCRYPTION_KEY: {e}")
+        return None
+
+
+def _encrypt_token(token: str, fernet: Fernet | None) -> str:
+    """Encrypt a token for storage. If no key is set, store plaintext (with marker)."""
+    if not token or fernet is None:
+        return token
+    return "enc:" + fernet.encrypt(token.encode()).decode()
+
+
+def _decrypt_token(stored: str, fernet: Fernet | None) -> str:
+    """Decrypt a token from storage. Handles both encrypted and legacy plaintext."""
+    if not stored:
+        return stored
+    if stored.startswith("enc:"):
+        if fernet is None:
+            log.error("Encrypted token found but TOKEN_ENCRYPTION_KEY not set — cannot decrypt")
+            return stored
+        try:
+            return fernet.decrypt(stored[4:].encode()).decode()
+        except InvalidToken:
+            log.error("Failed to decrypt token — wrong TOKEN_ENCRYPTION_KEY?")
+            return stored
+    return stored  # legacy plaintext
+
+
 class Database:
     def __init__(self, conn: aiosqlite.Connection) -> None:
         self._conn = conn
+        self._fernet = _get_fernet()
+        if self._fernet:
+            log.info("Token encryption enabled (TOKEN_ENCRYPTION_KEY set)")
+        else:
+            log.warning("TOKEN_ENCRYPTION_KEY not set — tokens stored in plaintext")
+
+    def _row_to_user(self, row) -> UserRecord:
+        """Build UserRecord from a DB row, decrypting the token."""
+        return UserRecord(
+            telegram_id=row["telegram_id"],
+            owner_name=row["owner_name"],
+            notion_token=_decrypt_token(row["notion_token"], self._fernet),
+            expenses_ds=row["expenses_ds"],
+            subcategories_ds=row["subcategories_ds"],
+            accounts_ds=row["accounts_ds"],
+            months_ds=row["months_ds"],
+            years_ds=row["years_ds"],
+            recurring_ds=row["recurring_ds"],
+            assets_ds=row["assets_ds"],
+            income_ds=row["income_ds"],
+            income_subcategories_ds=row["income_subcategories_ds"],
+            income_months_ds=row["income_months_ds"],
+            income_years_ds=row["income_years_ds"],
+            budget_ds=row["budget_ds"],
+            categories_ds=row["categories_ds"],
+            setup_step=row["setup_step"],
+        )
 
     @classmethod
     async def connect(cls, path: str) -> "Database":
@@ -222,10 +286,11 @@ class Database:
             if existing:
                 continue
             # Token saved but setup_step='migrated' — user must run /setup to discover databases
+            encrypted_token = _encrypt_token(notion_token, self._fernet)
             await self._conn.execute(
                 "INSERT INTO users (telegram_id, owner_name, notion_token, setup_step, created_at, updated_at) "
                 "VALUES (?, ?, ?, 'migrated', ?, ?)",
-                (uid, name, notion_token, now, now),
+                (uid, name, encrypted_token, now, now),
             )
         await self._conn.commit()
         log.info(f"Migrated {len(users)} user(s) from env vars — run /setup to discover databases")
@@ -648,25 +713,7 @@ class Database:
         row = await cur.fetchone()
         if row is None:
             return None
-        return UserRecord(
-            telegram_id=row["telegram_id"],
-            owner_name=row["owner_name"],
-            notion_token=row["notion_token"],
-            expenses_ds=row["expenses_ds"],
-            subcategories_ds=row["subcategories_ds"],
-            accounts_ds=row["accounts_ds"],
-            months_ds=row["months_ds"],
-            years_ds=row["years_ds"],
-            recurring_ds=row["recurring_ds"],
-            assets_ds=row["assets_ds"],
-            income_ds=row["income_ds"],
-            income_subcategories_ds=row["income_subcategories_ds"],
-            income_months_ds=row["income_months_ds"],
-            income_years_ds=row["income_years_ds"],
-            budget_ds=row["budget_ds"],
-            categories_ds=row["categories_ds"],
-            setup_step=row["setup_step"],
-        )
+        return self._row_to_user(row)
 
     async def upsert_user(self, telegram_id: int, **fields) -> None:
         allowed = {
@@ -680,6 +727,9 @@ class Database:
         bad = set(fields) - allowed
         if bad:
             raise ValueError(f"Unexpected user columns: {bad}")
+        # Encrypt notion_token before storage
+        if "notion_token" in fields:
+            fields["notion_token"] = _encrypt_token(fields["notion_token"], self._fernet)
         now = datetime.now(timezone.utc).isoformat()
         # Always include NOT NULL columns in the INSERT to avoid constraint violations
         # when only a subset of fields is provided (e.g. set_user_setup_step).
@@ -715,48 +765,12 @@ class Database:
         row = await cur.fetchone()
         if row is None:
             return None
-        return UserRecord(
-            telegram_id=row["telegram_id"],
-            owner_name=row["owner_name"],
-            notion_token=row["notion_token"],
-            expenses_ds=row["expenses_ds"],
-            subcategories_ds=row["subcategories_ds"],
-            accounts_ds=row["accounts_ds"],
-            months_ds=row["months_ds"],
-            years_ds=row["years_ds"],
-            recurring_ds=row["recurring_ds"],
-            assets_ds=row["assets_ds"],
-            income_ds=row["income_ds"],
-            income_subcategories_ds=row["income_subcategories_ds"],
-            income_months_ds=row["income_months_ds"],
-            income_years_ds=row["income_years_ds"],
-            budget_ds=row["budget_ds"],
-            categories_ds=row["categories_ds"],
-            setup_step=row["setup_step"],
-        )
+        return self._row_to_user(row)
 
     async def get_all_users(self) -> dict[int, UserRecord]:
         cur = await self._conn.execute("SELECT * FROM users")
         rows = await cur.fetchall()
         result: dict[int, UserRecord] = {}
         for row in rows:
-            result[row["telegram_id"]] = UserRecord(
-                telegram_id=row["telegram_id"],
-                owner_name=row["owner_name"],
-                notion_token=row["notion_token"],
-                expenses_ds=row["expenses_ds"],
-                subcategories_ds=row["subcategories_ds"],
-                accounts_ds=row["accounts_ds"],
-                months_ds=row["months_ds"],
-                years_ds=row["years_ds"],
-                recurring_ds=row["recurring_ds"],
-                assets_ds=row["assets_ds"],
-                income_ds=row["income_ds"],
-                income_subcategories_ds=row["income_subcategories_ds"],
-                income_months_ds=row["income_months_ds"],
-                income_years_ds=row["income_years_ds"],
-                budget_ds=row["budget_ds"],
-                categories_ds=row["categories_ds"],
-                setup_step=row["setup_step"],
-            )
+            result[row["telegram_id"]] = self._row_to_user(row)
         return result
