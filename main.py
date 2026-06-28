@@ -2080,59 +2080,67 @@ async def main() -> None:
             for user_id, since in list(pending_since.items()):
                 if now - since < 600:
                     continue
-                # Skip if user is currently confirming (lock held by handle_confirm)
-                user_lock = saving_locks.get(user_id)
-                if user_lock and user_lock.locked():
-                    continue
-                pending_rec = await db.get_pending_recurring(user_id)
-                entry = await db.get_pending_expense(user_id)
-                if not entry:
-                    continue
-                pending_since.pop(user_id, None)
-                await db.clear_pending_since(user_id)
-                result = await get_user_notion(user_id)
-                if not result:
-                    continue
-                n, c = result
-                user_record = await db.get_user(user_id)
-                if not user_record:
-                    continue
-                owner = user_record.owner_name
-                try:
-                    rec_url = pending_rec["recurring_page_url"] if pending_rec else None
-                    # Re-check duplicates — email may have logged it
-                    matches = await n.fetch_duplicates(owner, entry.amount, entry.date)
-                    is_dup = False
-                    if matches:
-                        is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date, new_merchant=entry.merchant)
-                    if is_dup:
+                # Acquire the per-user lock to prevent race with handle_confirm
+                user_lock = saving_locks.setdefault(user_id, asyncio.Lock())
+                if user_lock.locked():
+                    continue  # confirm in progress — skip
+                async with user_lock:
+                    # Re-check inside the lock — state may have changed
+                    if user_id not in pending_since or now - pending_since[user_id] < 600:
+                        continue
+                    pending_rec = await db.get_pending_recurring(user_id)
+                    entry = await db.get_pending_expense(user_id)
+                    if not entry:
+                        continue
+                    pending_since.pop(user_id, None)
+                    await db.clear_pending_since(user_id)
+                    result = await get_user_notion(user_id)
+                    if not result:
+                        continue
+                    n, c = result
+                    user_record = await db.get_user(user_id)
+                    if not user_record:
+                        continue
+                    owner = user_record.owner_name
+                    try:
+                        rec_url = pending_rec["recurring_page_url"] if pending_rec else None
+                        # Re-check duplicates — email may have logged it
+                        matches = await n.fetch_duplicates(owner, entry.amount, entry.date)
+                        is_dup = False
+                        if matches:
+                            is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date, new_merchant=entry.merchant)
+                        if is_dup:
+                            await db.clear_pending_expense(user_id)
+                            if pending_rec:
+                                await db.clear_pending_recurring(user_id)
+                            await bot.send_message(
+                                user_id,
+                                "⚠️ *Duplikat terdeteksi!* Transaksi ini sudah tercatat sebelumnya.\\n"
+                                "Pending otomatis dihapus.",
+                                parse_mode="Markdown",
+                            )
+                            continue
+                        url = await n.log_expense(entry, owner, c, recurring_page_url=rec_url)
+                        page_id = _url_to_id(url)
+                        last_saved_page[user_id] = page_id
+                        if pending_rec:
+                            await db.mark_processed(pending_rec["uid"], pending_rec["sender"])
+                        await db.set_user_undo(user_id, page_id, entry.description, entry.amount, entry.date, entry.subcategory)
+                        await db.record_pattern(
+                            user_id, entry.merchant, entry.subcategory,
+                            entry.account, entry.amount, entry.date,
+                        )
                         await db.clear_pending_expense(user_id)
                         if pending_rec:
                             await db.clear_pending_recurring(user_id)
                         await bot.send_message(
                             user_id,
-                            "⚠️ *Duplikat terdeteksi!* Transaksi ini sudah tercatat sebelumnya.\n"
-                            "Pending otomatis dihapus.",
+                            f"⏰ Waktu habis — otomatis tersimpan!\\n\\n{format_entry(entry, c)}",
                             parse_mode="Markdown",
+                            reply_markup=make_undo_keyboard(user_id),
                         )
-                        continue
-                    url = await n.log_expense(entry, owner, c, recurring_page_url=rec_url)
-                    page_id = _url_to_id(url)
-                    last_saved_page[user_id] = page_id
-                    if pending_rec:
-                        await db.mark_processed(pending_rec["uid"], pending_rec["sender"])
-                    await db.set_user_undo(user_id, page_id, entry.description, entry.amount, entry.date, entry.subcategory)
-                    await db.clear_pending_expense(user_id)
-                    if pending_rec:
-                        await db.clear_pending_recurring(user_id)
-                    await bot.send_message(
-                        user_id,
-                        f"⏰ Waktu habis — otomatis tersimpan!\n\n{format_entry(entry, c)}",
-                        parse_mode="Markdown",
-                        reply_markup=make_undo_keyboard(user_id),
-                    )
-                except Exception as e:
-                    log.error(f"Auto-confirm failed for user {user_id}: {e}")
+                    except Exception as e:
+                        log.error(f"Auto-confirm failed for user {user_id}: {e}")
 
     # ── Startup ───────────────────────────────────────────────────────────────
     # Look up email owner from DB
