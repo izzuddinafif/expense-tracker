@@ -627,7 +627,8 @@ class EmailWatcher:
                             log.warning(f"[email] Merchant similarity check failed [{uid}]: {e}")
 
                     url = await target_notion.log_expense(entry, target_owner, target_cache)
-                    asyncio.create_task(self._check_budget_alert(entry, notion=target_notion, cache=target_cache))
+                    alert_task = asyncio.create_task(self._check_budget_alert(entry, notion=target_notion, cache=target_cache))
+                    alert_task.add_done_callback(lambda t: t.exception() and log.warning(f"Budget alert task failed: {t.exception()}"))
                     if self._on_save_fn:
                         await self._on_save_fn(
                             target_id, url, tx.description, tx.amount, tx.date, tx.subcategory,

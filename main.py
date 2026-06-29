@@ -1281,7 +1281,8 @@ async def main() -> None:
                 parse_mode="Markdown",
                 reply_markup=make_undo_keyboard(user_id),
             )
-            asyncio.create_task(_process_next_photo(user_id, owner))
+            photo_task = asyncio.create_task(_process_next_photo(user_id, owner))
+            photo_task.add_done_callback(lambda t: t.exception() and log.warning(f"Photo queue task failed: {t.exception()}"))
         except Exception as e:
             log.error(f"Notion write failed: {e}")
             await db.set_pending_expense(user_id, entry)
@@ -1587,7 +1588,8 @@ async def main() -> None:
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("Dibatalkan.")
         await callback.message.answer("Dibatalkan ❌")
-        asyncio.create_task(_process_next_photo(user_id, user.owner_name))
+        photo_task = asyncio.create_task(_process_next_photo(user_id, user.owner_name))
+        photo_task.add_done_callback(lambda t: t.exception() and log.warning(f"Photo queue task failed: {t.exception()}"))
 
     @dp.callback_query(F.data.startswith("income_confirm:"))
     async def handle_income_confirm(callback: CallbackQuery) -> None:
@@ -2073,7 +2075,7 @@ async def main() -> None:
     # ── Auto-confirm stale pending expenses ─────────────────────────────
 
     async def _auto_confirm_stale() -> None:
-        """Auto-confirm pending expenses older than 5 minutes."""
+        """Auto-confirm pending expenses older than 10 minutes."""
         while True:
             await asyncio.sleep(60)
             now = datetime.now().timestamp()
