@@ -1271,7 +1271,7 @@ async def main() -> None:
             if pending_rec:
                 await db.clear_pending_recurring(user_id)
 
-            await db.set_user_undo(user_id, page_id, entry.description, entry.amount, entry.date, entry.subcategory)
+            await db.set_user_undo(user_id, page_id, entry.description, entry.amount, entry.date, entry.subcategory, merchant=entry.merchant)
             await db.record_pattern(
                 user_id, entry.merchant, entry.subcategory,
                 entry.account, entry.amount, entry.date,
@@ -2127,7 +2127,7 @@ async def main() -> None:
                         last_saved_page[user_id] = page_id
                         if pending_rec:
                             await db.mark_processed(pending_rec["uid"], pending_rec["sender"])
-                        await db.set_user_undo(user_id, page_id, entry.description, entry.amount, entry.date, entry.subcategory)
+                        await db.set_user_undo(user_id, page_id, entry.description, entry.amount, entry.date, entry.subcategory, merchant=entry.merchant)
                         await db.record_pattern(
                             user_id, entry.merchant, entry.subcategory,
                             entry.account, entry.amount, entry.date,
@@ -2145,6 +2145,7 @@ async def main() -> None:
                         log.error(f"Auto-confirm failed for user {user_id}: {e}")
 
     # ── Startup ───────────────────────────────────────────────────────────────
+    watch_over_task: asyncio.Task | None = None
     # Look up email owner from DB
     target_owner = config.email_owner
     email_owner_record = None
@@ -2215,7 +2216,7 @@ async def main() -> None:
                     await asyncio.sleep(10)
                     watcher_task_ref = asyncio.create_task(email_watcher.run())
 
-        asyncio.create_task(_watch_over())
+        watch_over_task = asyncio.create_task(_watch_over())
 
     log.info("Bot starting...")
     auto_confirm_task = asyncio.create_task(_auto_confirm_stale())
@@ -2227,9 +2228,11 @@ async def main() -> None:
             watcher_task_ref.cancel()
         if auto_confirm_task:
             auto_confirm_task.cancel()
+        if watch_over_task:
+            watch_over_task.cancel()
         # Allow cancelled tasks to process their CancelledError
         await asyncio.gather(
-            *(t for t in [watcher_task_ref, auto_confirm_task] if t),
+            *(t for t in [watcher_task_ref, auto_confirm_task, watch_over_task] if t),
             return_exceptions=True,
         )
         await db.close()

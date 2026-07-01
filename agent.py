@@ -510,7 +510,7 @@ class Agent:
                     f"[agent] Subcategory '{tx.subcategory}' not in Notion cache — retrying with feedback"
                 )
                 retry_messages = messages + [
-                    {"role": "assistant", "content": f'{{"subcategory": "{tx.subcategory}"}}'},
+                    {"role": "assistant", "content": json.dumps({"subcategory": tx.subcategory})},
                     {
                         "role": "user",
                         "content": (
