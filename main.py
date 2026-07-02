@@ -541,7 +541,14 @@ async def main() -> None:
                 lines.append("\nGunakan `/linkemail remove <nama>` untuk putuskan.")
                 await msg.answer("\n".join(lines), parse_mode="Markdown")
 
-        elif cmd == "remove" and len(parts) >= 3:
+        elif cmd == "remove":
+            if len(parts) < 3:
+                await msg.answer(
+                    "❌ Format salah. Gunakan: `/linkemail remove <nama_akun>`\n"
+                    "Contoh: `/linkemail remove Mandiri`",
+                    parse_mode="Markdown",
+                )
+                return
             pattern = parts[2].strip()
             owners = await db.get_email_accounts_for_user(user_id)
             if pattern not in owners:
