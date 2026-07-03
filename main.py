@@ -1076,17 +1076,33 @@ async def main() -> None:
                 await msg.answer("Transaksi debit dibatalkan ❌")
                 return
             await db.clear_pending_email_expense(user_id)
+            # Use AI to extract proper subcategory from user's description
+            try:
+                today = date.today().isoformat()
+                # Fetch recent expenses for context
+                recent = await user_notion.fetch_recent_expenses(owner, user_cache, 10)
+                entry = await agent.extract_from_text(
+                    text, user_cache, today, recent_expenses=recent
+                )
+                # Override amount/date/account from the original email
+                entry.amount = pending_tx.amount
+                entry.date = pending_tx.date
+                entry.account = pending_tx.account
+                entry.confidence = 0.9
+            except Exception as e:
+                log.warning(f"AI re-classify failed for debit reply: {e}")
+                # Fallback: use description as-is with old subcategory
+                entry = ExpenseEntry(
+                    description=text,
+                    amount=pending_tx.amount,
+                    date=pending_tx.date,
+                    subcategory=pending_tx.subcategory,
+                    account=pending_tx.account,
+                    confidence=0.9,
+                    merchant=text,
+                )
             # Learn the merchant name for this amount (Jago debit cache)
-            await db.set_debit_merchant(user_id, pending_tx.amount, text)
-            entry = ExpenseEntry(
-                description=text,
-                amount=pending_tx.amount,
-                date=pending_tx.date,
-                subcategory=pending_tx.subcategory,
-                account=pending_tx.account,
-                confidence=0.9,
-                merchant=text,
-            )
+            await db.set_debit_merchant(user_id, pending_tx.amount, entry.merchant or text)
             await db.set_pending_expense(user_id, entry)
             ts = datetime.now().timestamp()
             pending_since[user_id] = ts

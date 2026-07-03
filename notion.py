@@ -335,6 +335,15 @@ class NotionClient:
         If recurring_page_url is provided, the expense is linked to that
         Recurring Payment entry via the 'Linked Recurring Payment' relation.
         """
+        # Ensure entry.date is a string in YYYY-MM-DD format
+        if hasattr(entry.date, 'isoformat'):
+            # It's a datetime/date object — convert to string
+            log.warning(f"log_expense: entry.date was {type(entry.date).__name__}, converting to ISO string")
+            entry.date = entry.date.isoformat()[:10]
+        elif not isinstance(entry.date, str):
+            log.error(f"log_expense: entry.date is {type(entry.date).__name__} — cannot parse")
+            raise TypeError(f"Expected str for date, got {type(entry.date).__name__}")
+        
         year_str, month_str = _parse_date(entry.date)
 
         subcategory_match = cache.closest_subcategory(entry.subcategory)
