@@ -453,6 +453,9 @@ class Database:
     # ── Merchant patterns (amount-bucketed auto-detection) ─────────────────────
 
     async def record_pattern(self, user_id: int, merchant: str, subcategory: str, account: str, amount: float, date: str) -> None:
+        merchant = merchant.strip()
+        if not merchant:
+            return
         bucket = round(amount / 10000) * 10000
         cur = await self._conn.execute(
             "SELECT count FROM merchant_patterns WHERE user_id = ? AND merchant = ? AND amount_bucket = ?",
@@ -475,7 +478,7 @@ class Database:
         bucket = round(amount / 10000) * 10000
         cur = await self._conn.execute(
             "SELECT merchant, subcategory, account, count FROM merchant_patterns "
-            "WHERE user_id = ? AND amount_bucket BETWEEN ? AND ? "
+            "WHERE user_id = ? AND merchant <> '' AND amount_bucket BETWEEN ? AND ? "
             "ORDER BY count DESC LIMIT 1",
             (user_id, bucket - 10000, bucket + 10000),
         )

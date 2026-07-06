@@ -11,7 +11,8 @@ import tempfile
 import pytest
 import pytest_asyncio
 
-from models import ExpenseEntry, IncomeEntry, QueryIntent, EmailTransaction, NotionCache, _fuzzy_match
+from models import ExpenseEntry, IncomeEntry, QueryIntent, EmailTransaction, NotionCache, _fuzzy_match, format_self_transfer_label
+from email_watcher import _is_jago_pocket_transfer
 from db import Database
 
 
@@ -147,9 +148,26 @@ class TestEmailTransaction:
             subcategory="Transfer of Wealth",
             account="Mandiri",
             recipient_bank="BSI",
+            source_account="Mandiri",
+            destination_account="BSI",
+            income_subcategory="Transfer",
         )
         assert tx.admin_fee == 2500
         assert tx.recipient_bank == "BSI"
+        assert tx.source_account == "Mandiri"
+        assert tx.destination_account == "BSI"
+        assert tx.income_subcategory == "Transfer"
+
+    def test_self_transfer_label(self):
+        assert format_self_transfer_label("Mandiri", "Jago", "out") == "Transfer antar rekening — Mandiri → Jago (keluar)"
+        assert format_self_transfer_label("Mandiri", "Jago", "in") == "Transfer antar rekening — Mandiri → Jago (masuk)"
+        assert format_self_transfer_label("Mandiri", "Jago", "fee") == "Biaya admin transfer — Mandiri → Jago"
+
+    def test_jago_pocket_transfer_skip(self):
+        subject = "Transfer sendiri Rp 500,000 → rekening sendiri"
+        body = "Rp500.000 telah dipindahkan dari Kantong Utama ke Kantong Spending."
+        assert _is_jago_pocket_transfer("noreply@jago.com", subject, body) is True
+        assert _is_jago_pocket_transfer("noreply@jago.com", "Bukti transfer", "Pindah saldo ke bank lain") is False
 
     def test_skip(self):
         tx = EmailTransaction(
@@ -588,5 +606,11 @@ class TestMerchantPatterns:
 
     @pytest.mark.asyncio
     async def test_find_pattern_no_patterns(self, db):
+        result = await db.find_pattern(12345, 50000)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_record_pattern_ignores_blank_merchant(self, db):
+        await db.record_pattern(12345, "   ", "Cafe/Coffee Shop", "Jago", 50000, "2026-06-24")
         result = await db.find_pattern(12345, 50000)
         assert result is None

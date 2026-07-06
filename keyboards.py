@@ -46,6 +46,7 @@ def make_email_edit_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="💰 Jumlah", callback_data=f"email_edit_amount:{user_id}")],
         [InlineKeyboardButton(text="📅 Tanggal", callback_data=f"email_edit_date:{user_id}")],
         [InlineKeyboardButton(text="🏷 Kategori", callback_data=f"email_edit_subcat:{user_id}")],
+        [InlineKeyboardButton(text="🏦 Akun", callback_data=f"email_edit_account:{user_id}")],
         [InlineKeyboardButton(text="📋 Rincian", callback_data=f"email_edit_detail:{user_id}")],
         [InlineKeyboardButton(text="❌ Batal", callback_data=f"email_edit_cancel:{user_id}")],
     ])

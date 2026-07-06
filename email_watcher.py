@@ -30,7 +30,7 @@ from typing import Callable
 
 from db import Database
 from keyboards import make_category_keyboard, make_confirm_keyboard, make_email_edit_keyboard
-from models import ExpenseEntry, EmailTransaction, NotionCache
+from models import ExpenseEntry, IncomeEntry, EmailTransaction, NotionCache, format_self_transfer_label
 
 from aiogram.types import (
     InlineKeyboardMarkup,
@@ -60,6 +60,27 @@ LOOKBACK_DAYS = 3    # scan last 3 days — catches emails after brief downtime
 
 # Description the AI returns for Jago debit card emails (no merchant info)
 JAGO_DEBIT_DESCRIPTION = "jago debit card transaction"
+
+
+def _is_jago_pocket_transfer(sender: str, subject: str, body: str) -> bool:
+    """Detect Jago internal pocket-to-pocket transfers that should be skipped.
+
+    These are not bank transfers and should not create expense/income records.
+    """
+    sender_l = sender.lower()
+    if "jago" not in sender_l:
+        return False
+    text = f"{subject}\n{body}".lower()
+    if "kantong" not in text:
+        return False
+    pocket_phrases = (
+        "pindah antar kantong",
+        "antar kantong",
+        "dipindahkan dari kantong",
+        "dipindahkan",
+        "pindah dana antar kantong",
+    )
+    return any(phrase in text for phrase in pocket_phrases)
 
 
 # ── HTML → plain text ──────────────────────────────────────────────────────────
@@ -339,6 +360,19 @@ class EmailWatcher:
         if target is None:
             return False
 
+        async def _set_pending_expense(entry: ExpenseEntry) -> None:
+            await self._db.set_pending_expense(target, entry)
+            if self._pending_since is not None:
+                ts = time.time()
+                self._pending_since[target] = ts
+                await self._db.set_pending_since(target, ts)
+
+        async def _clear_pending_expense() -> None:
+            await self._db.clear_pending_expense(target)
+            await self._db.clear_pending_since(target)
+            if self._pending_since is not None:
+                self._pending_since.pop(target, None)
+
         # Check cache for auto-learned merchant name
         cached = await self._db.get_debit_merchant(target, tx.amount)
         if cached:
@@ -351,7 +385,7 @@ class EmailWatcher:
                 confidence=0.9,
                 merchant=cached,
             )
-            await self._db.set_pending_expense(target, entry)
+            await _set_pending_expense(entry)
             subcat_match = self._cache_getter().closest_subcategory(entry.subcategory)
             sub_text = subcat_match[0] if subcat_match else entry.subcategory
             acc_match = self._cache_getter().closest_account(entry.account)
@@ -370,7 +404,7 @@ class EmailWatcher:
                     )
                 except Exception as e:
                     log.error(f"Telegram notify failed for cached debit: {e}")
-                    await self._db.clear_pending_expense(target)
+                    await _clear_pending_expense()
                     return False
             return True
 
@@ -386,7 +420,7 @@ class EmailWatcher:
                 confidence=0.8,
                 merchant=pattern["merchant"],
             )
-            await self._db.set_pending_expense(target, entry)
+            await _set_pending_expense(entry)
             subcat_match = self._cache_getter().closest_subcategory(entry.subcategory)
             sub_text = subcat_match[0] if subcat_match else entry.subcategory
             acc_match = self._cache_getter().closest_account(entry.account)
@@ -405,7 +439,7 @@ class EmailWatcher:
                     )
                 except Exception as e:
                     log.error(f"Telegram notify failed for pattern match: {e}")
-                    await self._db.clear_pending_expense(target)
+                    await _clear_pending_expense()
                     return False
             return True
 
@@ -465,6 +499,11 @@ class EmailWatcher:
         today = date.today().isoformat()
 
         try:
+            if _is_jago_pocket_transfer(sender, subject, body):
+                log.info(f"[email] Skipping Jago pocket transfer [{uid}]: {subject}")
+                await self._db.mark_processed(uid, sender)
+                return
+
             tx = await self._agent.parse_bank_email(
                 subject=subject,
                 body=body,
@@ -494,7 +533,15 @@ class EmailWatcher:
         try:
             if tx.type == "expense":
                 if tx.description.lower() == JAGO_DEBIT_DESCRIPTION:
-                    recurring = target_cache.recurring_payments.get(int(round(tx.amount)))
+                    recurring_list = target_cache.recurring_payments.get(int(round(tx.amount)), [])
+                    recurring = next(
+                        (item for item in recurring_list if item.get("account") == tx.account),
+                        None,
+                    )
+                    if recurring is None:
+                        blank_accounts = [item for item in recurring_list if not item.get("account")]
+                        if len(blank_accounts) == 1:
+                            recurring = blank_accounts[0]
 
                     if recurring:
                         # Check if user already has a pending entry for this
@@ -656,21 +703,95 @@ class EmailWatcher:
                     )
 
             elif tx.type == "self_transfer":
-                dest = tx.recipient_bank or "rekening sendiri"
-                log.info(f"[email] Self-transfer Rp {tx.amount:,.0f} → {dest}")
+                source = tx.source_account or tx.account or "rekening sumber"
+                dest = tx.destination_account or tx.recipient_bank or "rekening tujuan"
+                log.info(f"[email] Self-transfer Rp {tx.amount:,.0f} {source} → {dest}")
 
-                skip_admin_fee = False
+                # Record the outgoing transfer from the source account.
+                transfer_out = ExpenseEntry(
+                    description=format_self_transfer_label(source, dest, "out"),
+                    amount=tx.amount,
+                    date=tx.date,
+                    subcategory=tx.subcategory,
+                    account=source,
+                    confidence=0.95,
+                    merchant="",
+                )
+                out_url = None
+                try:
+                    out_matches = await target_notion.fetch_duplicates(target_owner, tx.amount, tx.date)
+                    if out_matches:
+                        is_out_dup = await self._agent.check_duplicate(
+                            out_matches, transfer_out.description, tx.amount, tx.date,
+                            new_merchant="",
+                        )
+                        if is_out_dup:
+                            log.info(f"[email] Transfer-out duplicate skipped [{uid}]: Rp {tx.amount:,.0f}")
+                            await self._notify(
+                                f"📧 *Transfer keluar duplikat, dilewati*\n"
+                                f"💰 Rp {tx.amount:,.0f}\n"
+                                f"📅 {tx.date}\n"
+                                f"🏦 {source} → {dest}",
+                                user_id=target_id,
+                            )
+                        else:
+                            out_url = await target_notion.log_expense(transfer_out, target_owner, target_cache)
+                    else:
+                        out_url = await target_notion.log_expense(transfer_out, target_owner, target_cache)
+                except Exception as e:
+                    log.warning(f"[email] Transfer-out logging failed: {e}")
+                    raise
+                if out_url and self._on_save_fn:
+                    await self._on_save_fn(
+                        target_id, out_url, transfer_out.description, transfer_out.amount, transfer_out.date, transfer_out.subcategory,
+                    )
+                    log.info(f"[email→Notion] Transfer-out Rp {tx.amount:,.0f} logged")
+
+                # Record the incoming transfer to the destination account.
+                income_subcategory = tx.income_subcategory or tx.subcategory or "Transfer"
+                transfer_in = IncomeEntry(
+                    description=format_self_transfer_label(source, dest, "in"),
+                    amount=tx.amount,
+                    date=tx.date,
+                    subcategory=income_subcategory,
+                    account=dest,
+                    confidence=0.95,
+                )
+                in_url = None
+                try:
+                    income_matches = await target_notion.fetch_duplicates(target_owner, tx.amount, tx.date, db_key="income_ds")
+                    if income_matches:
+                        is_in_dup = await self._agent.check_duplicate(
+                            income_matches, transfer_in.description, tx.amount, tx.date,
+                            new_merchant="",
+                        )
+                        if is_in_dup:
+                            log.info(f"[email] Transfer-in duplicate skipped [{uid}]: Rp {tx.amount:,.0f}")
+                        else:
+                            in_url = await target_notion.log_income(transfer_in, target_owner, target_cache)
+                    else:
+                        in_url = await target_notion.log_income(transfer_in, target_owner, target_cache)
+                except Exception as e:
+                    log.warning(f"[email] Transfer-in logging failed: {e}")
+                    raise
+                if in_url and self._on_save_fn:
+                    await self._on_save_fn(
+                        target_id, in_url, transfer_in.description, transfer_in.amount, transfer_in.date, transfer_in.subcategory,
+                    )
+                    log.info(f"[email→Notion] Transfer-in Rp {tx.amount:,.0f} logged")
+
+                # Record the admin fee separately, if any.
+                fee_url = None
                 if tx.admin_fee > 0:
                     fee_entry = ExpenseEntry(
-                        description=f"Admin fee – transfer ke {dest}",
+                        description=format_self_transfer_label(source, dest, "fee"),
                         amount=tx.admin_fee,
                         date=tx.date,
                         subcategory=tx.subcategory,
-                        account=tx.account,
+                        account=source,
                         confidence=0.9,
                         merchant="",
                     )
-                    # Duplicate check for admin fee
                     try:
                         fee_matches = await target_notion.fetch_duplicates(target_owner, tx.admin_fee, tx.date)
                         if fee_matches:
@@ -680,41 +801,35 @@ class EmailWatcher:
                             )
                             if is_fee_dup:
                                 log.info(f"[email] Admin fee duplicate skipped [{uid}]: Rp {tx.admin_fee:,.0f}")
-                                await self._notify(
-                                    f"📧 *Admin fee duplikat, dilewati*\n"
-                                    f"💰 Rp {tx.admin_fee:,.0f}\n"
-                                    f"📅 {tx.date}\n\n"
-                                    f"Biaya admin ini sudah tercatat sebelumnya.",
-                                    user_id=target_id,
-                                )
-                                skip_admin_fee = True
+                            else:
+                                fee_url = await target_notion.log_expense(fee_entry, target_owner, target_cache)
+                        else:
+                            fee_url = await target_notion.log_expense(fee_entry, target_owner, target_cache)
                     except Exception as e:
-                        log.warning(f"[email] Admin fee duplicate check failed: {e}")
-
-                    url = None
-                    if not skip_admin_fee:
-                        url = await target_notion.log_expense(fee_entry, target_owner, target_cache)
-                        if self._on_save_fn:
-                            await self._on_save_fn(
-                                target_id, url, fee_entry.description, fee_entry.amount, fee_entry.date, fee_entry.subcategory,
-                            )
+                        log.warning(f"[email] Admin fee logging failed: {e}")
+                        raise
+                    if fee_url and self._on_save_fn:
+                        await self._on_save_fn(
+                            target_id, fee_url, fee_entry.description, fee_entry.amount, fee_entry.date, fee_entry.subcategory,
+                        )
                         log.info(f"[email→Notion] Admin fee Rp {tx.admin_fee:,.0f} logged")
 
-                    notify_text = (
-                        f"📧 *Transfer sendiri* Rp {tx.amount:,.0f} → {dest}\n"
-                        f"Biaya admin {'tercatat' if url else 'duplikat, dilewati'}: 💰 Rp {tx.admin_fee:,.0f}\n"
-                    )
-                    if url:
-                        notify_text += f"[Lihat di Notion]({url})"
-                    await self._notify_with_markup(
-                        notify_text, make_email_edit_keyboard(target_id), user_id=target_id,
-                    )
-                else:
-                    await self._notify(
-                        f"📧 *Transfer sendiri* Rp {tx.amount:,.0f} → {dest}\n"
-                        f"Tidak ada biaya admin — tidak dicatat.",
-                        user_id=target_id,
-                    )
+                summary_lines = [
+                    f"📧 *Transfer antar rekening* Rp {tx.amount:,.0f}",
+                    f"🏦 {source} → {dest}",
+                    f"💸 Biaya admin: Rp {tx.admin_fee:,.0f}" if tx.admin_fee > 0 else "💸 Biaya admin: Rp 0",
+                ]
+                if out_url:
+                    summary_lines.append(f"➡️ [Keluar]({out_url})")
+                if in_url:
+                    summary_lines.append(f"⬅️ [Masuk]({in_url})")
+                if fee_url:
+                    summary_lines.append(f"🧾 [Biaya admin]({fee_url})")
+                await self._notify_with_markup(
+                    "\n".join(summary_lines),
+                    make_email_edit_keyboard(target_id),
+                    user_id=target_id,
+                )
 
             else:
                 log.warning(

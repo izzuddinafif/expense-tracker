@@ -3,8 +3,10 @@ import csv
 import io
 import math
 import logging
+import os
 from logging.handlers import RotatingFileHandler
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
@@ -13,7 +15,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     CallbackQuery,
-    InputFile,
+    BufferedInputFile,
 )
 
 from config import load_config
@@ -36,7 +38,9 @@ from email_watcher import EmailWatcher
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("__main__").setLevel(logging.DEBUG)
 
-_file_handler = RotatingFileHandler("/app/data/bot.log", maxBytes=5 * 1024 * 1024, backupCount=3)
+_log_path = Path(os.getenv("BOT_LOG_PATH", "data/bot.log"))
+_log_path.parent.mkdir(parents=True, exist_ok=True)
+_file_handler = RotatingFileHandler(_log_path, maxBytes=5 * 1024 * 1024, backupCount=3)
 _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
 logging.getLogger().addHandler(_file_handler)
 
@@ -96,6 +100,28 @@ async def main() -> None:
                 continue
             meaningful.append(t)
         return " ".join(meaningful[:4]) if meaningful else None
+
+    def _parse_idr_amount(text: str) -> float:
+        """Parse Indonesian-formatted money input into a positive float."""
+        cleaned = text.replace("Rp", "").replace("rp", "").replace(" ", "").strip()
+        if not cleaned:
+            raise ValueError("Jumlah tidak valid")
+
+        if "," in cleaned and "." in cleaned:
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        elif "," in cleaned and "." not in cleaned:
+            parts = cleaned.split(",")
+            if len(parts) == 2 and len(parts[1]) <= 2:
+                cleaned = parts[0] + "." + parts[1]
+            else:
+                cleaned = cleaned.replace(",", "")
+        else:
+            cleaned = cleaned.replace(".", "")
+
+        amount_val = float(cleaned)
+        if not math.isfinite(amount_val) or amount_val <= 0:
+            raise ValueError("Jumlah tidak valid")
+        return amount_val
 
     async def _get_email_saved(user_id: int) -> dict | None:
         saved = email_saved_pages.get(user_id)
@@ -968,29 +994,7 @@ async def main() -> None:
                 entry.description = text
             elif edit_field == "amount":
                 try:
-                    cleaned = text.replace("Rp", "").replace("rp", "").replace(" ", "").strip()
-                    # Handle Indonesian format: 25.000 → 25000, 1.500.000 → 1500000
-                    # If periods are used as thousands separators (always groups of 3),
-                    # strip them. If a comma is the decimal separator, replace with dot.
-                    if "," in cleaned and "." in cleaned:
-                        # e.g. "1.500.000,00" → "1500000.00"
-                        cleaned = cleaned.replace(".", "").replace(",", ".")
-                    elif "," in cleaned and "." not in cleaned:
-                        # Could be "25000,00" (decimal) or "25,000" (thousands)
-                        # If exactly 1-2 digits after comma, treat as decimal; else thousands
-                        parts = cleaned.split(",")
-                        if len(parts) == 2 and len(parts[1]) <= 2:
-                            cleaned = parts[0] + "." + parts[1]
-                        else:
-                            cleaned = cleaned.replace(",", "")
-                    else:
-                        # Only dots or no separator: strip dots (thousands separators)
-                        # "25.000" → "25000", "1.500.000" → "1500000"
-                        cleaned = cleaned.replace(".", "")
-                    amount_val = float(cleaned)
-                    if not math.isfinite(amount_val) or amount_val <= 0:
-                        raise ValueError
-                    entry.amount = amount_val
+                    entry.amount = _parse_idr_amount(text)
                 except ValueError:
                     pending_edit[user_id] = "amount"
                     await msg.answer("❌ Angka tidak valid. Ketik jumlah angka saja (contoh: 25000):")
@@ -1029,14 +1033,14 @@ async def main() -> None:
                     await user_notion.update_expense_title(page_id, text, owner)
                     email_saved_pages[user_id]["description"] = text
                 elif email_field == "amount":
-                    amount = float(text.replace(",", "").replace("Rp", "").replace("rp", "").strip())
-                    if not math.isfinite(amount) or amount <= 0:
-                        raise ValueError("Jumlah tidak valid")
+                    amount = _parse_idr_amount(text)
                     await user_notion.update_expense_amount(page_id, amount)
                     email_saved_pages[user_id]["amount"] = amount
                 elif email_field == "date":
                     await user_notion.update_expense_date(page_id, text)
                     email_saved_pages[user_id]["date"] = text
+                elif email_field == "account":
+                    await user_notion.update_expense_account(page_id, text, user_cache)
                 elif email_field == "detail":
                     cats = list(user_cache.category_subcategories.keys())
                     past = None
@@ -1801,6 +1805,21 @@ async def main() -> None:
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("Ketik tanggal baru")
         await callback.message.answer("✏️ Ketik tanggal baru (YYYY-MM-DD):")
+
+    @dp.callback_query(F.data.startswith("email_edit_account:"))
+    async def handle_email_edit_account(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        if not await _get_email_saved(user_id):
+            await callback.answer("Waktu edit sudah habis (10 menit).")
+            return
+        email_pending_edit[user_id] = "account"
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Ketik akun baru")
+        await callback.message.answer("✏️ Ketik akun baru (contoh: Mandiri / Jago):")
 
     @dp.callback_query(F.data.startswith("email_edit_detail:"))
     async def handle_email_edit_detail(callback: CallbackQuery) -> None:

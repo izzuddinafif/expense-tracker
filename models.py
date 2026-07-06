@@ -51,7 +51,27 @@ class EmailTransaction(BaseModel):
     merchant: str = ""  # merchant/business name as written in the email (for matching duplicates)
     recipient_name: str = ""   # for transfers: recipient's name
     recipient_bank: str = ""   # for transfers: recipient's bank name
+    source_account: str = ""   # for self-transfers: source account name (best match from email)
+    destination_account: str = ""  # for self-transfers: destination account name / bank label
+    income_subcategory: str = ""  # for self-transfers: subcategory for the destination income entry
     skip_reason: str = ""      # why skipped (if type == "skip")
+
+
+def format_self_transfer_label(source_account: str, destination_account: str, kind: str) -> str:
+    """Human-friendly title for self-transfer records in Notion.
+
+    kind:
+      - "out"  → outgoing transfer record
+      - "in"   → incoming transfer record
+      - "fee"  → admin fee record
+    """
+    source = source_account or "rekening sumber"
+    dest = destination_account or "rekening tujuan"
+    if kind == "in":
+        return f"Transfer antar rekening — {source} → {dest} (masuk)"
+    if kind == "fee":
+        return f"Biaya admin transfer — {source} → {dest}"
+    return f"Transfer antar rekening — {source} → {dest} (keluar)"
 
 
 # ── Notion relation cache ─────────────────────────────────────────────────────
@@ -72,10 +92,10 @@ class NotionCache:
     # Category → list of subcategory names (for two-level picker)
     category_subcategories: dict[str, list[str]] = field(default_factory=dict)
 
-    # amount in IDR (rounded to int) → {name, page_url, subcategory, account}
+    # amount in IDR (rounded to int) → list[{name, page_url, subcategory, account}]
     # Loaded from the "Recurring Payment" Notion database (Active entries only)
-    # Keyed by int to avoid float equality issues (e.g. 49999.99999 != 50000.0)
-    recurring_payments: dict[int, dict] = field(default_factory=dict)
+    # Grouped by amount because different recurring items can share the same nominal value
+    recurring_payments: dict[int, list[dict]] = field(default_factory=dict)
 
     def closest_subcategory(self, name: str) -> tuple[str, str] | None:
         """Fuzzy match subcategory name → (matched_name, page_url)."""

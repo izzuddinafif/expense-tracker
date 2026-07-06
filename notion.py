@@ -175,7 +175,7 @@ class NotionClient:
         self,
         subcategories: dict[str, str],
         accounts: dict[str, str],
-    ) -> dict[int, dict]:
+    ) -> dict[int, list[dict]]:
         """
         Load Active entries from the Recurring Payment database.
         Returns dict keyed by amount (IDR int) → {name, page_url, subcategory, account}.
@@ -185,7 +185,7 @@ class NotionClient:
         acc_id_to_name = {_url_to_id(url): name for name, url in accounts.items()}
 
         pages = await self._query_db(self._db_ids["recurring_ds"])
-        result: dict[int, dict] = {}
+        result: dict[int, list[dict]] = {}
 
         for p in pages:
             # Only Active entries
@@ -202,12 +202,12 @@ class NotionClient:
             sub_id = self._extract_relation_id(p, "🥡 Sub-categories")
             acc_id = self._extract_relation_id(p, "🧾 Accounts")
 
-            result[int(round(amount))] = {
+            result.setdefault(int(round(amount)), []).append({
                 "name": name,
                 "page_url": p["url"],
                 "subcategory": sub_id_to_name.get(sub_id or "", ""),
                 "account": acc_id_to_name.get(acc_id or "", ""),
-            }
+            })
 
         return result
 

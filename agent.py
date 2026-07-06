@@ -5,6 +5,7 @@ import logging
 from openai import AsyncOpenAI, APIError, APITimeoutError, APIConnectionError, RateLimitError
 from config import Config
 from models import ExpenseEntry, IncomeEntry, QueryIntent, EmailTransaction, NotionCache
+from typing import cast
 
 log = logging.getLogger(__name__)
 
@@ -91,10 +92,11 @@ USER'S OWN ACCOUNTS (for self-transfer detection — match by bank suffix):
 TRANSACTION TYPES:
 - "expense": payment to merchant or third party (QRIS, debit card, transfer to someone else, top-up/pulsa)
 - "self_transfer": money moved between user's own accounts (self-transfer = recipient is the account holder)
-- "skip": failed/declined transaction OR any email that is not a completed transaction
+- "skip": failed/declined transaction OR any email that is not a completed transaction OR a Jago internal pocket-to-pocket transfer (e.g. Kantong Utama → Kantong Spending) with no external money movement
 
 For any email, locate the relevant fields yourself by reading the body:
 - For expense/transfer: find the merchant/recipient (look for labels like "Penerima", "Merchant", "Nama Merchant", or the business name), the total amount charged (usually labeled "Total Transaksi", "Nominal Transaksi", "Jumlah Transfer", "Jumlah", "Nominal Transfer" — pick the TOTAL/charged amount, not sub-totals), date, and source account.
+- For self-transfer emails: determine BOTH sides from the email body. Set source_account to the sending account (e.g. "Mandiri" / "BSI/BYOND" / "Jago") and destination_account / recipient_bank to the receiving bank or account label (e.g. "Jago"). If the email includes a full account number, use it only to identify the bank label.
 - For Mandiri QRIS emails: the merchant name is listed under "Penerima" (e.g., "Penerima\nWarung Emak Keputih" → description = "Warung Emak Keputih"). The description MUST be the actual business/merchant name, NOT a generic label like "Seller", "QRIS Payment", or "Transaction".
 - For BYOND/BSI emails: the merchant name is listed under "Nama Merchant" (e.g., "Nama Merchant\nSAKINAH SUPERMARKET" → description = "SAKINAH SUPERMARKET").
 - For Jago debit card emails: these emails ONLY say "transaksi sebesar RpX using kartu debit Jago" with NO merchant info. When you see a Jago email with no merchant/recipient name, set description = "jago debit card transaction" (exact text). This is a special signal to the system to ask the user for merchant info later.
@@ -141,6 +143,9 @@ JSON response schema:
   "merchant": "raw merchant name from email (business name only, no location)",
   "recipient_name": "",
   "recipient_bank": "",
+  "source_account": "source account name for self-transfers (best match from the account list)",
+  "destination_account": "destination account / bank label for self-transfers (e.g. Jago, BSI/BYOND)",
+  "income_subcategory": "income subcategory for the destination-side transfer record (if available)",
   "skip_reason": ""
 }}
 """
@@ -499,9 +504,21 @@ class Agent:
                 ),
             },
         ]
-        tx = await self._call_json(
-            EmailTransaction, messages, model=self._config.query_model
+        tx = cast(
+            EmailTransaction,
+            await self._call_json(EmailTransaction, messages, model=self._config.query_model),
         )
+
+        # Normalize self-transfer hints so the watcher can reliably write both sides.
+        if tx.type == "self_transfer":
+            if not tx.source_account:
+                tx.source_account = tx.account
+            if not tx.destination_account:
+                tx.destination_account = tx.recipient_bank
+            if not tx.recipient_bank and tx.destination_account:
+                tx.recipient_bank = tx.destination_account
+            if not tx.income_subcategory:
+                tx.income_subcategory = tx.subcategory
 
         # Validate subcategory against cache — retry once if it doesn't match
         if tx.type == "expense" and tx.subcategory:
@@ -522,8 +539,9 @@ class Agent:
                     },
                 ]
                 try:
-                    tx = await self._call_json(
-                        EmailTransaction, retry_messages, model=self._config.query_model
+                    tx = cast(
+                        EmailTransaction,
+                        await self._call_json(EmailTransaction, retry_messages, model=self._config.query_model),
                     )
                 except Exception as e:
                     log.warning(f"[agent] Subcategory retry failed: {e} — keeping original")
