@@ -28,6 +28,7 @@ from keyboards import (
     make_edit_field_keyboard,
     make_undo_keyboard,
     make_email_edit_keyboard,
+    make_income_edit_field_keyboard,
 )
 from models import NotionCache, ExpenseEntry, IncomeEntry, EmailTransaction
 from notion import NotionClient, _url_to_id
@@ -69,6 +70,7 @@ async def main() -> None:
     last_saved_page: dict[int, str] = await db.get_all_user_undo()  # user_id → notion page_id (for undo), persisted
     email_saved_pages: dict[int, dict] = await db.get_all_email_saved_pages()  # persisted across restarts
     email_pending_edit: dict[int, str] = {}  # user_id → field being edited (post-save email edit)
+    income_pending_edit: dict[int, str] = {}  # user_id → field being edited (pre-save income edit)
     pending_since: dict[int, float] = await db.get_all_pending_since()  # user_id → timestamp when pending expense was created
     cat_suggestions_cache: dict[tuple[int, str], list[str]] = {}  # (user_id, description) → recommended categories
     saving_locks: dict[int, asyncio.Lock] = {}  # per-user lock to prevent confirm vs auto-confirm double-save
@@ -1017,6 +1019,48 @@ async def main() -> None:
             )
             return
 
+        # ── Pre-save income edit (desc/amount/date/subcategory text input) ──────
+        income_field = income_pending_edit.pop(user_id, None)
+        if income_field and text.lower().strip() in ("batal", "cancel", "/cancel"):
+            income = await db.get_pending_income(user_id)
+            if income:
+                await msg.answer(
+                    f"Oke! Konfirmasi:\n\n{format_income_entry(income, user_cache)}",
+                    parse_mode="Markdown",
+                    reply_markup=make_income_confirm_keyboard(user_id),
+                )
+            return
+        if income_field:
+            income = await db.get_pending_income(user_id)
+            if not income:
+                await msg.answer("Tidak ada pemasukan pending.")
+                return
+            if income_field == "desc":
+                income.description = text
+            elif income_field == "amount":
+                try:
+                    income.amount = _parse_idr_amount(text)
+                except ValueError:
+                    income_pending_edit[user_id] = "amount"
+                    await msg.answer("❌ Angka tidak valid. Ketik jumlah angka saja (contoh: 25000):")
+                    return
+            elif income_field == "date":
+                try:
+                    datetime.strptime(text, "%Y-%m-%d")
+                except ValueError:
+                    await msg.answer("❌ Format tanggal harus YYYY-MM-DD (contoh: 2026-06-10):")
+                    return
+                income.date = text
+            elif income_field == "subcategory":
+                income.subcategory = text
+            await db.set_pending_income(user_id, income)
+            await msg.answer(
+                f"✅ Diubah! Konfirmasi:\n\n{format_income_entry(income, user_cache)}",
+                parse_mode="Markdown",
+                reply_markup=make_income_confirm_keyboard(user_id),
+            )
+            return
+
         # ── Email post-save edit (desc/amount/date text input) ──────────────────
         email_field = email_pending_edit.pop(user_id, None)
         if email_field and text.lower().strip() in ("batal", "cancel", "/cancel"):
@@ -1696,6 +1740,90 @@ async def main() -> None:
         await callback.answer("Dibatalkan.")
         await callback.message.answer("Dibatalkan ❌")
 
+    # ── Pre-save income edit callbacks ──────────────────────────────────────────
+
+    @dp.callback_query(F.data.startswith("income_edit:"))
+    async def handle_income_edit(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        income = await db.get_pending_income(user_id)
+        if not income:
+            await callback.answer("Tidak ada pemasukan pending.")
+            return
+        await callback.message.edit_reply_markup(
+            reply_markup=make_income_edit_field_keyboard(user_id),
+        )
+        await callback.answer("Pilih field yang diedit")
+
+    @dp.callback_query(F.data.startswith("income_edit_desc:"))
+    async def handle_income_edit_desc(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        income_pending_edit[user_id] = "desc"
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Ketik deskripsi baru")
+        await callback.message.answer("✏️ Ketik deskripsi baru:")
+
+    @dp.callback_query(F.data.startswith("income_edit_amount:"))
+    async def handle_income_edit_amount(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        income_pending_edit[user_id] = "amount"
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Ketik jumlah baru")
+        await callback.message.answer("✏️ Ketik jumlah baru (contoh: 25000):")
+
+    @dp.callback_query(F.data.startswith("income_edit_date:"))
+    async def handle_income_edit_date(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        income_pending_edit[user_id] = "date"
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Ketik tanggal baru")
+        await callback.message.answer("✏️ Ketik tanggal baru (YYYY-MM-DD):")
+
+    @dp.callback_query(F.data.startswith("income_edit_cat:"))
+    async def handle_income_edit_cat(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        income_pending_edit[user_id] = "subcategory"
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Ketik kategori baru")
+        await callback.message.answer(
+            "✏️ Ketik kategori pemasukan baru (contoh: Gaji / Hadiah / Refund):"
+        )
+
+    @dp.callback_query(F.data.startswith("income_edit_cancel:"))
+    async def handle_income_edit_cancel(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        income = await db.get_pending_income(user_id)
+        if not income:
+            await callback.answer("Tidak ada pemasukan pending.")
+            return
+        await callback.message.edit_reply_markup(
+            reply_markup=make_income_confirm_keyboard(user_id),
+        )
+        await callback.answer("Edit dibatalkan")
+
     # ── Undo ─────────────────────────────────────────────────────────────────
 
     @dp.callback_query(F.data.startswith("undo:"))
@@ -2159,7 +2287,7 @@ async def main() -> None:
                                 await db.clear_pending_recurring(user_id)
                             await bot.send_message(
                                 user_id,
-                                "⚠️ *Duplikat terdeteksi!* Transaksi ini sudah tercatat sebelumnya.\\n"
+                                "⚠️ *Duplikat terdeteksi!* Transaksi ini sudah tercatat sebelumnya.\n"
                                 "Pending otomatis dihapus.",
                                 parse_mode="Markdown",
                             )
@@ -2179,7 +2307,7 @@ async def main() -> None:
                             await db.clear_pending_recurring(user_id)
                         await bot.send_message(
                             user_id,
-                            f"⏰ Waktu habis — otomatis tersimpan!\\n\\n{format_entry(entry, c)}",
+                            f"⏰ Waktu habis — otomatis tersimpan!\n\n{format_entry(entry, c)}",
                             parse_mode="Markdown",
                             reply_markup=make_undo_keyboard(user_id),
                         )
@@ -2211,7 +2339,7 @@ async def main() -> None:
             user = await db.get_user(telegram_id)
             return (client, cache, user.owner_name if user else "")
 
-        async def _on_email_saved(user_id: int, url: str, description: str, amount: float, date: str, subcategory: str) -> None:
+        async def _on_email_saved(user_id: int, url: str, description: str, amount: float, date: str, subcategory: str, merchant: str = "") -> None:
             page_id = _url_to_id(url)
             ts = datetime.now().timestamp()
             email_saved_pages[user_id] = {
@@ -2220,9 +2348,10 @@ async def main() -> None:
                 "amount": amount,
                 "date": date,
                 "subcat": subcategory,
+                "merchant": merchant,
                 "timestamp": ts,
             }
-            await db.set_email_saved_page(user_id, page_id, description, amount, date, subcategory, ts)
+            await db.set_email_saved_page(user_id, page_id, description, amount, date, subcategory, ts, merchant=merchant)
 
         email_watcher = EmailWatcher(
             config=config,

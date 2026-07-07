@@ -24,8 +24,19 @@ def make_edit_field_keyboard(user_id: int) -> InlineKeyboardMarkup:
 def make_income_confirm_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Simpan", callback_data=f"income_confirm:{user_id}"),
+        InlineKeyboardButton(text="✏️ Edit", callback_data=f"income_edit:{user_id}"),
         InlineKeyboardButton(text="❌ Batal", callback_data=f"income_cancel:{user_id}"),
     ]])
+
+
+def make_income_edit_field_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📝 Deskripsi", callback_data=f"income_edit_desc:{user_id}")],
+        [InlineKeyboardButton(text="💰 Jumlah", callback_data=f"income_edit_amount:{user_id}")],
+        [InlineKeyboardButton(text="📅 Tanggal", callback_data=f"income_edit_date:{user_id}")],
+        [InlineKeyboardButton(text="🏷 Kategori", callback_data=f"income_edit_cat:{user_id}")],
+        [InlineKeyboardButton(text="❌ Batal edit", callback_data=f"income_edit_cancel:{user_id}")],
+    ])
 
 
 def make_category_keyboard(page_id: str, cache: NotionCache) -> InlineKeyboardMarkup:

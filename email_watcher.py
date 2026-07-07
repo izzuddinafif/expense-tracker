@@ -673,12 +673,33 @@ class EmailWatcher:
                         except Exception as e:
                             log.warning(f"[email] Merchant similarity check failed [{uid}]: {e}")
 
+                    # Pre-check duplicate in Notion before auto-logging
+                    try:
+                        dup_matches = await target_notion.fetch_duplicates(target_owner, tx.amount, tx.date)
+                        if dup_matches:
+                            is_dup = await self._agent.check_duplicate(
+                                dup_matches, tx.description, tx.amount, tx.date, new_merchant=tx.merchant
+                            )
+                            if is_dup:
+                                log.info(f"[email] Duplicate expense skipped [{uid}]: {tx.description} Rp {tx.amount:,.0f}")
+                                await self._notify(
+                                    f"📧 *Transaksi duplikat, dilewati*\n"
+                                    f"📝 {tx.description}\n"
+                                    f"💰 Rp {tx.amount:,.0f}\n"
+                                    f"📅 {tx.date}\n\n"
+                                    f"Transaksi serupa sudah tercatat di Notion.",
+                                    user_id=target_id,
+                                )
+                                return
+                    except Exception as e:
+                        log.warning(f"[email] Duplicate pre-check failed [{uid}]: {e}")
+
                     url = await target_notion.log_expense(entry, target_owner, target_cache)
                     alert_task = asyncio.create_task(self._check_budget_alert(entry, notion=target_notion, cache=target_cache))
                     alert_task.add_done_callback(lambda t: t.exception() and log.warning(f"Budget alert task failed: {t.exception()}"))
                     if self._on_save_fn:
                         await self._on_save_fn(
-                            target_id, url, tx.description, tx.amount, tx.date, tx.subcategory,
+                            target_id, url, tx.description, tx.amount, tx.date, tx.subcategory, tx.merchant,
                         )
                     subcat_match = target_cache.closest_subcategory(tx.subcategory)
                     acc_match = target_cache.closest_account(tx.account)
@@ -743,7 +764,7 @@ class EmailWatcher:
                     raise
                 if out_url and self._on_save_fn:
                     await self._on_save_fn(
-                        target_id, out_url, transfer_out.description, transfer_out.amount, transfer_out.date, transfer_out.subcategory,
+                        target_id, out_url, transfer_out.description, transfer_out.amount, transfer_out.date, transfer_out.subcategory, transfer_out.merchant,
                     )
                     log.info(f"[email→Notion] Transfer-out Rp {tx.amount:,.0f} logged")
 
@@ -776,7 +797,7 @@ class EmailWatcher:
                     raise
                 if in_url and self._on_save_fn:
                     await self._on_save_fn(
-                        target_id, in_url, transfer_in.description, transfer_in.amount, transfer_in.date, transfer_in.subcategory,
+                        target_id, in_url, transfer_in.description, transfer_in.amount, transfer_in.date, transfer_in.subcategory, "",
                     )
                     log.info(f"[email→Notion] Transfer-in Rp {tx.amount:,.0f} logged")
 
