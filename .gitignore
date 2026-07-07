@@ -12,3 +12,6 @@ fix_notion.py
 fix_notion.sh
 bot.log
 .DS_Store
+
+# Scripts
+deploy.sh
