@@ -222,18 +222,32 @@ class EmailWatcher:
             since = (date.today() - timedelta(days=LOOKBACK_DAYS)).strftime("%d-%b-%Y")
 
             for sender in BANK_SENDERS:
+                log.info(f"IMAP: searching FROM {sender} SINCE {since}")
                 typ, data = imap.uid("search", None, f'FROM "{sender}" SINCE {since}')
                 if typ != "OK" or not data[0]:
                     continue
 
                 raw = data[0]
-                if isinstance(raw, int):
-                    raw = str(raw).encode()
+                if isinstance(raw, (bytes, bytearray)):
+                    uids = raw.split()
+                elif isinstance(raw, list):
+                    uids = raw
+                elif isinstance(raw, int):
+                    uids = [str(raw).encode()]
                 elif isinstance(raw, str):
-                    raw = raw.encode()
-                uids = raw.split()
+                    uids = raw.split()
+                else:
+                    uids = []
+                log.info(f"IMAP: found {len(uids)} UIDs for {sender}")
                 for uid_bytes in uids[-100:]:
-                    uid = uid_bytes.decode()
+                    if isinstance(uid_bytes, int):
+                        uid = str(uid_bytes)
+                        uid_bytes = uid.encode()
+                    elif isinstance(uid_bytes, bytes):
+                        uid = uid_bytes.decode()
+                    else:
+                        uid = str(uid_bytes)
+                        uid_bytes = uid.encode()
                     if uid in processed_uids:
                         continue
 
@@ -673,27 +687,6 @@ class EmailWatcher:
                         except Exception as e:
                             log.warning(f"[email] Merchant similarity check failed [{uid}]: {e}")
 
-                    # Pre-check duplicate in Notion before auto-logging
-                    try:
-                        dup_matches = await target_notion.fetch_duplicates(target_owner, tx.amount, tx.date)
-                        if dup_matches:
-                            is_dup = await self._agent.check_duplicate(
-                                dup_matches, tx.description, tx.amount, tx.date, new_merchant=tx.merchant
-                            )
-                            if is_dup:
-                                log.info(f"[email] Duplicate expense skipped [{uid}]: {tx.description} Rp {tx.amount:,.0f}")
-                                await self._notify(
-                                    f"📧 *Transaksi duplikat, dilewati*\n"
-                                    f"📝 {tx.description}\n"
-                                    f"💰 Rp {tx.amount:,.0f}\n"
-                                    f"📅 {tx.date}\n\n"
-                                    f"Transaksi serupa sudah tercatat di Notion.",
-                                    user_id=target_id,
-                                )
-                                return
-                    except Exception as e:
-                        log.warning(f"[email] Duplicate pre-check failed [{uid}]: {e}")
-
                     url = await target_notion.log_expense(entry, target_owner, target_cache)
                     alert_task = asyncio.create_task(self._check_budget_alert(entry, notion=target_notion, cache=target_cache))
                     alert_task.add_done_callback(lambda t: t.exception() and log.warning(f"Budget alert task failed: {t.exception()}"))
@@ -880,20 +873,29 @@ class EmailWatcher:
 
         while True:
             try:
+                log.info("Email watcher: cycle start")
                 pruned = await self._db.prune_processed()
                 if pruned:
                     log.info(f"Pruned {pruned} processed email(s) older than 90 days")
 
+                log.info("Email watcher: fetching processed UIDs")
                 processed = await self._db.get_all_processed_uids()
+                log.info(f"Email watcher: {len(processed)} processed UIDs")
                 self._last_imap_error = None
                 try:
+                    log.info("Email watcher: starting IMAP fetch...")
                     emails = await asyncio.wait_for(
                         asyncio.to_thread(self._imap_fetch, processed),
                         timeout=60,
                     )
+                    log.info(f"Email watcher: IMAP fetch returned {len(emails)} email(s)")
                 except asyncio.TimeoutError:
                     log.error("IMAP fetch timed out after 60s")
                     self._last_imap_error = "timeout"
+                    emails = []
+                except Exception as e:
+                    log.error(f"Email watcher: IMAP fetch exception: {type(e).__name__}: {e}")
+                    self._last_imap_error = str(e)
                     emails = []
 
                 if self._last_imap_error:

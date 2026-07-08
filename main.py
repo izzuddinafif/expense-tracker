@@ -38,6 +38,7 @@ from email_watcher import EmailWatcher
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("__main__").setLevel(logging.DEBUG)
+logging.getLogger("notion").setLevel(logging.DEBUG)
 
 _log_path = Path(os.getenv("BOT_LOG_PATH", "data/bot.log"))
 _log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1106,7 +1107,7 @@ async def main() -> None:
                             await user_notion.update_expense_subcategory(page_id, new_subcat, user_cache)
                             email_saved_pages[user_id]["subcat"] = new_subcat
                 s = email_saved_pages[user_id]
-                await db.set_email_saved_page(user_id, s["page_id"], s["description"], s["amount"], s["date"], s["subcat"], s["timestamp"])
+                await db.set_email_saved_page(user_id, s["page_id"], s["description"], s["amount"], s["date"], s["subcat"], s["timestamp"], merchant=s.get("merchant", ""))
                 await msg.answer(f"✅ Tersimpan!")
 
             except Exception as e:
@@ -2109,7 +2110,7 @@ async def main() -> None:
             await user_notion.update_expense_subcategory(saved["page_id"], subcat_name, user_cache)
             email_saved_pages[user_id]["subcat"] = subcat_name
             s = email_saved_pages[user_id]
-            await db.set_email_saved_page(user_id, s["page_id"], s["description"], s["amount"], s["date"], s["subcat"], s["timestamp"])
+            await db.set_email_saved_page(user_id, s["page_id"], s["description"], s["amount"], s["date"], s["subcat"], s["timestamp"], merchant=s.get("merchant", ""))
             await callback.message.edit_reply_markup(reply_markup=None)
             await callback.answer("✅ Kategori diubah!")
             await callback.message.answer(

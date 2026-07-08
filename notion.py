@@ -33,7 +33,6 @@ class NotionClient:
         self._headers = {
             "Authorization": f"Bearer {notion_token}",
             "Notion-Version": NOTION_VERSION,
-            "Content-Type": "application/json",
         }
         self._db_ids = db_ids
         self._http = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
@@ -267,7 +266,12 @@ class NotionClient:
             return None
         match = cache.month_url(month_name)
         if match:
+            log.debug("_ensure_month: cache hit for '%s' → %s", month_name, match)
             return match[1]
+        log.info(
+            "_ensure_month: cache miss for '%s', available months: %s",
+            month_name, list(cache.months.keys())[:5],
+        )
         # Lock to prevent TOCTOU race — check again after acquiring
         lock = _month_locks.setdefault(month_name, asyncio.Lock())
         async with lock:
@@ -419,11 +423,20 @@ class NotionClient:
     ) -> str:
         """Create a new income entry in Notion. Returns the page URL."""
         year_str, month_str = _parse_date(entry.date)
+        log.info(
+            "log_income: date=%s → year=%s, month=%s",
+            entry.date, year_str, month_str,
+        )
 
         subcategory_match = cache.closest_income_subcategory(entry.subcategory)
         account_match = cache.closest_account(entry.account)
         month_url = await self._ensure_month(month_str, cache)
         year_url = await self._ensure_year(year_str, cache)
+
+        log.info(
+            "log_income: month_url=%s, year_url=%s",
+            month_url, year_url,
+        )
 
         properties: dict = {
             "Description": {
@@ -455,19 +468,45 @@ class NotionClient:
                 "relation": [{"id": _url_to_id(year_url)}]
             }
 
+        # WORKAROUND: Notion database automation overwrites Month during page creation.
+        # Create without Month/Year relations, then PATCH them in separately.
+        month_relation = properties.pop("Month", None)
+        year_relation = properties.pop("Year", None)
+
         payload = {
             "parent": {"database_id": self._db_ids["income_ds"]},
             "properties": properties,
         }
+        log.info("log_income: creating income page without Month/Year relations")
 
         data = await self._notion_post(
             "https://api.notion.com/v1/pages", json=payload,
         )
-        log.info(
-            "Notion WRITE income: [%s] %s Rp %.0f → %s",
-            owner, entry.description, entry.amount, data["url"],
-        )
-        return data["url"]
+        page_url = data["url"]
+        log.info("Notion WRITE income: [%s] %s Rp %.0f → %s", owner, entry.description, entry.amount, page_url)
+
+        # PATCH Month and Year relations after creation to avoid automation overwrite
+        patch_props = {}
+        if month_relation:
+            patch_props["Month"] = month_relation
+        if year_relation:
+            patch_props["Year"] = year_relation
+        if patch_props:
+            patch_url = f"https://api.notion.com/v1/pages/{data['id']}"
+            log.info("log_income: PATCH url=%s props=%s", patch_url, patch_props)
+            # Use a fresh httpx client to avoid connection pool state issues
+            import httpx as _fresh_httpx
+            async with _fresh_httpx.AsyncClient(timeout=30.0) as _fresh:
+                _fresh_headers = {
+                    "Authorization": self._headers["Authorization"],
+                    "Notion-Version": self._headers["Notion-Version"],
+                }
+                _r = await _fresh.patch(patch_url, headers=_fresh_headers, json={"properties": patch_props})
+                _r.raise_for_status()
+                patch_resp = _r.json()
+            log.info("log_income: PATCH response Month=%s", patch_resp.get("properties", {}).get("Month", {}).get("relation", []))
+
+        return page_url
 
     async def _notion_patch(self, url: str, json: dict) -> dict:
         """PATCH a Notion page with retry logic (same as _notion_post)."""
@@ -586,9 +625,9 @@ class NotionClient:
     async def fetch_duplicates(
         self, owner: str, amount: float, date: str, db_key: str = "expenses_ds"
     ) -> list[str]:
-        """Find existing entries with similar amount + same date + owner.
-        Uses a range (±1 IDR) to avoid float precision issues.
-        db_key: \"expenses_ds\" (default) or \"income_ds\" for income entries."""
+        """Find existing entries with similar amount (±1 IDR) + date (±1 day) + owner.
+        Uses a range to avoid float precision issues.
+        db_key: "expenses_ds" (default) or "income_ds" for income entries."""
         amount_prop, date_prop = {
             "expenses_ds": ("Amount", "Date of Expense"),
             "income_ds": ("Amount", "Date of Income"),
