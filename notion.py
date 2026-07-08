@@ -423,20 +423,11 @@ class NotionClient:
     ) -> str:
         """Create a new income entry in Notion. Returns the page URL."""
         year_str, month_str = _parse_date(entry.date)
-        log.info(
-            "log_income: date=%s → year=%s, month=%s",
-            entry.date, year_str, month_str,
-        )
 
         subcategory_match = cache.closest_income_subcategory(entry.subcategory)
         account_match = cache.closest_account(entry.account)
         month_url = await self._ensure_month(month_str, cache)
         year_url = await self._ensure_year(year_str, cache)
-
-        log.info(
-            "log_income: month_url=%s, year_url=%s",
-            month_url, year_url,
-        )
 
         properties: dict = {
             "Description": {
@@ -477,8 +468,6 @@ class NotionClient:
             "parent": {"database_id": self._db_ids["income_ds"]},
             "properties": properties,
         }
-        log.info("log_income: creating income page without Month/Year relations")
-
         data = await self._notion_post(
             "https://api.notion.com/v1/pages", json=payload,
         )
@@ -493,18 +482,7 @@ class NotionClient:
             patch_props["Year"] = year_relation
         if patch_props:
             patch_url = f"https://api.notion.com/v1/pages/{data['id']}"
-            log.info("log_income: PATCH url=%s props=%s", patch_url, patch_props)
-            # Use a fresh httpx client to avoid connection pool state issues
-            import httpx as _fresh_httpx
-            async with _fresh_httpx.AsyncClient(timeout=30.0) as _fresh:
-                _fresh_headers = {
-                    "Authorization": self._headers["Authorization"],
-                    "Notion-Version": self._headers["Notion-Version"],
-                }
-                _r = await _fresh.patch(patch_url, headers=_fresh_headers, json={"properties": patch_props})
-                _r.raise_for_status()
-                patch_resp = _r.json()
-            log.info("log_income: PATCH response Month=%s", patch_resp.get("properties", {}).get("Month", {}).get("relation", []))
+            await self._notion_patch(patch_url, {"properties": patch_props})
 
         return page_url
 

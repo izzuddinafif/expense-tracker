@@ -38,7 +38,6 @@ from email_watcher import EmailWatcher
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("__main__").setLevel(logging.DEBUG)
-logging.getLogger("notion").setLevel(logging.DEBUG)
 
 _log_path = Path(os.getenv("BOT_LOG_PATH", "data/bot.log"))
 _log_path.parent.mkdir(parents=True, exist_ok=True)
