@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import httpx
 from models import NotionCache, ExpenseEntry, IncomeEntry, UserRecord
 
@@ -916,7 +917,6 @@ def _url_to_id(url: str) -> str:
 
 def _extract_merchant_from_description(description: str) -> str:
     """Extract merchant name from a description like '[Afif] SAKINAH SUPERMARKET' or '[Afif] Warung Emak Keputih'."""
-    import re
     # Remove owner prefix [Name]
     desc = re.sub(r"^\[[^\]]+\]\s*", "", description).strip()
     # If it contains ' — ' or ' - ', the part before the first dash is likely the merchant

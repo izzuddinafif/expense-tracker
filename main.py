@@ -30,7 +30,7 @@ from keyboards import (
     make_email_edit_keyboard,
     make_income_edit_field_keyboard,
 )
-from models import NotionCache, ExpenseEntry, IncomeEntry, EmailTransaction
+from models import NotionCache, ExpenseEntry, IncomeEntry
 from notion import NotionClient, _url_to_id
 from agent import Agent
 from email_watcher import EmailWatcher
@@ -1204,15 +1204,19 @@ async def main() -> None:
 
         elif intent.type == "log_text":
             today = date.today().isoformat()
-            recent = await user_notion.fetch_recent_expenses(owner, user_cache, 10)
-            # Search past transactions with same merchant for context
-            past = None
-            try:
-                kw = _search_keyword(text)
-                if kw:
-                    past = await user_notion.search_expenses(owner, kw, user_cache)
-            except Exception as e:
-                log.warning(f"Past expense search failed: {e}")
+            # Fetch recent expenses and search past transactions in parallel
+            kw = _search_keyword(text)
+            recent, past = await asyncio.gather(
+                user_notion.fetch_recent_expenses(owner, user_cache, 10),
+                user_notion.search_expenses(owner, kw, user_cache) if kw else asyncio.sleep(0, result=None),
+                return_exceptions=True,
+            )
+            if isinstance(recent, Exception):
+                log.warning(f"fetch_recent_expenses failed: {recent}")
+                recent = []
+            if isinstance(past, Exception):
+                log.warning(f"Past expense search failed: {past}")
+                past = None
             try:
                 entry = await agent.extract_from_text(text, user_cache, today, recent_expenses=recent, past_similar=past)
             except Exception as e:
