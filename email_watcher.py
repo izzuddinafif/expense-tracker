@@ -177,6 +177,7 @@ class EmailWatcher:
         self._alert_fn = alert_fn
         self._imap: imaplib.IMAP4_SSL | None = None
         self._last_imap_error: str | None = None
+        self._imap_fail_streak: int = 0
         self._notion_fail_streak: int = 0
         self._last_poll_time: float | None = None
         self._total_processed: int = 0
@@ -185,21 +186,32 @@ class EmailWatcher:
     # ── IMAP (synchronous — called via asyncio.to_thread) ──────────────────────
 
     def _ensure_imap(self) -> imaplib.IMAP4_SSL:
-        if self._imap is None:
-            imap = imaplib.IMAP4_SSL(IMAP_HOST)
-            imap.login(self._config.gmail_address, self._config.gmail_app_password)
-            imap.select("INBOX")
-            self._imap = imap
-        else:
+        """Ensure IMAP connection is alive. Reconnect with backoff on failure."""
+        if self._imap is not None:
             try:
                 self._imap.noop()
+                return self._imap
             except Exception:
                 self._close_imap()
+
+        last_err = None
+        for attempt in range(3):
+            try:
                 imap = imaplib.IMAP4_SSL(IMAP_HOST)
                 imap.login(self._config.gmail_address, self._config.gmail_app_password)
                 imap.select("INBOX")
                 self._imap = imap
-        return self._imap
+                if attempt > 0:
+                    log.info(f"IMAP reconnected after {attempt + 1} attempts")
+                return imap
+            except Exception as e:
+                last_err = e
+                log.warning(f"IMAP connect attempt {attempt + 1} failed: {e}")
+                self._close_imap()
+                import time as _t
+                _t.sleep(2 ** attempt)  # 1s, 2s, 4s
+
+        raise last_err
 
     def _close_imap(self) -> None:
         if self._imap is not None:
@@ -213,61 +225,66 @@ class EmailWatcher:
         """
         Connect to Gmail IMAP and fetch unprocessed emails from bank senders.
         Returns list of (uid, sender_email, subject, body_text).
+        Retries once on connection failure.
         """
+        for attempt in range(2):
+            try:
+                return self._imap_fetch_once(processed_uids)
+            except Exception as e:
+                log.warning(f"IMAP fetch attempt {attempt + 1} failed: {e}")
+                self._close_imap()
+                if attempt == 0:
+                    import time as _t
+                    _t.sleep(2)
+        return []
+
+    def _imap_fetch_once(self, processed_uids: set[str]) -> list[tuple[str, str, str, str]]:
         results = []
-        try:
-            imap = self._ensure_imap()
+        imap = self._ensure_imap()
 
-            # Only fetch emails from the last LOOKBACK_DAYS days
-            since = (date.today() - timedelta(days=LOOKBACK_DAYS)).strftime("%d-%b-%Y")
+        # Only fetch emails from the last LOOKBACK_DAYS days
+        since = (date.today() - timedelta(days=LOOKBACK_DAYS)).strftime("%d-%b-%Y")
 
-            for sender in BANK_SENDERS:
-                log.info(f"IMAP: searching FROM {sender} SINCE {since}")
-                typ, data = imap.uid("search", None, f'FROM "{sender}" SINCE {since}')
-                if typ != "OK" or not data[0]:
+        for sender in BANK_SENDERS:
+            log.info(f"IMAP: searching FROM {sender} SINCE {since}")
+            typ, data = imap.uid("search", None, f'FROM "{sender}" SINCE {since}')
+            if typ != "OK" or not data[0]:
+                continue
+
+            raw = data[0]
+            if isinstance(raw, (bytes, bytearray)):
+                uids = raw.split()
+            elif isinstance(raw, list):
+                uids = raw
+            elif isinstance(raw, int):
+                uids = [str(raw).encode()]
+            elif isinstance(raw, str):
+                uids = raw.split()
+            else:
+                uids = []
+            log.info(f"IMAP: found {len(uids)} UIDs for {sender}")
+            for uid_bytes in uids[-100:]:
+                if isinstance(uid_bytes, int):
+                    uid = str(uid_bytes)
+                    uid_bytes = uid.encode()
+                elif isinstance(uid_bytes, bytes):
+                    uid = uid_bytes.decode()
+                else:
+                    uid = str(uid_bytes)
+                    uid_bytes = uid.encode()
+                if uid in processed_uids:
                     continue
 
-                raw = data[0]
-                if isinstance(raw, (bytes, bytearray)):
-                    uids = raw.split()
-                elif isinstance(raw, list):
-                    uids = raw
-                elif isinstance(raw, int):
-                    uids = [str(raw).encode()]
-                elif isinstance(raw, str):
-                    uids = raw.split()
-                else:
-                    uids = []
-                log.info(f"IMAP: found {len(uids)} UIDs for {sender}")
-                for uid_bytes in uids[-100:]:
-                    if isinstance(uid_bytes, int):
-                        uid = str(uid_bytes)
-                        uid_bytes = uid.encode()
-                    elif isinstance(uid_bytes, bytes):
-                        uid = uid_bytes.decode()
-                    else:
-                        uid = str(uid_bytes)
-                        uid_bytes = uid.encode()
-                    if uid in processed_uids:
-                        continue
+                typ2, msg_data = imap.uid("fetch", uid_bytes, "(RFC822)")
+                if typ2 != "OK" or not msg_data or msg_data[0] is None:
+                    continue
 
-                    typ2, msg_data = imap.uid("fetch", uid_bytes, "(RFC822)")
-                    if typ2 != "OK" or not msg_data or msg_data[0] is None:
-                        continue
+                raw = msg_data[0][1]
+                msg = email.message_from_bytes(raw)
+                subject = self._decode_header(msg.get("Subject", ""))
+                body = self._extract_body(msg)
+                results.append((uid, sender, subject, body))
 
-                    raw = msg_data[0][1]
-                    msg = email.message_from_bytes(raw)
-                    subject = self._decode_header(msg.get("Subject", ""))
-                    body = self._extract_body(msg)
-                    results.append((uid, sender, subject, body))
-
-        except imaplib.IMAP4.error as e:
-            log.error(f"IMAP auth/connection error: {e}")
-            self._last_imap_error = str(e)
-            self._close_imap()
-        except Exception as e:
-            log.error(f"IMAP fetch error: {e}")
-            self._close_imap()
         return results
 
     def _decode_header(self, raw: str) -> str:
@@ -899,11 +916,15 @@ class EmailWatcher:
                     emails = []
 
                 if self._last_imap_error:
-                    await self._alert(
-                        f"⚠️ *Email watcher: login IMAP gagal*\n"
-                        f"`{self._last_imap_error}`\n"
-                        "Cek Gmail App Password di file `.env`."
-                    )
+                    self._imap_fail_streak += 1
+                    if self._imap_fail_streak == 1 or self._imap_fail_streak % 5 == 0:
+                        await self._alert(
+                            f"⚠️ *Email watcher: IMAP error*\n"
+                            f"Fail #{self._imap_fail_streak}: `{self._last_imap_error}`\n"
+                            "Cek Gmail App Password di `.env` jika berlanjut."
+                        )
+                else:
+                    self._imap_fail_streak = 0
 
                 if emails:
                     log.info(f"Found {len(emails)} new bank email(s) to process")
