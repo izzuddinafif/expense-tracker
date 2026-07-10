@@ -142,7 +142,7 @@ class EmailWatcher:
     email_owner_id    : default Telegram user_id (fallback when no account match)
     email_owner_name  : default owner name string (fallback)
         user_data_fn      : optional async fn(telegram_id) -> (NotionClient, NotionCache, owner_name) | None
-        on_save_fn        : optional async fn(user_id, page_id, description, amount, date, subcategory)
+        on_save_fn        : optional async fn(user_id, page_url, description, amount, date, subcategory, merchant="")
                             called after every auto-logged expense/admin-fee with page details
         pending_since     : optional dict[int, float] for tracking when pending expenses are created
         alert_fn          : async fn(text) that broadcasts to all users
@@ -561,6 +561,10 @@ class EmailWatcher:
             target_notion = self._notion
             target_cache = cache
 
+        if target_id is None:
+            log.warning("[email] No target Telegram user for [%s] account=%r — retrying next cycle", uid, tx.account)
+            return
+
         try:
             if tx.type == "expense":
                 if tx.description.lower() == JAGO_DEBIT_DESCRIPTION:
@@ -603,7 +607,9 @@ class EmailWatcher:
                         # and pending_recurring (to mark email processed on confirm)
                         await self._db.set_pending_expense(target_id, entry)
                         if self._pending_since is not None:
-                            self._pending_since[target_id] = time.time()
+                            ts = time.time()
+                            self._pending_since[target_id] = ts
+                            await self._db.set_pending_since(target_id, ts)
                         await self._db.set_pending_recurring(
                             target_id, entry, recurring["page_url"], uid, sender,
                         )

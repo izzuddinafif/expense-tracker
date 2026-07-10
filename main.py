@@ -1316,6 +1316,7 @@ async def main() -> None:
             if matches:
                 is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date, new_merchant=entry.merchant)
                 if is_dup:
+                    pending_since.pop(user_id, None)
                     await db.clear_pending_expense(user_id)
                     await db.clear_pending_since(user_id)
                     await callback.answer("Duplikat — sudah tercatat.")
@@ -1342,6 +1343,7 @@ async def main() -> None:
                 await db.mark_processed(pending_rec["uid"], pending_rec["sender"])
 
             await db.clear_pending_expense(user_id)
+            pending_since.pop(user_id, None)
             await db.clear_pending_since(user_id)
             if pending_rec:
                 await db.clear_pending_recurring(user_id)
@@ -1656,6 +1658,7 @@ async def main() -> None:
             await db.mark_processed(pending_rec["uid"], pending_rec["sender"])
 
         await db.clear_pending_expense(user_id)
+        pending_since.pop(user_id, None)
         await db.clear_pending_since(user_id)
         await db.clear_pending_email_expense(user_id)
         await db.clear_debit_queue(user_id)
@@ -2268,8 +2271,6 @@ async def main() -> None:
                     entry = await db.get_pending_expense(user_id)
                     if not entry:
                         continue
-                    pending_since.pop(user_id, None)
-                    await db.clear_pending_since(user_id)
                     result = await get_user_notion(user_id)
                     if not result:
                         continue
@@ -2286,6 +2287,8 @@ async def main() -> None:
                         if matches:
                             is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date, new_merchant=entry.merchant)
                         if is_dup:
+                            pending_since.pop(user_id, None)
+                            await db.clear_pending_since(user_id)
                             await db.clear_pending_expense(user_id)
                             if pending_rec:
                                 await db.clear_pending_recurring(user_id)
@@ -2307,6 +2310,8 @@ async def main() -> None:
                             entry.account, entry.amount, entry.date,
                         )
                         await db.clear_pending_expense(user_id)
+                        pending_since.pop(user_id, None)
+                        await db.clear_pending_since(user_id)
                         if pending_rec:
                             await db.clear_pending_recurring(user_id)
                         await bot.send_message(
