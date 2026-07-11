@@ -1925,34 +1925,16 @@ async def main() -> None:
             await callback.answer("Tidak punya akses.")
             return
 
-        page_id = last_saved_page.pop(user_id, None)
-        if not page_id:
-            record = await db.get_user_undo(user_id)
-            if record:
-                page_id = record["page_id"]
-            else:
-                await callback.answer("Tidak ada yang bisa di-undo.")
-                return
-        await db.clear_user_undo(user_id)
-
-        result = await get_user_notion(user_id)
-        if not result:
-            await callback.answer("Ketik /setup untuk menghubungkan Notion.")
-            return
-        user_notion, _ = result
-
-        try:
-            await user_notion.archive_page(page_id)
-            await callback.message.edit_reply_markup(reply_markup=None)
+        ok, text = await _undo_last_saved(user_id)
+        if ok:
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
             await callback.answer("Dibatalkan!")
-            await callback.message.answer("✅ Dibatalkan — entri telah dihapus dari Notion.")
-        except Exception as e:
-            log.error(f"Undo failed for user {user_id}: {e}")
-            await callback.answer("❌ Gagal undo.")
-            await callback.message.answer(
-                f"❌ Gagal membatalkan.\n`{type(e).__name__}: {str(e)[:80]}`",
-                parse_mode="Markdown",
-            )
+        else:
+            await callback.answer("❌ Gagal undo." if text.startswith("❌") else text[:60])
+        await callback.message.answer(text, parse_mode="Markdown")
 
     # ── Email auto-log edit (post-save) ──────────────────────────────────────
 
