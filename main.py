@@ -4,11 +4,14 @@ import io
 import math
 import logging
 import os
+import socket
 from logging.handlers import RotatingFileHandler
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message,
@@ -48,9 +51,48 @@ logging.getLogger().addHandler(_file_handler)
 log = logging.getLogger(__name__)
 
 
+class ResilientBot(Bot):
+    """Bot wrapper that retries transient Telegram network resets.
+
+    aiogram surfaces send/connect resets as TelegramNetworkError. Without a
+    retry, a single reset makes the current handler fail even though polling
+    keeps running. Retrying the API method is safe for our send/edit/delete
+    calls and prevents dropped replies during brief Telegram/network hiccups.
+    """
+
+    async def __call__(self, method, request_timeout=None):
+        delays = (0, 2, 5, 10, 20)
+        last_error = None
+        for attempt, delay in enumerate(delays, start=1):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                return await super().__call__(method, request_timeout=request_timeout)
+            except TelegramNetworkError as e:
+                last_error = e
+                try:
+                    await self.session.close()
+                except Exception:
+                    log.debug("Failed to reset Telegram aiohttp session", exc_info=True)
+                if attempt == len(delays):
+                    break
+                log.warning(
+                    "Telegram API network error on %s (attempt %s/%s), resetting session and retrying: %s",
+                    type(method).__name__, attempt, len(delays), e,
+                )
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Telegram API call failed without an exception")
+
+
 async def main() -> None:
     config = load_config()
-    bot = Bot(token=config.telegram_token)
+    telegram_session = AiohttpSession(limit=20)
+    telegram_session._connector_init.update({
+        "family": socket.AF_INET,
+        "enable_cleanup_closed": True,
+    })
+    bot = ResilientBot(token=config.telegram_token, session=telegram_session)
     dp = Dispatcher()
 
     db = await Database.connect(config.db_path)

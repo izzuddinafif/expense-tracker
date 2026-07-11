@@ -653,20 +653,39 @@ class EmailWatcher:
                         confidence=0.95,
                         merchant=tx.merchant,
                     )
-                    # Duplicate check — skip if user has a pending expense with same amount+date
+                    # Duplicate check — only skip if the pending manual entry is clearly the same
+                    # transaction. Amount+date alone is not enough: unrelated manual/query mistakes can
+                    # collide and must not cause a real bank email to be skipped.
                     pending = await self._db.get_pending_expense(target_id)
                     if pending and pending.amount == tx.amount and pending.date == tx.date:
-                        log.info(f"[email] Pending expense matches [{uid}]: {tx.description} Rp {tx.amount:,.0f} — skipping")
-                        await self._notify(
-                            f"📧 *Email — sudah pending*\n"
-                            f"📝 {tx.description}\n"
-                            f"💰 Rp {tx.amount:,.0f}\n"
-                            f"📅 {tx.date}\n\n"
-                            f"Transaksi ini sudah tercatat manual dan menunggu konfirmasi.",
-                            user_id=target_id,
+                        pending_desc = (pending.description or "").strip().lower()
+                        tx_desc = (tx.description or "").strip().lower()
+                        pending_merchant = (pending.merchant or "").strip().lower()
+                        tx_merchant = (tx.merchant or "").strip().lower()
+                        same_pending_tx = bool(
+                            (pending_merchant and tx_merchant and pending_merchant == tx_merchant)
+                            or (pending_desc and tx_desc and (pending_desc in tx_desc or tx_desc in pending_desc))
                         )
-                        await self._db.mark_processed(uid, sender)
-                        return
+                        if same_pending_tx:
+                            log.info(
+                                f"[email] Pending expense clearly matches [{uid}]: "
+                                f"{tx.description} Rp {tx.amount:,.0f} — skipping email duplicate"
+                            )
+                            await self._notify(
+                                f"📧 *Email — sudah pending*\n"
+                                f"📝 {tx.description}\n"
+                                f"💰 Rp {tx.amount:,.0f}\n"
+                                f"📅 {tx.date}\n\n"
+                                f"Transaksi ini sudah tercatat manual dan menunggu konfirmasi.",
+                                user_id=target_id,
+                            )
+                            await self._db.mark_processed(uid, sender)
+                            return
+                        log.warning(
+                            f"[email] Pending amount/date collision ignored [{uid}]: "
+                            f"pending={pending.description!r}, email={tx.description!r}, "
+                            f"amount=Rp {tx.amount:,.0f}, date={tx.date}"
+                        )
                     try:
                         matches = await target_notion.fetch_duplicates(target_owner, tx.amount, tx.date)
                         if matches:
