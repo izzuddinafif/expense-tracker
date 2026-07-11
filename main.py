@@ -233,6 +233,41 @@ async def main() -> None:
         user_caches[user_id] = cache_entry
         return client, cache_entry
 
+    async def _undo_last_saved(user_id: int) -> tuple[bool, str]:
+        """Archive the user's latest saved Notion page and clear undo state."""
+        undo = await db.get_user_undo(user_id)
+        if not undo:
+            return False, "Tidak ada transaksi terakhir yang bisa di-undo."
+
+        result = await get_user_notion(user_id)
+        if not result:
+            return False, "Ketik /setup untuk menghubungkan Notion workspace kamu."
+        user_notion, _ = result
+
+        page_id = undo["page_id"]
+        desc = undo.get("description") or "transaksi terakhir"
+        amount = undo.get("amount") or 0
+        tx_date = undo.get("date") or ""
+        try:
+            await user_notion.archive_page(page_id)
+        except Exception as e:
+            log.error("Undo archive failed for user %s page %s: %s", user_id, page_id, e)
+            return False, f"❌ Gagal undo di Notion.\n`{type(e).__name__}: {str(e)[:80]}`"
+
+        await db.clear_user_undo(user_id)
+        last_saved_page.pop(user_id, None)
+        saved = email_saved_pages.get(user_id)
+        if saved and saved.get("page_id") == page_id:
+            email_saved_pages.pop(user_id, None)
+            await db.clear_email_saved_page(user_id)
+
+        lines = ["↩️ *Undo berhasil.*", f"Transaksi diarsipkan dari Notion: *{desc}*"]
+        if amount:
+            lines.append(f"💰 Rp {amount:,.0f}")
+        if tx_date:
+            lines.append(f"📅 {tx_date}")
+        return True, "\n".join(lines)
+
     # ── Setup state machine ───────────────────────────────────────────────────
 
     async def run_setup(msg: Message) -> None:
@@ -464,6 +499,7 @@ async def main() -> None:
             "/search <kata kunci> — cari pengeluaran\n"
             "/stats — ringkasan pengeluaran bulan ini\n"
             "/export — ekspor pengeluaran ke CSV (thismonth / YYYY-MM / all)\n"
+            "/undo — batalkan transaksi terakhir yang tersimpan\n"
             "/recurring — lihat daftar pembayaran rutin aktif\n"
             "/refresh — muat ulang data kategori dari Notion\n"
             "/status — status email watcher dan bot\n"
@@ -476,6 +512,12 @@ async def main() -> None:
     @dp.message(Command("setup"))
     async def handle_setup(msg: Message) -> None:
         await run_setup(msg)
+
+    @dp.message(Command("undo"))
+    async def handle_undo_command(msg: Message) -> None:
+        user_id = msg.from_user.id
+        ok, text = await _undo_last_saved(user_id)
+        await msg.answer(text, parse_mode="Markdown")
 
     @dp.message(Command("networth"))
     async def handle_networth(msg: Message) -> None:
@@ -2286,6 +2328,21 @@ async def main() -> None:
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("Dibatalkan")
 
+    @dp.callback_query(F.data.startswith("undo:"))
+    async def handle_undo_callback(callback: CallbackQuery) -> None:
+        log.debug(f"Callback received: {callback.data}")
+        user_id = _parse_cb(callback.data, 1)
+        if user_id is None or callback.from_user.id != user_id:
+            await callback.answer("Tidak punya akses.")
+            return
+        await callback.answer("Meng-undo...")
+        ok, text = await _undo_last_saved(user_id)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            log.debug("Failed to remove undo keyboard", exc_info=True)
+        await callback.message.answer(text, parse_mode="Markdown")
+
     @dp.callback_query()
     async def handle_unknown_callback(callback: CallbackQuery) -> None:
         log.warning(f"Unmatched callback: {callback.data!r}")
@@ -2403,6 +2460,8 @@ async def main() -> None:
                 "timestamp": ts,
             }
             await db.set_email_saved_page(user_id, page_id, description, amount, date, subcategory, ts, merchant=merchant)
+            last_saved_page[user_id] = page_id
+            await db.set_user_undo(user_id, page_id, description, amount, date, subcategory, merchant=merchant)
 
         email_watcher = EmailWatcher(
             config=config,
