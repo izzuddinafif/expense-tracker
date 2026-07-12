@@ -2310,20 +2310,6 @@ async def main() -> None:
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("Dibatalkan")
 
-    @dp.callback_query(F.data.startswith("undo:"))
-    async def handle_undo_callback(callback: CallbackQuery) -> None:
-        log.debug(f"Callback received: {callback.data}")
-        user_id = _parse_cb(callback.data, 1)
-        if user_id is None or callback.from_user.id != user_id:
-            await callback.answer("Tidak punya akses.")
-            return
-        await callback.answer("Meng-undo...")
-        ok, text = await _undo_last_saved(user_id)
-        try:
-            await callback.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            log.debug("Failed to remove undo keyboard", exc_info=True)
-        await callback.message.answer(text, parse_mode="Markdown")
 
     @dp.callback_query()
     async def handle_unknown_callback(callback: CallbackQuery) -> None:
