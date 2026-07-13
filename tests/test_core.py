@@ -363,6 +363,8 @@ async def test_conversation_history_limit(db):
         await db.append_history(12345, "user", f"msg {i}")
     history = await db.get_history(12345, limit=20)
     assert len(history) == 20
+    assert history[0]["content"] == "msg 5"
+    assert history[-1]["content"] == "msg 24"
 
 
 @pytest.mark.asyncio

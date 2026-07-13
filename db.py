@@ -504,8 +504,10 @@ class Database:
 
     async def get_history(self, user_id: int, limit: int = 20) -> list[dict[str, Any]]:
         cur = await self._conn.execute(
-            "SELECT role, content FROM conversation_history "
-            "WHERE user_id = ? ORDER BY created_at ASC, id ASC LIMIT ?",
+            "SELECT role, content FROM ("
+            "SELECT role, content, created_at, id FROM conversation_history "
+            "WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ?"
+            ") ORDER BY created_at ASC, id ASC",
             (user_id, limit),
         )
         rows = await cur.fetchall()

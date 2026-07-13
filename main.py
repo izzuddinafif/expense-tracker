@@ -960,8 +960,7 @@ async def main() -> None:
         csv_bytes = output.getvalue().encode("utf-8-sig")  # BOM for Excel compatibility
 
         await msg.answer_document(
-            io.BytesIO(csv_bytes),
-            filename=filename,
+            BufferedInputFile(csv_bytes, filename=filename),
             caption=f"📊 *Export {len(expenses)} transaksi*\n{filter_type}"
         )
 
