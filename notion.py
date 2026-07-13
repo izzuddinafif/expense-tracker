@@ -615,8 +615,8 @@ class NotionClient:
             "filter": {
                 "and": [
                     {"property": "Description", "title": {"contains": f"[{owner}]"}},
-                    {"property": amount_prop, "number": {"greater_or_equal": amount - 1}},
-                    {"property": amount_prop, "number": {"less_or_equal": amount + 1}},
+                    {"property": amount_prop, "number": {"greater_than_or_equal_to": amount - 1}},
+                    {"property": amount_prop, "number": {"less_than_or_equal_to": amount + 1}},
                     {"property": date_prop, "date": {"equals": date}},
                 ]
             }

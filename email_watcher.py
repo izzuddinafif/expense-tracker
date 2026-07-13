@@ -774,6 +774,7 @@ class EmailWatcher:
                     merchant="",
                 )
                 out_url = None
+                out_duplicate = False
                 try:
                     out_matches = await target_notion.fetch_duplicates(target_owner, tx.amount, tx.date)
                     if out_matches:
@@ -782,14 +783,8 @@ class EmailWatcher:
                             new_merchant="",
                         )
                         if is_out_dup:
+                            out_duplicate = True
                             log.info(f"[email] Transfer-out duplicate skipped [{uid}]: Rp {tx.amount:,.0f}")
-                            await self._notify(
-                                f"📧 *Transfer keluar duplikat, dilewati*\n"
-                                f"💰 Rp {tx.amount:,.0f}\n"
-                                f"📅 {tx.date}\n"
-                                f"🏦 {source} → {dest}",
-                                user_id=target_id,
-                            )
                         else:
                             out_url = await target_notion.log_expense(transfer_out, target_owner, target_cache)
                     else:
@@ -814,6 +809,7 @@ class EmailWatcher:
                     confidence=0.95,
                 )
                 in_url = None
+                in_duplicate = False
                 try:
                     income_matches = await target_notion.fetch_duplicates(target_owner, tx.amount, tx.date, db_key="income_ds")
                     if income_matches:
@@ -822,6 +818,7 @@ class EmailWatcher:
                             new_merchant="",
                         )
                         if is_in_dup:
+                            in_duplicate = True
                             log.info(f"[email] Transfer-in duplicate skipped [{uid}]: Rp {tx.amount:,.0f}")
                         else:
                             in_url = await target_notion.log_income(transfer_in, target_owner, target_cache)
@@ -838,6 +835,7 @@ class EmailWatcher:
 
                 # Record the admin fee separately, if any.
                 fee_url = None
+                fee_duplicate = False
                 if tx.admin_fee > 0:
                     fee_entry = ExpenseEntry(
                         description=format_self_transfer_label(source, dest, "fee"),
@@ -856,6 +854,7 @@ class EmailWatcher:
                                 new_merchant="",
                             )
                             if is_fee_dup:
+                                fee_duplicate = True
                                 log.info(f"[email] Admin fee duplicate skipped [{uid}]: Rp {tx.admin_fee:,.0f}")
                             else:
                                 fee_url = await target_notion.log_expense(fee_entry, target_owner, target_cache)
@@ -870,22 +869,44 @@ class EmailWatcher:
                         )
                         log.info(f"[email→Notion] Admin fee Rp {tx.admin_fee:,.0f} logged")
 
-                summary_lines = [
-                    f"📧 *Transfer antar rekening* Rp {tx.amount:,.0f}",
-                    f"🏦 {source} → {dest}",
-                    f"💸 Biaya admin: Rp {tx.admin_fee:,.0f}" if tx.admin_fee > 0 else "💸 Biaya admin: Rp 0",
-                ]
-                if out_url:
-                    summary_lines.append(f"➡️ [Keluar]({out_url})")
-                if in_url:
-                    summary_lines.append(f"⬅️ [Masuk]({in_url})")
-                if fee_url:
-                    summary_lines.append(f"🧾 [Biaya admin]({fee_url})")
-                await self._notify_with_markup(
-                    "\n".join(summary_lines),
-                    make_email_edit_keyboard(target_id),
-                    user_id=target_id,
-                )
+                if not any([out_url, in_url, fee_url]):
+                    duplicate_bits = []
+                    if out_duplicate:
+                        duplicate_bits.append("keluar")
+                    if in_duplicate:
+                        duplicate_bits.append("masuk")
+                    if fee_duplicate:
+                        duplicate_bits.append("biaya admin")
+                    if duplicate_bits:
+                        fee_line = f"\n💸 Biaya admin: Rp {tx.admin_fee:,.0f}" if tx.admin_fee > 0 else ""
+                        await self._notify(
+                            f"📧 *Transfer antar rekening duplikat, dilewati*\n"
+                            f"💰 Rp {tx.amount:,.0f}\n"
+                            f"📅 {tx.date}\n"
+                            f"🏦 {source} → {dest}{fee_line}\n"
+                            f"Bagian yang sudah ada: {', '.join(duplicate_bits)}.",
+                            user_id=target_id,
+                        )
+                    else:
+                        log.warning(f"[email] Self-transfer [{uid}] produced no Notion writes and no duplicates")
+                else:
+                    summary_lines = [
+                        f"📧 *Transfer antar rekening* Rp {tx.amount:,.0f}",
+                        f"🏦 {source} → {dest}",
+                    ]
+                    if tx.admin_fee > 0:
+                        summary_lines.append(f"💸 Biaya admin: Rp {tx.admin_fee:,.0f}")
+                    if out_url:
+                        summary_lines.append(f"➡️ [Keluar]({out_url})")
+                    if in_url:
+                        summary_lines.append(f"⬅️ [Masuk]({in_url})")
+                    if fee_url:
+                        summary_lines.append(f"🧾 [Biaya admin]({fee_url})")
+                    await self._notify_with_markup(
+                        "\n".join(summary_lines),
+                        make_email_edit_keyboard(target_id),
+                        user_id=target_id,
+                    )
 
             else:
                 log.warning(
