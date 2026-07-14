@@ -177,6 +177,34 @@ async def main() -> None:
             return None
         return saved
 
+    async def _prompt_next_debit(user_id: int) -> None:
+        """Promote the next queued Jago debit email after the current pending expense is terminal.
+
+        A user's reply to "Beli apa?" creates a normal pending expense that still
+        needs Simpan/Edit/Batal. Prompting the next queued debit before that
+        terminal action lets the next reply overwrite pending_expenses for the
+        same user, losing the first transaction. Only call this after confirm,
+        duplicate-removal, cancel, or auto-confirm has cleared the pending row.
+        """
+        if await db.get_pending_expense(user_id):
+            return
+        if await db.get_pending_email_expense(user_id):
+            return
+        if photo_queue.get(user_id) or user_id in processing_group:
+            return
+        next_tx = await db.pop_debit(user_id)
+        if not next_tx:
+            return
+        await db.set_pending_email_expense(user_id, next_tx)
+        await bot.send_message(
+            user_id,
+            f"💳 *Kartu debit Jago* — Rp {next_tx.amount:,.0f}\n"
+            f"📅 {next_tx.date}  🏦 {next_tx.account}\n\n"
+            f"Beli apa? Balas dengan nama merchant atau deskripsi.\n"
+            f"_(Ketik *batal* untuk lewati)_",
+            parse_mode="Markdown",
+        )
+
     async def alert_owner(text: str) -> None:
         all_users = await db.get_all_users()
         for uid in all_users:
@@ -1243,14 +1271,6 @@ async def main() -> None:
                 parse_mode="Markdown",
                 reply_markup=make_confirm_keyboard(user_id),
             )
-            next_tx = await db.pop_debit(user_id)
-            if next_tx:
-                await db.set_pending_email_expense(user_id, next_tx)
-                await msg.answer(
-                    f"💳 *Kartu debit Jago* — Rp {next_tx.amount:,.0f}\n"
-                    f"📅 {next_tx.date}  🏦 {next_tx.account}\n\n"
-                    f"Beli apa? Balas dengan nama merchant atau deskripsi."
-                )
             return
 
         # ── Intent detection ──────────────────────────────────────────────────
@@ -1408,6 +1428,7 @@ async def main() -> None:
                         "Pending expense dihapus.",
                         parse_mode="Markdown",
                     )
+                    await _prompt_next_debit(user_id)
                     return
         except Exception as e:
             log.warning(f"Confirm duplicate check failed: {e}")
@@ -1441,6 +1462,7 @@ async def main() -> None:
                 parse_mode="Markdown",
                 reply_markup=make_undo_keyboard(user_id),
             )
+            await _prompt_next_debit(user_id)
             photo_task = asyncio.create_task(_process_next_photo(user_id, owner))
             photo_task.add_done_callback(lambda t: t.exception() and log.warning(f"Photo queue task failed: {t.exception()}"))
         except Exception as e:
@@ -1749,6 +1771,7 @@ async def main() -> None:
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("Dibatalkan.")
         await callback.message.answer("Dibatalkan ❌")
+        await _prompt_next_debit(user_id)
         photo_task = asyncio.create_task(_process_next_photo(user_id, user.owner_name))
         photo_task.add_done_callback(lambda t: t.exception() and log.warning(f"Photo queue task failed: {t.exception()}"))
 
@@ -2364,6 +2387,7 @@ async def main() -> None:
                                 "Pending otomatis dihapus.",
                                 parse_mode="Markdown",
                             )
+                            await _prompt_next_debit(user_id)
                             continue
                         url = await n.log_expense(entry, owner, c, recurring_page_url=rec_url)
                         page_id = _url_to_id(url)
@@ -2386,6 +2410,7 @@ async def main() -> None:
                             parse_mode="Markdown",
                             reply_markup=make_undo_keyboard(user_id),
                         )
+                        await _prompt_next_debit(user_id)
                     except Exception as e:
                         log.error(f"Auto-confirm failed for user {user_id}: {e}")
 
