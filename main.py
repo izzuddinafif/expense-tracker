@@ -636,18 +636,23 @@ async def main() -> None:
             return
         lines = ["🔁 *Pembayaran Rutin Aktif*\n"]
         total = 0
-        for amount, info in sorted(recurring.items()):
-            name = info.get("name", "-")
-            sub = info.get("subcategory", "")
-            acc = info.get("account", "")
-            parts = []
-            if sub:
-                parts.append(f"🏷 {sub}")
-            if acc:
-                parts.append(f"🏦 {acc}")
-            extra = " · ".join(parts)
-            lines.append(f"• *{name}* — Rp {amount:,.0f} {extra}")
-            total += amount
+        for amount, entries in sorted(recurring.items()):
+            # NotionCache groups recurring payments by amount because different
+            # active subscriptions can share the same nominal value. Older
+            # caches used a single dict value, so keep a tiny compatibility shim.
+            items = [entries] if isinstance(entries, dict) else entries
+            for info in items:
+                name = info.get("name", "-")
+                sub = info.get("subcategory", "")
+                acc = info.get("account", "")
+                parts = []
+                if sub:
+                    parts.append(f"🏷 {sub}")
+                if acc:
+                    parts.append(f"🏦 {acc}")
+                extra = " · ".join(parts)
+                lines.append(f"• *{name}* — Rp {amount:,.0f} {extra}")
+                total += amount
         lines.append(f"\n💰 *Total: Rp {total:,.0f}/bulan*")
         await msg.answer("\n".join(lines), parse_mode="Markdown")
 
