@@ -7,12 +7,13 @@ import asyncio
 import math
 import os
 import tempfile
+from typing import cast
 
 import pytest
 import pytest_asyncio
 
 from models import ExpenseEntry, IncomeEntry, QueryIntent, EmailTransaction, NotionCache, _fuzzy_match, format_self_transfer_label
-from email_watcher import _is_jago_pocket_transfer
+from email_watcher import EmailWatcher, _is_jago_pocket_transfer
 from db import Database
 
 
@@ -581,6 +582,28 @@ class TestParseDate:
         import pytest
         with pytest.raises(ValueError):
             _parse_date("2026-13-01")
+
+
+# ── email watcher tests ─────────────────────────────────────────────────────
+
+class TestEmailWatcher:
+    def test_imap_fetch_records_final_error_after_retries(self, monkeypatch):
+        watcher = EmailWatcher(
+            config=object(),
+            db=cast(Database, object()),
+            notion=None,
+            agent=None,
+            cache_getter=lambda: None,
+        )
+
+        def fail(_processed_uids):
+            raise RuntimeError("imap down")
+
+        monkeypatch.setattr(watcher, "_imap_fetch_once", fail)
+        monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+        assert watcher._imap_fetch(set()) == []
+        assert watcher._last_imap_error == "imap down"
 
 
 # ── merchant_patterns tests (async, require SQLite) ──────────────────────────

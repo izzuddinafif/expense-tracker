@@ -225,17 +225,22 @@ class EmailWatcher:
         """
         Connect to Gmail IMAP and fetch unprocessed emails from bank senders.
         Returns list of (uid, sender_email, subject, body_text).
-        Retries once on connection failure.
+        Retries once on connection failure and records the final error so the
+        async polling loop can raise the configured IMAP failure alert.
         """
+        last_error: Exception | None = None
         for attempt in range(2):
             try:
                 return self._imap_fetch_once(processed_uids)
             except Exception as e:
+                last_error = e
                 log.warning(f"IMAP fetch attempt {attempt + 1} failed: {e}")
                 self._close_imap()
                 if attempt == 0:
                     import time as _t
                     _t.sleep(2)
+        if last_error is not None:
+            self._last_imap_error = str(last_error)
         return []
 
     def _imap_fetch_once(self, processed_uids: set[str]) -> list[tuple[str, str, str, str]]:
