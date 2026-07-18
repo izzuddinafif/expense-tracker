@@ -588,6 +588,9 @@ class EmailWatcher:
                         existing_pending = await self._db.get_pending_expense(target_id)
                         if existing_pending and existing_pending.amount == tx.amount:
                             log.info(f"[email] Recurring already pending [{uid}]: skipping duplicate")
+                            # Terminal skip: persist before notifying so Telegram delays/failures
+                            # cannot make the same email re-alert every poll.
+                            await self._db.mark_processed(uid, sender)
                             await self._notify(
                                 f"📧 *Email — pembayaran rutin sudah pending*\n"
                                 f"📝 {recurring['name']}\n"
@@ -596,7 +599,6 @@ class EmailWatcher:
                                 f"Sudah ada transaksi ini yang menunggu konfirmasi.",
                                 user_id=target_id,
                             )
-                            await self._db.mark_processed(uid, sender)
                             return
 
                         entry = ExpenseEntry(
@@ -676,6 +678,9 @@ class EmailWatcher:
                                 f"[email] Pending expense clearly matches [{uid}]: "
                                 f"{tx.description} Rp {tx.amount:,.0f} — skipping email duplicate"
                             )
+                            # Terminal skip: persist before notifying so Telegram delays/failures
+                            # cannot make the same email re-alert every poll.
+                            await self._db.mark_processed(uid, sender)
                             await self._notify(
                                 f"📧 *Email — sudah pending*\n"
                                 f"📝 {tx.description}\n"
@@ -684,7 +689,6 @@ class EmailWatcher:
                                 f"Transaksi ini sudah tercatat manual dan menunggu konfirmasi.",
                                 user_id=target_id,
                             )
-                            await self._db.mark_processed(uid, sender)
                             return
                         log.warning(
                             f"[email] Pending amount/date collision ignored [{uid}]: "
@@ -700,6 +704,9 @@ class EmailWatcher:
                             )
                             if is_dup:
                                 log.info(f"[email] Duplicate skipped [{uid}]: {tx.description} Rp {tx.amount:,.0f}")
+                                # Persist the terminal decision before notifying. Telegram/network
+                                # failures should not make a confirmed duplicate re-alert every poll.
+                                await self._db.mark_processed(uid, sender)
                                 subcat_match = target_cache.closest_subcategory(tx.subcategory)
                                 sub_text = subcat_match[0] if subcat_match else "📦 Miscellaneous"
                                 merchant_line = f"🏪 {tx.merchant}\n" if tx.merchant else ""
@@ -714,7 +721,6 @@ class EmailWatcher:
                                     f"Transaksi ini sudah tercatat sebelumnya.",
                                     user_id=target_id,
                                 )
-                                await self._db.mark_processed(uid, sender)
                                 return
                     except Exception as e:
                         log.warning(f"[email] Duplicate check failed for [{uid}]: {e}")
@@ -735,6 +741,11 @@ class EmailWatcher:
                             log.warning(f"[email] Merchant similarity check failed [{uid}]: {e}")
 
                     url = await target_notion.log_expense(entry, target_owner, target_cache)
+                    # The Notion write is already durable. Mark the email processed before
+                    # best-effort side effects (budget task, local edit/undo state, Telegram)
+                    # so a later side-effect failure cannot create a duplicate Notion entry
+                    # on the next IMAP poll.
+                    await self._db.mark_processed(uid, sender)
                     alert_task = asyncio.create_task(self._check_budget_alert(entry, notion=target_notion, cache=target_cache))
                     alert_task.add_done_callback(lambda t: t.exception() and log.warning(f"Budget alert task failed: {t.exception()}"))
                     if self._on_save_fn:
@@ -873,6 +884,11 @@ class EmailWatcher:
                             target_id, fee_url, fee_entry.description, fee_entry.amount, fee_entry.date, fee_entry.subcategory,
                         )
                         log.info(f"[email→Notion] Admin fee Rp {tx.admin_fee:,.0f} logged")
+
+                # All self-transfer Notion writes/duplicate decisions above are durable.
+                # Mark the email processed before Telegram summary side effects so a
+                # notification delay/failure cannot make the next poll write duplicates.
+                await self._db.mark_processed(uid, sender)
 
                 if not any([out_url, in_url, fee_url]):
                     duplicate_bits = []

@@ -605,6 +605,147 @@ class TestEmailWatcher:
         assert watcher._imap_fetch(set()) == []
         assert watcher._last_imap_error == "imap down"
 
+    @pytest.mark.asyncio
+    async def test_duplicate_email_marks_processed_before_notify(self):
+        events = []
+
+        class FakeDb:
+            async def get_email_owner_for_account(self, _account_name):
+                return None
+
+            async def get_pending_expense(self, _user_id):
+                return None
+
+            async def mark_processed(self, uid, sender):
+                events.append(("mark_processed", uid, sender))
+
+        class FakeNotion:
+            async def fetch_duplicates(self, owner, amount, date):
+                return ["M FAIRUZ HAFIDZUDDIN"]
+
+        class FakeAgent:
+            async def parse_bank_email(self, **_kwargs):
+                return EmailTransaction(
+                    type="expense",
+                    description="M FAIRUZ HAFIDZUDDIN",
+                    amount=200000,
+                    admin_fee=0,
+                    date="2026-07-17",
+                    subcategory="Transfer Antar Rekening",
+                    account="BSI 9400",
+                    merchant="M FAIRUZ HAFIDZUDDIN",
+                )
+
+            async def check_duplicate(self, *_args, **_kwargs):
+                return True
+
+        class FakeCache:
+            subcategories = {}
+            accounts = {}
+            recurring_payments = {}
+
+            def closest_subcategory(self, name):
+                return (name, "subcat-url")
+
+        class FakeBot:
+            async def send_message(self, *_args, **_kwargs):
+                events.append(("notify",))
+
+        watcher = EmailWatcher(
+            config=object(),
+            db=cast(Database, FakeDb()),
+            notion=FakeNotion(),
+            agent=FakeAgent(),
+            cache_getter=lambda: FakeCache(),
+            bot=FakeBot(),
+            email_owner_id=981749333,
+            email_owner_name="Afif",
+        )
+
+        await watcher._process("66113", "nonereply.byondbybsi@bankbsi.co.id", "Transfer Berhasil", "body")
+
+        assert events[:2] == [
+            ("mark_processed", "66113", "nonereply.byondbybsi@bankbsi.co.id"),
+            ("notify",),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_auto_logged_email_marks_processed_before_side_effects(self):
+        events = []
+
+        class FakeDb:
+            async def get_email_owner_for_account(self, _account_name):
+                return None
+
+            async def get_pending_expense(self, _user_id):
+                return None
+
+            async def mark_processed(self, uid, sender):
+                events.append(("mark_processed", uid, sender))
+
+        class FakeNotion:
+            async def fetch_duplicates(self, owner, amount, date):
+                return []
+
+            async def find_similar_by_merchant(self, *_args, **_kwargs):
+                return []
+
+            async def log_expense(self, *_args, **_kwargs):
+                events.append(("log_expense",))
+                return "https://notion.so/385c2adf84548161a518e2a4536f22b8"
+
+        class FakeAgent:
+            async def parse_bank_email(self, **_kwargs):
+                return EmailTransaction(
+                    type="expense",
+                    description="SAKINAH SUPERMARKET",
+                    amount=59900,
+                    admin_fee=0,
+                    date="2026-07-18",
+                    subcategory="Groceries",
+                    account="BSI 9400",
+                    merchant="SAKINAH SUPERMARKET",
+                )
+
+        class FakeCache:
+            subcategories = {}
+            accounts = {}
+            recurring_payments = {}
+
+            def closest_subcategory(self, name):
+                return (name, "subcat-url")
+
+            def closest_account(self, name):
+                return (name, "account-url")
+
+        class FakeBot:
+            async def send_message(self, *_args, **_kwargs):
+                events.append(("notify",))
+
+        async def on_save(*_args, **_kwargs):
+            events.append(("on_save",))
+
+        watcher = EmailWatcher(
+            config=object(),
+            db=cast(Database, FakeDb()),
+            notion=FakeNotion(),
+            agent=FakeAgent(),
+            cache_getter=lambda: FakeCache(),
+            bot=FakeBot(),
+            email_owner_id=981749333,
+            email_owner_name="Afif",
+            on_save_fn=on_save,
+        )
+
+        await watcher._process("66114", "nonereply.byondbybsi@bankbsi.co.id", "Transaksi Berhasil", "body")
+
+        assert events[:4] == [
+            ("log_expense",),
+            ("mark_processed", "66114", "nonereply.byondbybsi@bankbsi.co.id"),
+            ("on_save",),
+            ("notify",),
+        ]
+
 
 # ── merchant_patterns tests (async, require SQLite) ──────────────────────────
 
