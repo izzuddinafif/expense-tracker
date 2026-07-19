@@ -1418,12 +1418,20 @@ async def main() -> None:
         except Exception:
             pass
 
+        pending_rec = await db.get_pending_recurring(user_id)
+
         # Re-check duplicates before saving — email may have logged it in the meantime
         try:
             matches = await user_notion.fetch_duplicates(owner, entry.amount, entry.date)
             if matches:
                 is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date, new_merchant=entry.merchant)
                 if is_dup:
+                    # Terminal duplicate decision for a recurring email: mark the source
+                    # email processed before clearing local pending state, otherwise the
+                    # watcher can requeue the same recurring email every poll.
+                    if pending_rec:
+                        await db.mark_processed(pending_rec["uid"], pending_rec["sender"])
+                        await db.clear_pending_recurring(user_id)
                     pending_since.pop(user_id, None)
                     await db.clear_pending_expense(user_id)
                     await db.clear_pending_since(user_id)
@@ -1441,7 +1449,6 @@ async def main() -> None:
         await callback.answer("Menyimpan...")
         status_msg = await callback.message.answer("⏳ Menyimpan ke Notion...")
         try:
-            pending_rec = await db.get_pending_recurring(user_id)
             rec_page_url = pending_rec["recurring_page_url"] if pending_rec else None
 
             url = await user_notion.log_expense(entry, owner, user_cache, recurring_page_url=rec_page_url)
@@ -2381,11 +2388,15 @@ async def main() -> None:
                         if matches:
                             is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date, new_merchant=entry.merchant)
                         if is_dup:
+                            # Terminal duplicate decision for a recurring email: persist
+                            # the source email UID before notification/local cleanup so it
+                            # cannot be requeued on the next watcher poll.
+                            if pending_rec:
+                                await db.mark_processed(pending_rec["uid"], pending_rec["sender"])
+                                await db.clear_pending_recurring(user_id)
                             pending_since.pop(user_id, None)
                             await db.clear_pending_since(user_id)
                             await db.clear_pending_expense(user_id)
-                            if pending_rec:
-                                await db.clear_pending_recurring(user_id)
                             await bot.send_message(
                                 user_id,
                                 "⚠️ *Duplikat terdeteksi!* Transaksi ini sudah tercatat sebelumnya.\n"
