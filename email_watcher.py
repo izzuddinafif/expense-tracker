@@ -347,8 +347,16 @@ class EmailWatcher:
             notion = notion or self._notion
             cache = cache or self._cache_getter()
             budgets = await notion.fetch_budgets(cache)
+            # The model may return an abbreviated or slightly different subcategory name
+            # (e.g., "Cafe" vs "Cafe/Coffee Shop"). Resolve it to the canonical cache name
+            # before comparing against the budget's subcategory list.
+            canonical = entry.subcategory
+            if cache is not None:
+                matched = cache.closest_subcategory(entry.subcategory)
+                if matched is not None:
+                    canonical = matched[0]
             for b in budgets:
-                if entry.subcategory not in b["subcategories"]:
+                if canonical not in b["subcategories"]:
                     continue
                 pct = b["percentage"]
                 if pct >= 100:

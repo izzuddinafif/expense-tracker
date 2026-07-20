@@ -746,6 +746,55 @@ class TestEmailWatcher:
             ("notify",),
         ]
 
+    @pytest.mark.asyncio
+    async def test_budget_alert_resolves_fuzzy_subcategory(self):
+        """Budget alert should fire when the model subcategory is fuzzy-matched to a budget subcategory."""
+        events = []
+
+        class FakeNotion:
+            async def fetch_budgets(self, cache):
+                return [
+                    {
+                        "name": "Makan",
+                        "budget": 1000000,
+                        "period": "monthly",
+                        "spent": 950000,
+                        "percentage": 95,
+                        "subcategories": ["Warung/Makan Siap Saji"],
+                    }
+                ]
+
+        class FakeCache:
+            subcategories = {"Warung/Makan Siap Saji": "url1"}
+
+            def closest_subcategory(self, name):
+                return _fuzzy_match(name, self.subcategories)
+
+        async def fake_alert(text):
+            events.append(text)
+
+        watcher = EmailWatcher(
+            config=object(),
+            db=cast(Database, object()),
+            notion=FakeNotion(),
+            agent=None,
+            cache_getter=lambda: FakeCache(),
+            alert_fn=fake_alert,
+        )
+
+        entry = ExpenseEntry(
+            description="Nasi goreng",
+            amount=25000,
+            date="2026-07-20",
+            subcategory="warung",  # fuzzy match to "Warung/Makan Siap Saji"
+            account="Cash",
+            confidence=0.9,
+        )
+        await watcher._check_budget_alert(entry)
+
+        assert len(events) == 1
+        assert "Makan" in events[0]
+
 
 # ── merchant_patterns tests (async, require SQLite) ──────────────────────────
 
