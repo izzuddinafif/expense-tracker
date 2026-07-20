@@ -185,6 +185,11 @@ class EmailWatcher:
 
     # ── IMAP (synchronous — called via asyncio.to_thread) ──────────────────────
 
+    @staticmethod
+    def _is_imap_auth_error(error: object) -> bool:
+        text = str(error)
+        return "AUTHENTICATIONFAILED" in text or "Invalid credentials" in text
+
     def _ensure_imap(self) -> imaplib.IMAP4_SSL:
         """Ensure IMAP connection is alive. Reconnect with backoff on failure."""
         if self._imap is not None:
@@ -208,6 +213,10 @@ class EmailWatcher:
                 last_err = e
                 log.warning(f"IMAP connect attempt {attempt + 1} failed: {e}")
                 self._close_imap()
+                if self._is_imap_auth_error(e):
+                    # App-password failures are deterministic. Retrying/backing off inside
+                    # the same poll only spams logs and delays the async watcher thread.
+                    break
                 import time as _t
                 _t.sleep(2 ** attempt)  # 1s, 2s, 4s
 
@@ -236,6 +245,9 @@ class EmailWatcher:
                 last_error = e
                 log.warning(f"IMAP fetch attempt {attempt + 1} failed: {e}")
                 self._close_imap()
+                if self._is_imap_auth_error(e):
+                    # Invalid Gmail App Password will not recover on immediate retry.
+                    break
                 if attempt == 0:
                     import time as _t
                     _t.sleep(2)
@@ -984,7 +996,13 @@ class EmailWatcher:
 
                 if self._last_imap_error:
                     self._imap_fail_streak += 1
-                    if self._imap_fail_streak == 1 or self._imap_fail_streak % 5 == 0:
+                    is_auth_error = self._is_imap_auth_error(self._last_imap_error)
+                    should_alert = (
+                        self._imap_fail_streak == 1
+                        or (not is_auth_error and self._imap_fail_streak % 5 == 0)
+                        or (is_auth_error and self._imap_fail_streak % 360 == 0)
+                    )
+                    if should_alert:
                         await self._alert(
                             f"⚠️ *Email watcher: IMAP error*\n"
                             f"Fail #{self._imap_fail_streak}: `{self._last_imap_error}`\n"
