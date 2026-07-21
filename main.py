@@ -476,9 +476,10 @@ async def main() -> None:
                         parse_mode="Markdown",
                         reply_markup=make_confirm_keyboard(user_id),
                     )
-                    break
+                    return
             if retries >= 3:
-                q.pop(0)  # discard failed photo after 3 retries
+                q.pop(0)
+                return  # discard failed photo after 3 retries
 
     # ── Handlers ──────────────────────────────────────────────────────────────
 
@@ -1039,6 +1040,9 @@ async def main() -> None:
                 f"`{type(e).__name__}: {str(e)[:80]}`",
                 parse_mode="Markdown",
             )
+            # Clear the failed photo group so the next photo can be processed fresh.
+            processing_group.discard(user_id)
+            photo_queue.pop(user_id, None)
             return
 
         await db.set_pending_expense(user_id, entry)

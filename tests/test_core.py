@@ -15,6 +15,7 @@ import pytest_asyncio
 from models import ExpenseEntry, IncomeEntry, QueryIntent, EmailTransaction, NotionCache, _fuzzy_match, format_self_transfer_label
 from email_watcher import EmailWatcher, _is_jago_pocket_transfer
 from db import Database
+from notion import _coerce_date
 
 
 # ── models.py tests ────────────────────────────────────────────────────────────
@@ -829,3 +830,23 @@ class TestMerchantPatterns:
         await db.record_pattern(12345, "   ", "Cafe/Coffee Shop", "Jago", 50000, "2026-06-24")
         result = await db.find_pattern(12345, 50000)
         assert result is None
+
+
+# ── notion date coercion tests ─────────────────────────────────────────────
+
+class TestCoerceDate:
+    def test_returns_string_unchanged(self):
+        assert _coerce_date("2026-07-21") == "2026-07-21"
+
+    def test_converts_date_object(self):
+        from datetime import date
+        assert _coerce_date(date(2026, 7, 21)) == "2026-07-21"
+
+    def test_converts_datetime_object(self):
+        from datetime import datetime
+        assert _coerce_date(datetime(2026, 7, 21, 10, 30)) == "2026-07-21"
+
+    def test_rejects_invalid_type(self):
+        with pytest.raises(TypeError):
+            _coerce_date(12345)
+

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import httpx
+from typing import Any
 from models import NotionCache, ExpenseEntry, IncomeEntry, UserRecord
 
 log = logging.getLogger(__name__)
@@ -340,14 +341,7 @@ class NotionClient:
         If recurring_page_url is provided, the expense is linked to that
         Recurring Payment entry via the 'Linked Recurring Payment' relation.
         """
-        # Ensure entry.date is a string in YYYY-MM-DD format
-        if hasattr(entry.date, 'isoformat'):
-            # It's a datetime/date object — convert to string
-            log.warning(f"log_expense: entry.date was {type(entry.date).__name__}, converting to ISO string")
-            entry.date = entry.date.isoformat()[:10]
-        elif not isinstance(entry.date, str):
-            log.error(f"log_expense: entry.date is {type(entry.date).__name__} — cannot parse")
-            raise TypeError(f"Expected str for date, got {type(entry.date).__name__}")
+        entry.date = _coerce_date(entry.date)
         
         year_str, month_str = _parse_date(entry.date)
 
@@ -423,6 +417,8 @@ class NotionClient:
         cache: NotionCache,
     ) -> str:
         """Create a new income entry in Notion. Returns the page URL."""
+        entry.date = _coerce_date(entry.date)
+
         year_str, month_str = _parse_date(entry.date)
 
         subcategory_match = cache.closest_income_subcategory(entry.subcategory)
@@ -883,6 +879,18 @@ _MONTH_NAMES = [
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
 ]
+
+
+def _coerce_date(value: Any) -> str:
+    """Normalize a date value to YYYY-MM-DD string."""
+    if hasattr(value, "isoformat"):
+        date_str = value.isoformat()
+        if isinstance(date_str, str):
+            return date_str[:10]
+        return str(date_str)[:10]
+    if not isinstance(value, str):
+        raise TypeError(f"Expected str for date, got {type(value).__name__}")
+    return value
 
 
 def _parse_date(date_str: str) -> tuple[str, str]:
