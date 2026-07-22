@@ -479,7 +479,13 @@ async def main() -> None:
                     return
             if retries >= 3:
                 q.pop(0)
-                return  # discard failed photo after 3 retries
+                # Discard the failed photo and clear the media-group state so the user
+                # can send a fresh photo. Otherwise processing_group stays set and the
+                # remaining queued photos are never promoted (there is no pending
+                # confirmation to trigger the next _process_next_photo call).
+                processing_group.discard(user_id)
+                photo_queue.pop(user_id, None)
+                return
 
     # ── Handlers ──────────────────────────────────────────────────────────────
 
