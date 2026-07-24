@@ -2437,6 +2437,8 @@ async def main() -> None:
                             reply_markup=make_undo_keyboard(user_id),
                         )
                         await _prompt_next_debit(user_id)
+                        photo_task = asyncio.create_task(_process_next_photo(user_id, owner))
+                        photo_task.add_done_callback(lambda t: t.exception() and log.warning(f"Photo queue task failed: {t.exception()}"))
                     except Exception as e:
                         log.error(f"Auto-confirm failed for user {user_id}: {e}")
 
