@@ -2381,6 +2381,10 @@ async def main() -> None:
                     pending_rec = await db.get_pending_recurring(user_id)
                     entry = await db.get_pending_expense(user_id)
                     if not entry:
+                        # Stale pending_since without a pending expense — clean up so
+                        # the loop doesn't re-wake every minute for this user.
+                        pending_since.pop(user_id, None)
+                        await db.clear_pending_since(user_id)
                         continue
                     result = await get_user_notion(user_id)
                     if not result:
