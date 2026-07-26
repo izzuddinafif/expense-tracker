@@ -967,7 +967,6 @@ class EmailWatcher:
             return  # don't mark processed — retry next cycle
 
         self._notion_fail_streak = 0
-        await self._db.mark_processed(uid, sender)
 
     # ── Main loop ───────────────────────────────────────────────────────────────
 
