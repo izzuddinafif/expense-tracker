@@ -132,7 +132,7 @@ SUBCATEGORY RULES:
 Available accounts: {accounts}
 
 JSON response schema:
-{{
+{
   "type": "expense|self_transfer|skip",
   "description": "merchant or recipient name",
   "amount": 0.0,
@@ -147,7 +147,7 @@ JSON response schema:
   "destination_account": "destination account / bank label for self-transfers (e.g. Jago, BSI/BYOND)",
   "income_subcategory": "income subcategory for the destination-side transfer record (if available)",
   "skip_reason": ""
-}}
+}
 """
 
 
@@ -396,11 +396,9 @@ class Agent:
         if not answer:
             answer = "Sorry, I couldn't process that."
 
-        history.append({"role": "user", "content": question})
-        history.append({"role": "assistant", "content": answer})
-        if len(history) > 20:
-            history = history[-20:]
-
+        # Don't mutate the passed-in history here; the caller persists the new
+        # user/assistant turns to the database after this returns. Mutating
+        # would duplicate the user question in the prompt and in storage.
         return answer, history
 
     async def suggest_categories(

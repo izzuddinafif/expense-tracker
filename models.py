@@ -44,7 +44,7 @@ class EmailTransaction(BaseModel):
     type: str           # "expense" | "self_transfer" | "skip"
     description: str    # merchant name or recipient name
     amount: float       # main transaction amount in IDR
-    admin_fee: float    # admin fee for self-transfers (0 if none)
+    admin_fee: float = 0.0  # admin fee for self-transfers (0 if none)
     date: str           # YYYY-MM-DD parsed from email
     subcategory: str    # suggested subcategory name (matched against cache)
     account: str        # source account name (matched against cache)
