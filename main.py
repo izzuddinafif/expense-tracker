@@ -2524,10 +2524,10 @@ async def main() -> None:
         watch_over_task = asyncio.create_task(_watch_over())
 
     log.info("Bot starting...")
+
     auto_confirm_task = asyncio.create_task(_auto_confirm_stale())
-    try:
-        await dp.start_polling(bot)
-    finally:
+
+    async def _cleanup() -> None:
         # Cancel background tasks before closing DB
         if watcher_task_ref:
             watcher_task_ref.cancel()
@@ -2542,6 +2542,49 @@ async def main() -> None:
         )
         await db.close()
         log.info("Database connection closed.")
+
+    if config.webhook_domain:
+        from aiohttp import web
+        from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
+        webhook_url = f"{config.webhook_domain.rstrip('/')}{config.webhook_path}"
+
+        async def on_startup(bot: Bot) -> None:
+            await bot.set_webhook(
+                url=webhook_url,
+                secret_token=config.webhook_secret or None,
+                drop_pending_updates=True,
+            )
+
+        async def on_shutdown(bot: Bot) -> None:
+            await bot.delete_webhook()
+
+        dp.startup.register(on_startup)
+        dp.shutdown.register(on_shutdown)
+
+        app = web.Application()
+        SimpleRequestHandler(
+            dispatcher=dp,
+            bot=bot,
+            secret_token=config.webhook_secret or None,
+        ).register(app, path=config.webhook_path)
+        setup_application(app, dp, bot=bot)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, host="0.0.0.0", port=config.port)
+        await site.start()
+        log.info("Webhook server listening on 0.0.0.0:%s, webhook URL: %s", config.port, webhook_url)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await runner.cleanup()
+            await _cleanup()
+    else:
+        try:
+            await dp.start_polling(bot)
+        finally:
+            await _cleanup()
 
 
 if __name__ == "__main__":

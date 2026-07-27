@@ -23,6 +23,12 @@ class Config:
     # The email watcher sends Telegram follow-ups to this user.
     email_owner: str = ""
 
+    # Telegram webhook mode (optional; falls back to polling if not set)
+    webhook_domain: str = ""  # e.g. https://expense.izzudd.in
+    webhook_path: str = "/webhook"
+    webhook_secret: str = ""
+    port: int = 8080
+
     # SQLite persistent storage
     db_path: str = "data/expense_tracker.db"
 
@@ -57,6 +63,10 @@ def load_config() -> Config:
         gmail_app_password=os.environ["GMAIL_APP_PASSWORD"],
         email_poll_interval=int(os.getenv("EMAIL_POLL_INTERVAL", "300")),
         email_owner=os.getenv("EMAIL_OWNER", "Afif"),
+        webhook_domain=os.getenv("WEBHOOK_DOMAIN", ""),
+        webhook_path=os.getenv("WEBHOOK_PATH", "/webhook"),
+        webhook_secret=os.getenv("WEBHOOK_SECRET", ""),
+        port=int(os.getenv("PORT", "8080")),
         db_path=os.getenv("DB_PATH", "data/expense_tracker.db"),
         # Legacy single-tenant env vars (optional, for backward compat)
         notion_token=os.getenv("NOTION_TOKEN", ""),
