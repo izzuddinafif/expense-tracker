@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import re
+import weakref
+from collections.abc import Awaitable, Callable
 import httpx
 from typing import Any
 from models import NotionCache, ExpenseEntry, IncomeEntry, UserRecord
@@ -10,10 +12,14 @@ log = logging.getLogger(__name__)
 # Locks to prevent TOCTOU race on auto-creating month/year pages
 _month_locks: dict[str, asyncio.Lock] = {}
 _year_locks: dict[str, asyncio.Lock] = {}
+_transaction_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
 
 
 NOTION_VERSION = "2022-06-28"
 _HTTP_TIMEOUT = 30.0  # seconds
+TRANSACTION_ID_PROPERTY = "Transaction ID"
 
 # Map from db_ids key → expected Notion database title (from the template)
 DB_NAME_MAP = {
@@ -78,7 +84,9 @@ class NotionClient:
         # Match discovered databases to expected names
         found: dict[str, str] = {}
         missing: list[str] = []
-        OPTIONAL_DBS = {"assets_ds"}  # nice-to-have, won't block setup
+        # Assets/net worth remains an optional Notion feature. Monthly budgets
+        # are authoritative in SQLite and must not force a legacy Notion table.
+        OPTIONAL_DBS = {"assets_ds", "budget_ds"}
 
         for field_name, expected_title in DB_NAME_MAP.items():
             db_id = all_databases.get(expected_title)
@@ -109,17 +117,23 @@ class NotionClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def _notion_post(self, url: str, json: dict) -> dict:
-        """POST ke Notion dengan retry untuk transport error, 429, dan 5xx."""
+    async def _notion_post(
+        self, url: str, json: dict, *, attempts: int = 3
+    ) -> dict:
+        """POST to Notion, retrying only when the caller says it is safe."""
+        if attempts < 1:
+            raise ValueError("attempts must be at least one")
         last_resp = None
         last_exc = None
         delay = 1.0
-        for attempt in range(3):
+        for attempt in range(attempts):
             try:
                 resp = await self._http.post(url, headers=self._headers, json=json)
             except httpx.TransportError as e:
                 last_exc = e
                 log.warning(f"Notion transport error (attempt {attempt + 1}): {e}")
+                if attempt + 1 == attempts:
+                    break
                 await asyncio.sleep(delay)
                 delay *= 2
                 continue
@@ -127,6 +141,8 @@ class NotionClient:
                 resp.raise_for_status()
                 return resp.json()
             last_resp = resp
+            if attempt + 1 == attempts:
+                break
             retry_after = float(resp.headers.get("Retry-After", delay))
             await asyncio.sleep(retry_after)
             delay *= 2
@@ -155,6 +171,313 @@ class NotionClient:
             payload["start_cursor"] = data["next_cursor"]
 
         return results
+
+    async def _find_by_transaction_id(
+        self, database_id: str, transaction_id: str
+    ) -> tuple[str | None, bool]:
+        """Return an existing page URL and whether the ID property is usable."""
+        try:
+            pages = await self._query_db(
+                database_id,
+                extra_payload={
+                    "filter": {
+                        "property": TRANSACTION_ID_PROPERTY,
+                        "rich_text": {"equals": transaction_id},
+                    },
+                    "page_size": 2,
+                },
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 400:
+                raise
+            raise RuntimeError(
+                f"Notion database {database_id} must have a rich-text "
+                f"'{TRANSACTION_ID_PROPERTY}' property for idempotent sync"
+            ) from exc
+        if not pages:
+            return None, True
+        if len(pages) > 1:
+            raise RuntimeError(
+                f"Multiple Notion pages in database {database_id} have "
+                f"Transaction ID {transaction_id!r}; refusing to choose one"
+            )
+        page = pages[0]
+        return page.get("url") or page.get("id"), True
+
+    async def _find_by_exact_title(
+        self, database_id: str, title: str
+    ) -> str | None:
+        """Return one exact-title page, refusing an ambiguous relation target."""
+        pages = await self._query_db(
+            database_id,
+            extra_payload={
+                "filter": {"property": "title", "title": {"equals": title}},
+                "page_size": 2,
+            },
+        )
+        matches = [page for page in pages if self._extract_title(page) == title]
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"Multiple Notion pages in database {database_id} have title "
+                f"{title!r}; refusing to choose one"
+            )
+        if not matches:
+            return None
+        return matches[0].get("url") or matches[0].get("id")
+
+    async def _create_relation_page(
+        self, database_id: str, title: str, relation_name: str
+    ) -> str | None:
+        """Create a relation page only after an exact-title preflight."""
+        # A stale local cache must not turn into a duplicate remote relation.
+        # If this lookup is unavailable, propagate the error: creating without
+        # knowing whether the title already exists is unsafe.
+        existing = await self._find_by_exact_title(database_id, title)
+        if existing:
+            log.info(
+                "Notion %s preflight reused exact title %s", relation_name, title
+            )
+            return existing
+        payload = {
+            "parent": {"database_id": database_id},
+            "properties": {
+                "title": {"title": [{"text": {"content": title}}]}
+            },
+        }
+        try:
+            data = await self._notion_post(
+                "https://api.notion.com/v1/pages", json=payload, attempts=1,
+            )
+            return data["url"]
+        except Exception as create_error:
+            # A timeout or 5xx does not establish that the create was rejected.
+            # Reconcile by the exact relation title before reporting failure.
+            existing = await self._find_by_exact_title(database_id, title)
+            if existing:
+                log.info(
+                    "Notion %s create reconciled exact title %s", relation_name, title
+                )
+                return existing
+            log.warning(
+                "Failed to auto-create %s page %s: %s",
+                relation_name,
+                title,
+                create_error,
+            )
+            return None
+
+    async def _create_or_reconcile(
+        self,
+        database_id: str,
+        transaction_id: str,
+        create: Callable[[], Awaitable[str]],
+        update_existing: Callable[[str], Awaitable[str]],
+    ) -> str:
+        """Create once per attempt, checking Transaction ID after ambiguity.
+
+        A timeout or a 429/5xx response does not prove that Notion rejected a
+        create.  Query the stable local transaction ID before issuing another
+        create request so a page accepted by Notion is repaired, not copied.
+        """
+        last_error: Exception | None = None
+        delay = 1.0
+        for attempt in range(3):
+            try:
+                return await create()
+            except httpx.TransportError as exc:
+                last_error = exc
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 429 and exc.response.status_code < 500:
+                    raise
+                last_error = exc
+
+            existing, _supported = await self._find_by_transaction_id(
+                database_id, transaction_id
+            )
+            if existing:
+                log.info(
+                    "Notion create reconciled transaction %s after attempt %s",
+                    transaction_id,
+                    attempt + 1,
+                )
+                return await update_existing(existing)
+            if attempt + 1 == 3:
+                assert last_error is not None
+                raise last_error
+            await asyncio.sleep(delay)
+            delay *= 2
+
+        raise AssertionError("unreachable")
+
+    async def _update_expense(
+        self,
+        page_url: str,
+        entry: ExpenseEntry,
+        owner: str,
+        cache: NotionCache,
+        transaction_id: str,
+        recurring_page_url: str | None = None,
+    ) -> str:
+        """Repair an existing expense after a retry or canonical data change."""
+        entry.date = _coerce_date(entry.date)
+        year_str, month_str = _parse_date(entry.date)
+        properties: dict[str, Any] = {
+            "Description": {
+                "title": [{"text": {"content": f"[{owner}] {entry.description}"}}]
+            },
+            "Amount": {"number": entry.amount},
+            "Date of Expense": {"date": {"start": entry.date}},
+            TRANSACTION_ID_PROPERTY: {
+                "rich_text": [{"text": {"content": transaction_id}}]
+            },
+        }
+        subcategory = cache.closest_subcategory(entry.subcategory)
+        account = cache.closest_account(entry.account)
+        month_url = await self._ensure_month(month_str, cache)
+        year_url = await self._ensure_year(year_str, cache)
+        if subcategory:
+            properties["Expenses Sub-categories"] = {
+                "relation": [{"id": _url_to_id(subcategory[1])}]
+            }
+        if account:
+            properties["Accounts"] = {
+                "relation": [{"id": _url_to_id(account[1])}]
+            }
+        if month_url:
+            properties["Month"] = {"relation": [{"id": _url_to_id(month_url)}]}
+        if year_url:
+            properties["Year"] = {"relation": [{"id": _url_to_id(year_url)}]}
+        if recurring_page_url:
+            properties["Linked Recurring Payment"] = {
+                "relation": [{"id": _url_to_id(recurring_page_url)}]
+            }
+        merchant = entry.merchant or _extract_merchant_from_description(entry.description)
+        if merchant:
+            properties["Merchant"] = {
+                "rich_text": [{"text": {"content": merchant}}]
+            }
+        await self._notion_patch(
+            f"https://api.notion.com/v1/pages/{_url_to_id(page_url)}",
+            {"properties": properties},
+        )
+        return page_url
+
+    async def _update_income(
+        self,
+        page_url: str,
+        entry: IncomeEntry,
+        owner: str,
+        cache: NotionCache,
+        transaction_id: str,
+    ) -> str:
+        """Repair an existing income after a retry or canonical data change."""
+        entry.date = _coerce_date(entry.date)
+        year_str, month_str = _parse_date(entry.date)
+        properties: dict[str, Any] = {
+            "Description": {
+                "title": [{"text": {"content": f"[{owner}] {entry.description}"}}]
+            },
+            "Amount": {"number": entry.amount},
+            "Date of Income": {"date": {"start": entry.date}},
+            TRANSACTION_ID_PROPERTY: {
+                "rich_text": [{"text": {"content": transaction_id}}]
+            },
+        }
+        subcategory = cache.closest_income_subcategory(entry.subcategory)
+        account = cache.closest_account(entry.account)
+        month_url = await self._ensure_month(month_str, cache)
+        year_url = await self._ensure_year(year_str, cache)
+        if subcategory:
+            properties["Income Sub-categories"] = {
+                "relation": [{"id": _url_to_id(subcategory[1])}]
+            }
+        if account:
+            properties["Accounts"] = {
+                "relation": [{"id": _url_to_id(account[1])}]
+            }
+        if month_url:
+            properties["Month"] = {"relation": [{"id": _url_to_id(month_url)}]}
+        if year_url:
+            properties["Year"] = {"relation": [{"id": _url_to_id(year_url)}]}
+        await self._notion_patch(
+            f"https://api.notion.com/v1/pages/{_url_to_id(page_url)}",
+            {"properties": properties},
+        )
+        return page_url
+
+    async def upsert_expense(
+        self,
+        entry: ExpenseEntry,
+        owner: str,
+        cache: NotionCache,
+        transaction_id: str,
+        recurring_page_url: str | None = None,
+    ) -> str:
+        """Create an expense unless this local transaction was delivered."""
+        async with _transaction_locks.setdefault(transaction_id, asyncio.Lock()):
+            existing, supported = await self._find_by_transaction_id(
+                self._db_ids["expenses_ds"], transaction_id
+            )
+            if existing:
+                log.info("Notion expense already exists for transaction %s", transaction_id)
+                return await self._update_expense(
+                    existing,
+                    entry,
+                    owner,
+                    cache,
+                    transaction_id,
+                    recurring_page_url,
+                )
+            return await self._create_or_reconcile(
+                self._db_ids["expenses_ds"],
+                transaction_id,
+                lambda: self.log_expense(
+                    entry,
+                    owner,
+                    cache,
+                    recurring_page_url=recurring_page_url,
+                    transaction_id=transaction_id if supported else None,
+                ),
+                lambda page_url: self._update_expense(
+                    page_url,
+                    entry,
+                    owner,
+                    cache,
+                    transaction_id,
+                    recurring_page_url,
+                ),
+            )
+
+    async def upsert_income(
+        self,
+        entry: IncomeEntry,
+        owner: str,
+        cache: NotionCache,
+        transaction_id: str,
+    ) -> str:
+        """Create income unless this local transaction was delivered."""
+        async with _transaction_locks.setdefault(transaction_id, asyncio.Lock()):
+            existing, supported = await self._find_by_transaction_id(
+                self._db_ids["income_ds"], transaction_id
+            )
+            if existing:
+                log.info("Notion income already exists for transaction %s", transaction_id)
+                return await self._update_income(
+                    existing, entry, owner, cache, transaction_id
+                )
+            return await self._create_or_reconcile(
+                self._db_ids["income_ds"],
+                transaction_id,
+                lambda: self.log_income(
+                    entry,
+                    owner,
+                    cache,
+                    transaction_id=transaction_id if supported else None,
+                ),
+                lambda page_url: self._update_income(
+                    page_url, entry, owner, cache, transaction_id
+                ),
+            )
 
     def _extract_title(self, page: dict) -> str:
         """Extract plain text title from a Notion page."""
@@ -280,22 +603,17 @@ class NotionClient:
             match = cache.month_url(month_name)
             if match:
                 return match[1]
-            payload = {
-                "parent": {"database_id": db_id},
-                "properties": {
-                    "title": {"title": [{"text": {"content": month_name}}]}
-                },
-            }
             try:
-                data = await self._notion_post(
-                    "https://api.notion.com/v1/pages", json=payload,
-                )
-                url = data["url"]
+                url = await self._create_relation_page(db_id, month_name, "month")
+                if url is None:
+                    return None
                 cache.months[month_name] = url
                 log.info("Notion WRITE auto-create month: %s → %s", month_name, url)
                 return url
-            except Exception as e:
-                log.warning("Failed to auto-create month page %s: %s", month_name, e)
+            except RuntimeError:
+                raise
+            except Exception:
+                log.exception("Failed to reconcile auto-created month page %s", month_name)
                 return None
 
     async def _ensure_year(self, year_str: str, cache: NotionCache) -> str | None:
@@ -310,22 +628,17 @@ class NotionClient:
             match = cache.year_url(year_str)
             if match:
                 return match[1]
-            payload = {
-                "parent": {"database_id": db_id},
-                "properties": {
-                    "title": {"title": [{"text": {"content": year_str}}]}
-                },
-            }
             try:
-                data = await self._notion_post(
-                    "https://api.notion.com/v1/pages", json=payload,
-                )
-                url = data["url"]
+                url = await self._create_relation_page(db_id, year_str, "year")
+                if url is None:
+                    return None
                 cache.years[year_str] = url
                 log.info("Notion WRITE auto-create year: %s → %s", year_str, url)
                 return url
-            except Exception as e:
-                log.warning("Failed to auto-create year page %s: %s", year_str, e)
+            except RuntimeError:
+                raise
+            except Exception:
+                log.exception("Failed to reconcile auto-created year page %s", year_str)
                 return None
 
     async def log_expense(
@@ -334,6 +647,7 @@ class NotionClient:
         owner: str,
         cache: NotionCache,
         recurring_page_url: str | None = None,
+        transaction_id: str | None = None,
     ) -> str:
         """
         Create a new expense entry in Notion. Returns the page URL.
@@ -357,6 +671,10 @@ class NotionClient:
             "Amount": {"number": entry.amount},
             "Date of Expense": {"date": {"start": entry.date}},
         }
+        if transaction_id:
+            properties[TRANSACTION_ID_PROPERTY] = {
+                "rich_text": [{"text": {"content": transaction_id}}]
+            }
 
         if subcategory_match:
             _, sub_url = subcategory_match
@@ -402,7 +720,7 @@ class NotionClient:
         }
 
         data = await self._notion_post(
-            "https://api.notion.com/v1/pages", json=payload,
+            "https://api.notion.com/v1/pages", json=payload, attempts=1,
         )
         log.info(
             "Notion WRITE expense: [%s] %s Rp %.0f → %s",
@@ -415,6 +733,7 @@ class NotionClient:
         entry: IncomeEntry,
         owner: str,
         cache: NotionCache,
+        transaction_id: str | None = None,
     ) -> str:
         """Create a new income entry in Notion. Returns the page URL."""
         entry.date = _coerce_date(entry.date)
@@ -433,6 +752,10 @@ class NotionClient:
             "Amount": {"number": entry.amount},
             "Date of Income": {"date": {"start": entry.date}},
         }
+        if transaction_id:
+            properties[TRANSACTION_ID_PROPERTY] = {
+                "rich_text": [{"text": {"content": transaction_id}}]
+            }
 
         if subcategory_match:
             _, sub_url = subcategory_match
@@ -466,7 +789,7 @@ class NotionClient:
             "properties": properties,
         }
         data = await self._notion_post(
-            "https://api.notion.com/v1/pages", json=payload,
+            "https://api.notion.com/v1/pages", json=payload, attempts=1,
         )
         page_url = data["url"]
         log.info("Notion WRITE income: [%s] %s Rp %.0f → %s", owner, entry.description, entry.amount, page_url)
@@ -511,11 +834,47 @@ class NotionClient:
 
     async def archive_page(self, page_id: str) -> None:
         """Archive (soft-delete) a Notion page by ID. Used for undo."""
-        await self._notion_patch(
-            f"https://api.notion.com/v1/pages/{page_id}",
-            {"archived": True},
-        )
+        try:
+            await self._notion_patch(
+                f"https://api.notion.com/v1/pages/{_url_to_id(page_id)}",
+                {"archived": True},
+            )
+        except httpx.HTTPStatusError as exc:
+            # A retry may race with a successful archive.  Notion no longer
+            # returns archived pages from normal queries, so a missing page is
+            # already in the desired terminal state.
+            if exc.response.status_code != 404:
+                raise
+            log.info("Notion page %s was already archived or deleted", page_id)
         log.info("Notion WRITE archive page: %s", page_id)
+
+    async def archive_transaction(
+        self,
+        kind: str,
+        transaction_id: str,
+        notion_page_id: str | None = None,
+    ) -> str | None:
+        """Archive the Notion page for a voided local transaction.
+
+        Prefer the page ID persisted by the outbox delivery.  If it is absent
+        (for example, an older ledger row), find the canonical page by the
+        stable Transaction ID property.  A missing page is a successful no-op,
+        making retries idempotent.
+        """
+        if notion_page_id:
+            await self.archive_page(notion_page_id)
+            return notion_page_id
+        db_key = {"expense": "expenses_ds", "income": "income_ds"}.get(kind)
+        if db_key is None:
+            raise ValueError(f"unsupported Notion transaction kind: {kind}")
+        page_url, _supported = await self._find_by_transaction_id(
+            self._db_ids[db_key], transaction_id
+        )
+        if not page_url:
+            log.info("No Notion page found for voided transaction %s", transaction_id)
+            return None
+        await self.archive_page(page_url)
+        return _url_to_id(page_url)
 
     async def update_expense_title(self, page_id: str, description: str, owner: str) -> None:
         await self._notion_patch(

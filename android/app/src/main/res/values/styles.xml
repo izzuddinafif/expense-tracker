@@ -1,0 +1,1 @@
+<resources><style name="Theme.Ledgerly" parent="android:style/Theme.Material.NoActionBar"><item name="android:fontFamily">sans</item><item name="android:colorAccent">#67E8A5</item><item name="android:navigationBarColor">#0B0F0E</item><item name="android:statusBarColor">#0B0F0E</item><item name="android:windowLightStatusBar">false</item></style></resources>

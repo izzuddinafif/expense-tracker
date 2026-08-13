@@ -24,6 +24,7 @@ import imaplib
 import logging
 import re
 import time
+from email.utils import parseaddr
 from datetime import date, timedelta
 from html.parser import HTMLParser
 from typing import Callable
@@ -122,6 +123,14 @@ def html_to_text(html: str) -> str:
 
 # ── EmailWatcher ───────────────────────────────────────────────────────────────
 
+class RetryableEmailError(RuntimeError):
+    """A message-specific failure that should be retried with a bounded budget."""
+
+    def __init__(self, stage: str, message: str) -> None:
+        super().__init__(message)
+        self.stage = stage
+
+
 class EmailWatcher:
     """
     Background task that polls Gmail via IMAP every `interval` seconds,
@@ -146,6 +155,9 @@ class EmailWatcher:
                             called after every auto-logged expense/admin-fee with page details
         pending_since     : optional dict[int, float] for tracking when pending expenses are created
         alert_fn          : async fn(text) that broadcasts to all users
+        budget_reporter   : optional async fn(user_id, YYYY-MM) returning local
+                            budget usage rows
+        reporting         : optional authoritative SQLite reporting service
     """
 
     def __init__(
@@ -162,6 +174,8 @@ class EmailWatcher:
         on_save_fn=None,
         pending_since=None,
         alert_fn=None,
+        budget_reporter=None,
+        reporting=None,
     ):
         self._config = config
         self._db = db
@@ -175,6 +189,8 @@ class EmailWatcher:
         self._on_save_fn = on_save_fn
         self._pending_since = pending_since
         self._alert_fn = alert_fn
+        self._budget_reporter = budget_reporter
+        self._reporting = reporting
         self._imap: imaplib.IMAP4_SSL | None = None
         self._last_imap_error: str | None = None
         self._imap_fail_streak: int = 0
@@ -182,6 +198,123 @@ class EmailWatcher:
         self._last_poll_time: float | None = None
         self._total_processed: int = 0
         self._start_time: float = time.time()
+
+    async def _duplicate_descriptions(
+        self,
+        user_id: int,
+        notion,
+        owner: str,
+        amount: float,
+        occurred_on: str,
+        *,
+        kind: str = "expense",
+    ) -> list[str]:
+        if self._reporting is not None:
+            return await self._reporting.duplicate_descriptions(
+                user_id,
+                amount,
+                occurred_on,
+                kind=kind,
+            )
+        if kind == "income":
+            return await notion.fetch_duplicates(
+                owner,
+                amount,
+                occurred_on,
+                db_key="income_ds",
+            )
+        return await notion.fetch_duplicates(owner, amount, occurred_on)
+
+    async def _similar_by_merchant(
+        self,
+        user_id: int,
+        notion,
+        owner: str,
+        merchant: str,
+        amount: float,
+        occurred_on: str,
+        cache,
+    ) -> list[dict]:
+        if self._reporting is not None:
+            return await self._reporting.similar_by_merchant(
+                user_id,
+                merchant,
+                amount,
+                occurred_on,
+            )
+        return await notion.find_similar_by_merchant(
+            owner,
+            merchant,
+            amount,
+            occurred_on,
+            cache,
+        )
+
+    async def _record_message_failure(
+        self, uid: str, sender: str, stage: str, error: object
+    ) -> None:
+        """Persist a retryable message failure without breaking the poll batch."""
+        is_processed = getattr(self._db, "is_processed", None)
+        if is_processed is not None and await is_processed(uid):
+            log.warning(
+                "Ignoring post-commit email side-effect failure [%s] at %s: %s",
+                uid,
+                stage,
+                error,
+            )
+            return
+
+        record = getattr(self._db, "record_email_processing_failure", None)
+        if record is None:
+            return
+        state = await record(
+            uid,
+            sender,
+            f"{stage}: {type(error).__name__}: {error}",
+        )
+        transitioned = state["attempt_count"] == 3 or (
+            state["status"] == "terminal"
+            and state.get("terminal_at") == state.get("last_failed_at")
+        )
+        if transitioned:
+            await self._alert(
+                "⚠️ *Email processing issue*\n"
+                f"UID `{uid}` is now *{state['status']}* after "
+                f"{state['attempt_count']} attempts.\n"
+                f"`{str(error)[:120]}`"
+            )
+
+    async def _reject_message(self, uid: str, sender: str, reason: str) -> None:
+        """Record deterministic security rejects and exclude the UID from retries."""
+        record = getattr(self._db, "record_email_processing_failure", None)
+        if record is not None:
+            try:
+                await record(uid, sender, reason)
+            except Exception:
+                log.exception("Could not record rejected email [%s]", uid)
+        await self._db.mark_processed(uid, sender)
+
+    async def _process_one(
+        self, uid: str, sender: str, subject: str, body: str, auth_results: str | None = None
+    ) -> None:
+        """Isolate and persist one message failure so later messages continue."""
+        try:
+            await self._process(uid, sender, subject, body, auth_results)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.exception("Email processing failed [%s]", uid)
+            try:
+                await self._record_message_failure(
+                    uid,
+                    sender,
+                    getattr(exc, "stage", "unexpected"),
+                    exc,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Could not persist email failure [%s]", uid)
 
     # ── IMAP (synchronous — called via asyncio.to_thread) ──────────────────────
 
@@ -230,7 +363,7 @@ class EmailWatcher:
                 pass
             self._imap = None
 
-    def _imap_fetch(self, processed_uids: set[str]) -> list[tuple[str, str, str, str]]:
+    def _imap_fetch(self, processed_uids: set[str]) -> list[tuple[str, str, str, str, str]]:
         """
         Connect to Gmail IMAP and fetch unprocessed emails from bank senders.
         Returns list of (uid, sender_email, subject, body_text).
@@ -255,7 +388,7 @@ class EmailWatcher:
             self._last_imap_error = str(last_error)
         return []
 
-    def _imap_fetch_once(self, processed_uids: set[str]) -> list[tuple[str, str, str, str]]:
+    def _imap_fetch_once(self, processed_uids: set[str]) -> list[tuple[str, str, str, str, str]]:
         results = []
         imap = self._ensure_imap()
 
@@ -298,9 +431,17 @@ class EmailWatcher:
 
                 raw = msg_data[0][1]
                 msg = email.message_from_bytes(raw)
+                header_sender = parseaddr(msg.get("From", ""))[1].strip().lower()
+                if header_sender != sender.lower():
+                    log.warning("Ignoring bank email with mismatched From header [%s]: %s", uid, header_sender)
+                    # Carry a deterministic auth failure marker through the async
+                    # processor so this UID is recorded/marked, not refetched forever.
+                    results.append((uid, sender, "", "", "invalid-from-header"))
+                    continue
                 subject = self._decode_header(msg.get("Subject", ""))
                 body = self._extract_body(msg)
-                results.append((uid, sender, subject, body))
+                auth_results = msg.get("Authentication-Results", "")
+                results.append((uid, sender, subject, body, auth_results))
 
         return results
 
@@ -342,11 +483,22 @@ class EmailWatcher:
 
         return html_to_text(html_body) if html_body else text_body.strip()
 
-    async def _check_budget_alert(self, entry: ExpenseEntry, notion=None, cache=None) -> None:
+    async def _check_budget_alert(
+        self,
+        entry: ExpenseEntry,
+        user_id: int | None = None,
+        notion=None,
+        cache=None,
+    ) -> None:
         try:
-            notion = notion or self._notion
             cache = cache or self._cache_getter()
-            budgets = await notion.fetch_budgets(cache)
+            if self._budget_reporter is not None and user_id is not None:
+                budgets = await self._budget_reporter(user_id, entry.date[:7])
+            else:
+                # Backward-compatible fallback for deployments/tests that have
+                # not yet wired the authoritative local budget store.
+                notion = notion or self._notion
+                budgets = await notion.fetch_budgets(cache)
             # The model may return an abbreviated or slightly different subcategory name
             # (e.g., "Cafe" vs "Cafe/Coffee Shop"). Resolve it to the canonical cache name
             # before comparing against the budget's subcategory list.
@@ -356,7 +508,17 @@ class EmailWatcher:
                 if matched is not None:
                     canonical = matched[0]
             for b in budgets:
-                if canonical not in b["subcategories"]:
+                labels = b.get("subcategories") or [
+                    b.get("category") or b.get("name") or ""
+                ]
+                canonical_key = canonical.strip().casefold()
+                if not any(
+                    canonical_key == str(label).strip().casefold()
+                    or canonical_key in str(label).strip().casefold()
+                    or str(label).strip().casefold() in canonical_key
+                    for label in labels
+                    if str(label).strip()
+                ):
                     continue
                 pct = b["percentage"]
                 if pct >= 100:
@@ -544,7 +706,19 @@ class EmailWatcher:
 
     # ── Email processing ────────────────────────────────────────────────────────
 
-    async def _process(self, uid: str, sender: str, subject: str, body: str) -> None:
+    async def _process(self, uid: str, sender: str, subject: str, body: str, auth_results: str | None = None) -> None:
+        if auth_results is not None:
+            if sender.strip().lower() not in {s.lower() for s in BANK_SENDERS}:
+                await self._reject_message(uid, sender, "authentication: sender is not an authorized bank address")
+                return
+            auth = auth_results.lower()
+            bank_domain = sender.rsplit("@", 1)[-1].strip().lower()
+            dmarc_ok = bool(re.search(r"\bdmarc\s*=\s*pass\b", auth))
+            dkim_ok = bool(re.search(r"\bdkim\s*=\s*pass\b[^;]*\bheader\.d=[\w.-]*" + re.escape(bank_domain), auth))
+            spf_ok = bool(re.search(r"\bspf\s*=\s*pass\b[^;]*(?:smtp\.mailfrom|envelope-from)=[^;@\s]+@?" + re.escape(bank_domain), auth))
+            if not dmarc_ok or not (dkim_ok or spf_ok):
+                await self._reject_message(uid, sender, "authentication: DMARC pass plus aligned DKIM/SPF required")
+                return
         subject_lower = subject.lower()
         if any(kw in subject_lower for kw in SKIP_SUBJECT_KEYWORDS):
             log.info(f"Skipping failed-transaction email [{uid}]: {subject}")
@@ -553,6 +727,10 @@ class EmailWatcher:
 
         cache = self._cache_getter()
         today = date.today().isoformat()
+
+        # Resolve the model's account against the configured cache exactly (case/
+        # whitespace normalized). Never route an absent or ambiguous account to the
+        # default owner.
 
         try:
             if _is_jago_pocket_transfer(sender, subject, body):
@@ -569,26 +747,33 @@ class EmailWatcher:
             )
         except Exception as e:
             log.error(f"parse_bank_email failed for [{uid}]: {e}")
-            return  # don't mark processed — retry next cycle
+            raise RetryableEmailError("parse", str(e)) from e
 
         if tx.type == "skip":
             log.info(f"AI skipped [{uid}]: {tx.skip_reason}")
             await self._db.mark_processed(uid, sender)
             return
 
+        account_key = (tx.account or "").strip().casefold()
+        account_matches = [name for name in cache.accounts if name.strip().casefold() == account_key]
+        if len(account_matches) != 1:
+            await self._reject_message(uid, sender, "routing: missing or ambiguous account")
+            return
+        tx.account = account_matches[0]
+
         # ── Multi-user routing ───────────────────────────────────────────────────
         resolved = await self._resolve_user(tx.account)
         if resolved:
             target_id, target_owner, target_notion, target_cache = resolved
         else:
-            target_id = self._owner_id
-            target_owner = self._owner_name
-            target_notion = self._notion
-            target_cache = cache
+            await self._reject_message(uid, sender, "routing: account owner not found")
+            return
 
         if target_id is None:
             log.warning("[email] No target Telegram user for [%s] account=%r — retrying next cycle", uid, tx.account)
-            return
+            raise RetryableEmailError(
+                "routing", f"no target user for account {tx.account!r}"
+            )
 
         try:
             if tx.type == "expense":
@@ -640,6 +825,10 @@ class EmailWatcher:
                         await self._db.set_pending_recurring(
                             target_id, entry, recurring["page_url"], uid, sender,
                         )
+                        # The durable pending workflow now owns this email.
+                        # Exclude the UID before best-effort notification so a
+                        # later poll cannot enqueue the same follow-up again.
+                        await self._db.mark_processed(uid, sender)
                         sub_label = target_cache.closest_subcategory(entry.subcategory)
                         sub_text = sub_label[0] if sub_label else entry.subcategory
                         acc_label = target_cache.closest_account(entry.account)
@@ -659,7 +848,6 @@ class EmailWatcher:
                             f"[email] Recurring Rp {tx.amount:,.0f} ({recurring['name']}) "
                             f"— waiting for user confirmation via Simpan/Edit/Batal"
                         )
-                        # Don't mark_processed yet — wait for user confirm/cancel
                         return
                     else:
                         log.info(
@@ -668,7 +856,13 @@ class EmailWatcher:
                         )
                         handled = await self._ask_debit_merchant(tx, user_id=target_id)
                         if not handled:
-                            return  # notify failed — don't mark processed, retry next cycle
+                            raise RetryableEmailError(
+                                "notification", "merchant follow-up could not be delivered"
+                            )
+                        # _ask_debit_merchant durably stored either the active
+                        # follow-up, a normal pending expense, or the FIFO item.
+                        await self._db.mark_processed(uid, sender)
+                        return
 
                 else:
                     entry = ExpenseEntry(
@@ -680,121 +874,57 @@ class EmailWatcher:
                         confidence=0.95,
                         merchant=tx.merchant,
                     )
-                    # Duplicate check — only skip if the pending manual entry is clearly the same
-                    # transaction. Amount+date alone is not enough: unrelated manual/query mistakes can
-                    # collide and must not cause a real bank email to be skipped.
-                    pending = await self._db.get_pending_expense(target_id)
-                    if pending and pending.amount == tx.amount and pending.date == tx.date:
-                        pending_desc = (pending.description or "").strip().lower()
-                        tx_desc = (tx.description or "").strip().lower()
-                        pending_merchant = (pending.merchant or "").strip().lower()
-                        tx_merchant = (tx.merchant or "").strip().lower()
-                        same_pending_tx = bool(
-                            (pending_merchant and tx_merchant and pending_merchant == tx_merchant)
-                            or (pending_desc and tx_desc and (pending_desc in tx_desc or tx_desc in pending_desc))
-                        )
-                        if same_pending_tx:
-                            log.info(
-                                f"[email] Pending expense clearly matches [{uid}]: "
-                                f"{tx.description} Rp {tx.amount:,.0f} — skipping email duplicate"
-                            )
-                            # Terminal skip: persist before notifying so Telegram delays/failures
-                            # cannot make the same email re-alert every poll.
-                            await self._db.mark_processed(uid, sender)
-                            await self._notify(
-                                f"📧 *Email — sudah pending*\n"
-                                f"📝 {tx.description}\n"
-                                f"💰 Rp {tx.amount:,.0f}\n"
-                                f"📅 {tx.date}\n\n"
-                                f"Transaksi ini sudah tercatat manual dan menunggu konfirmasi.",
-                                user_id=target_id,
-                            )
-                            return
-                        log.warning(
-                            f"[email] Pending amount/date collision ignored [{uid}]: "
-                            f"pending={pending.description!r}, email={tx.description!r}, "
-                            f"amount=Rp {tx.amount:,.0f}, date={tx.date}"
-                        )
-                    try:
-                        matches = await target_notion.fetch_duplicates(target_owner, tx.amount, tx.date)
-                        if matches:
-                            is_dup = await self._agent.check_duplicate(
-                                matches, tx.description, tx.amount, tx.date,
-                                new_merchant=tx.merchant,
-                            )
-                            if is_dup:
-                                log.info(f"[email] Duplicate skipped [{uid}]: {tx.description} Rp {tx.amount:,.0f}")
-                                # Persist the terminal decision before notifying. Telegram/network
-                                # failures should not make a confirmed duplicate re-alert every poll.
-                                await self._db.mark_processed(uid, sender)
-                                subcat_match = target_cache.closest_subcategory(tx.subcategory)
-                                sub_text = subcat_match[0] if subcat_match else "📦 Miscellaneous"
-                                merchant_line = f"🏪 {tx.merchant}\n" if tx.merchant else ""
-                                await self._notify(
-                                    f"📧 *Email — duplikat, dilewati*\n"
-                                    f"📝 {tx.description}\n"
-                                    f"💰 Rp {tx.amount:,.0f}\n"
-                                    f"📅 {tx.date}\n"
-                                    f"{merchant_line}"
-                                    f"🏷 {sub_text}\n"
-                                    f"🏦 {tx.account}\n\n"
-                                    f"Transaksi ini sudah tercatat sebelumnya.",
-                                    user_id=target_id,
-                                )
-                                return
-                    except Exception as e:
-                        log.warning(f"[email] Duplicate check failed for [{uid}]: {e}")
-
-                    # Merchant-based prediction: check for same merchant + similar amount
-                    if tx.merchant:
-                        try:
-                            similar = await target_notion.find_similar_by_merchant(
-                                target_owner, tx.merchant, tx.amount, tx.date, target_cache
-                            )
-                            if similar:
-                                prev = similar[0]
-                                log.info(
-                                    f"[email] Merchant match [{uid}]: {tx.merchant} "
-                                    f"Rp {tx.amount:,.0f} — previously Rp {prev['amount']:,.0f} on {prev['date']}"
-                                )
-                        except Exception as e:
-                            log.warning(f"[email] Merchant similarity check failed [{uid}]: {e}")
-
-                    url = await target_notion.log_expense(entry, target_owner, target_cache)
-                    # The Notion write is already durable. Mark the email processed before
-                    # best-effort side effects (budget task, local edit/undo state, Telegram)
-                    # so a later side-effect failure cannot create a duplicate Notion entry
-                    # on the next IMAP poll.
+                    if not float(entry.amount).is_integer():
+                        raise ValueError("IDR ledger amounts must be whole rupiah")
+                    _, created = await self._db.create_confirmed_external_transaction(
+                        target_id,
+                        kind="expense",
+                        amount_idr=int(entry.amount),
+                        occurred_on=entry.date,
+                        description=entry.description,
+                        merchant=entry.merchant,
+                        subcategory=entry.subcategory,
+                        account=entry.account,
+                        source="bank_email",
+                        source_ref=f"gmail:{uid}:expense",
+                        metadata={"email_uid": uid, "sender": sender},
+                    )
+                    # The SQLite ledger/outbox commit is durable. Mark the email
+                    # processed before best-effort budget and Telegram side effects.
                     await self._db.mark_processed(uid, sender)
-                    alert_task = asyncio.create_task(self._check_budget_alert(entry, notion=target_notion, cache=target_cache))
-                    alert_task.add_done_callback(lambda t: t.exception() and log.warning(f"Budget alert task failed: {t.exception()}"))
-                    if self._on_save_fn:
-                        await self._on_save_fn(
-                            target_id, url, tx.description, tx.amount, tx.date, tx.subcategory, tx.merchant,
+                    alert_task = asyncio.create_task(
+                        self._check_budget_alert(
+                            entry,
+                            user_id=target_id,
+                            notion=target_notion,
+                            cache=target_cache,
                         )
+                    )
+                    alert_task.add_done_callback(lambda t: t.exception() and log.warning(f"Budget alert task failed: {t.exception()}"))
                     subcat_match = target_cache.closest_subcategory(tx.subcategory)
                     acc_match = target_cache.closest_account(tx.account)
                     log.info(
-                        f"[email→Notion] {tx.description} "
-                        f"Rp {tx.amount:,.0f} [{tx.subcategory}]"
+                        f"[email→ledger] {tx.description} "
+                        f"Rp {tx.amount:,.0f} [{tx.subcategory}] created={created}"
                     )
                     sub_text = subcat_match[0] if subcat_match else "📦 Miscellaneous"
                     acc_text = acc_match[0] if acc_match else f"❓ {tx.account}"
                     merchant_line = f"🏪 {tx.merchant}\n" if tx.merchant else ""
-                    await self._notify_with_markup(
+                    await self._notify(
                         f"📧 *Otomatis tercatat dari email*\n"
                         f"📝 {tx.description}\n"
                         f"💰 Rp {tx.amount:,.0f}\n"
                         f"📅 {tx.date}\n"
                         f"{merchant_line}"
                         f"🏷 {sub_text}\n"
-                        f"🏦 {acc_text}\n"
-                        f"[Lihat di Notion]({url})",
-                        make_email_edit_keyboard(target_id),
+                        f"🏦 {acc_text}\n\n"
+                        f"Sinkronisasi Notion diantrikan.",
                         user_id=target_id,
                     )
 
             elif tx.type == "self_transfer":
+                if not float(tx.amount).is_integer() or not float(tx.admin_fee).is_integer():
+                    raise ValueError("IDR ledger amounts must be whole rupiah")
                 source = tx.source_account or tx.account or "rekening sumber"
                 dest = tx.destination_account or tx.recipient_bank or "rekening tujuan"
                 log.info(f"[email] Self-transfer Rp {tx.amount:,.0f} {source} → {dest}")
@@ -810,29 +940,25 @@ class EmailWatcher:
                     merchant="",
                 )
                 out_url = None
-                out_duplicate = False
                 try:
-                    out_matches = await target_notion.fetch_duplicates(target_owner, tx.amount, tx.date)
-                    if out_matches:
-                        is_out_dup = await self._agent.check_duplicate(
-                            out_matches, transfer_out.description, tx.amount, tx.date,
-                            new_merchant="",
-                        )
-                        if is_out_dup:
-                            out_duplicate = True
-                            log.info(f"[email] Transfer-out duplicate skipped [{uid}]: Rp {tx.amount:,.0f}")
-                        else:
-                            out_url = await target_notion.log_expense(transfer_out, target_owner, target_cache)
-                    else:
-                        out_url = await target_notion.log_expense(transfer_out, target_owner, target_cache)
+                    out_row, _ = await self._db.create_confirmed_external_transaction(
+                        target_id,
+                        kind="expense",
+                        amount_idr=int(transfer_out.amount),
+                        occurred_on=transfer_out.date,
+                        description=transfer_out.description,
+                        subcategory=transfer_out.subcategory,
+                        account=transfer_out.account,
+                        source="bank_email",
+                        source_ref=f"gmail:{uid}:transfer-out",
+                        metadata={"email_uid": uid, "sender": sender, "component": "transfer-out"},
+                    )
+                    out_url = out_row["id"]
                 except Exception as e:
                     log.warning(f"[email] Transfer-out logging failed: {e}")
                     raise
-                if out_url and self._on_save_fn:
-                    await self._on_save_fn(
-                        target_id, out_url, transfer_out.description, transfer_out.amount, transfer_out.date, transfer_out.subcategory, transfer_out.merchant,
-                    )
-                    log.info(f"[email→Notion] Transfer-out Rp {tx.amount:,.0f} logged")
+                if out_url:
+                    log.info(f"[email→ledger] Transfer-out Rp {tx.amount:,.0f} queued")
 
                 # Record the incoming transfer to the destination account.
                 income_subcategory = tx.income_subcategory or tx.subcategory or "Transfer"
@@ -845,33 +971,28 @@ class EmailWatcher:
                     confidence=0.95,
                 )
                 in_url = None
-                in_duplicate = False
                 try:
-                    income_matches = await target_notion.fetch_duplicates(target_owner, tx.amount, tx.date, db_key="income_ds")
-                    if income_matches:
-                        is_in_dup = await self._agent.check_duplicate(
-                            income_matches, transfer_in.description, tx.amount, tx.date,
-                            new_merchant="",
-                        )
-                        if is_in_dup:
-                            in_duplicate = True
-                            log.info(f"[email] Transfer-in duplicate skipped [{uid}]: Rp {tx.amount:,.0f}")
-                        else:
-                            in_url = await target_notion.log_income(transfer_in, target_owner, target_cache)
-                    else:
-                        in_url = await target_notion.log_income(transfer_in, target_owner, target_cache)
+                    in_row, _ = await self._db.create_confirmed_external_transaction(
+                        target_id,
+                        kind="income",
+                        amount_idr=int(transfer_in.amount),
+                        occurred_on=transfer_in.date,
+                        description=transfer_in.description,
+                        subcategory=transfer_in.subcategory,
+                        account=transfer_in.account,
+                        source="bank_email",
+                        source_ref=f"gmail:{uid}:transfer-in",
+                        metadata={"email_uid": uid, "sender": sender, "component": "transfer-in"},
+                    )
+                    in_url = in_row["id"]
                 except Exception as e:
                     log.warning(f"[email] Transfer-in logging failed: {e}")
                     raise
-                if in_url and self._on_save_fn:
-                    await self._on_save_fn(
-                        target_id, in_url, transfer_in.description, transfer_in.amount, transfer_in.date, transfer_in.subcategory, "",
-                    )
-                    log.info(f"[email→Notion] Transfer-in Rp {tx.amount:,.0f} logged")
+                if in_url:
+                    log.info(f"[email→ledger] Transfer-in Rp {tx.amount:,.0f} queued")
 
                 # Record the admin fee separately, if any.
                 fee_url = None
-                fee_duplicate = False
                 if tx.admin_fee > 0:
                     fee_entry = ExpenseEntry(
                         description=format_self_transfer_label(source, dest, "fee"),
@@ -883,53 +1004,32 @@ class EmailWatcher:
                         merchant="",
                     )
                     try:
-                        fee_matches = await target_notion.fetch_duplicates(target_owner, tx.admin_fee, tx.date)
-                        if fee_matches:
-                            is_fee_dup = await self._agent.check_duplicate(
-                                fee_matches, fee_entry.description, tx.admin_fee, tx.date,
-                                new_merchant="",
-                            )
-                            if is_fee_dup:
-                                fee_duplicate = True
-                                log.info(f"[email] Admin fee duplicate skipped [{uid}]: Rp {tx.admin_fee:,.0f}")
-                            else:
-                                fee_url = await target_notion.log_expense(fee_entry, target_owner, target_cache)
-                        else:
-                            fee_url = await target_notion.log_expense(fee_entry, target_owner, target_cache)
+                        fee_row, _ = await self._db.create_confirmed_external_transaction(
+                            target_id,
+                            kind="expense",
+                            amount_idr=int(fee_entry.amount),
+                            occurred_on=fee_entry.date,
+                            description=fee_entry.description,
+                            subcategory=fee_entry.subcategory,
+                            account=fee_entry.account,
+                            source="bank_email",
+                            source_ref=f"gmail:{uid}:fee",
+                            metadata={"email_uid": uid, "sender": sender, "component": "fee"},
+                        )
+                        fee_url = fee_row["id"]
                     except Exception as e:
                         log.warning(f"[email] Admin fee logging failed: {e}")
                         raise
-                    if fee_url and self._on_save_fn:
-                        await self._on_save_fn(
-                            target_id, fee_url, fee_entry.description, fee_entry.amount, fee_entry.date, fee_entry.subcategory,
-                        )
-                        log.info(f"[email→Notion] Admin fee Rp {tx.admin_fee:,.0f} logged")
+                    if fee_url:
+                        log.info(f"[email→ledger] Admin fee Rp {tx.admin_fee:,.0f} queued")
 
-                # All self-transfer Notion writes/duplicate decisions above are durable.
+                # All self-transfer ledger writes above are durable.
                 # Mark the email processed before Telegram summary side effects so a
                 # notification delay/failure cannot make the next poll write duplicates.
                 await self._db.mark_processed(uid, sender)
 
                 if not any([out_url, in_url, fee_url]):
-                    duplicate_bits = []
-                    if out_duplicate:
-                        duplicate_bits.append("keluar")
-                    if in_duplicate:
-                        duplicate_bits.append("masuk")
-                    if fee_duplicate:
-                        duplicate_bits.append("biaya admin")
-                    if duplicate_bits:
-                        fee_line = f"\n💸 Biaya admin: Rp {tx.admin_fee:,.0f}" if tx.admin_fee > 0 else ""
-                        await self._notify(
-                            f"📧 *Transfer antar rekening duplikat, dilewati*\n"
-                            f"💰 Rp {tx.amount:,.0f}\n"
-                            f"📅 {tx.date}\n"
-                            f"🏦 {source} → {dest}{fee_line}\n"
-                            f"Bagian yang sudah ada: {', '.join(duplicate_bits)}.",
-                            user_id=target_id,
-                        )
-                    else:
-                        log.warning(f"[email] Self-transfer [{uid}] produced no Notion writes and no duplicates")
+                    log.warning(f"[email] Self-transfer [{uid}] produced no ledger writes")
                 else:
                     summary_lines = [
                         f"📧 *Transfer antar rekening* Rp {tx.amount:,.0f}",
@@ -938,14 +1038,13 @@ class EmailWatcher:
                     if tx.admin_fee > 0:
                         summary_lines.append(f"💸 Biaya admin: Rp {tx.admin_fee:,.0f}")
                     if out_url:
-                        summary_lines.append(f"➡️ [Keluar]({out_url})")
+                        summary_lines.append("➡️ Keluar: sinkronisasi diantrikan")
                     if in_url:
-                        summary_lines.append(f"⬅️ [Masuk]({in_url})")
+                        summary_lines.append("⬅️ Masuk: sinkronisasi diantrikan")
                     if fee_url:
-                        summary_lines.append(f"🧾 [Biaya admin]({fee_url})")
-                    await self._notify_with_markup(
+                        summary_lines.append("🧾 Biaya admin: sinkronisasi diantrikan")
+                    await self._notify(
                         "\n".join(summary_lines),
-                        make_email_edit_keyboard(target_id),
                         user_id=target_id,
                     )
 
@@ -953,18 +1052,13 @@ class EmailWatcher:
                 log.warning(
                     f"Unknown EmailTransaction.type '{tx.type}' for [{uid}] — skipping"
                 )
-                return  # don't mark processed; let a future model fix surface it
+                raise RetryableEmailError(
+                    "parse", f"unknown transaction type {tx.type!r}"
+                )
 
         except Exception as e:
-            log.error(f"Failed to log email [{uid}] to Notion: {e}")
-            self._notion_fail_streak += 1
-            if self._notion_fail_streak == 3 or self._notion_fail_streak % 5 == 0:
-                await self._alert(
-                    f"⚠️ *Email watcher: gagal menyimpan ke Notion*\n"
-                    f"Gagal {self._notion_fail_streak}x berturut-turut.\n"
-                    f"`{type(e).__name__}: {str(e)[:120]}`"
-                )
-            return  # don't mark processed — retry next cycle
+            log.error(f"Failed to save email [{uid}] to the ledger: {e}")
+            raise RetryableEmailError("ledger", str(e)) from e
 
         self._notion_fail_streak = 0
 
@@ -982,7 +1076,12 @@ class EmailWatcher:
                     log.info(f"Pruned {pruned} processed email(s) older than 90 days")
 
                 log.info("Email watcher: fetching processed UIDs")
-                processed = await self._db.get_all_processed_uids()
+                excluded = getattr(self._db, "get_email_excluded_uids", None)
+                processed = (
+                    await excluded()
+                    if excluded is not None
+                    else await self._db.get_all_processed_uids()
+                )
                 log.info(f"Email watcher: {len(processed)} processed UIDs")
                 self._last_imap_error = None
                 try:
@@ -1020,18 +1119,53 @@ class EmailWatcher:
 
                 if emails:
                     log.info(f"Found {len(emails)} new bank email(s) to process")
-                for uid, sender, subject, body in emails:
-                    await self._process(uid, sender, subject, body)
+                for item in emails:
+                    uid, sender, subject, body = item[:4]
+                    auth_results = item[4] if len(item) > 4 else None
+                    await self._process_one(uid, sender, subject, body, auth_results)
                     self._total_processed += 1
                 self._last_poll_time = time.time()
+                failure_summary_fn = getattr(
+                    self._db, "get_email_failure_summary", None
+                )
+                failure_summary = (
+                    await failure_summary_fn()
+                    if failure_summary_fn is not None
+                    else {"retrying": 0, "degraded": 0, "terminal": 0}
+                )
+                record_health = getattr(self._db, "record_operational_state", None)
+                if record_health is not None:
+                    await record_health(
+                        "gmail",
+                        success=self._last_imap_error is None,
+                        error=self._last_imap_error,
+                        metadata={
+                            "messages_found": len(emails),
+                            "total_processed": self._total_processed,
+                            "poll_interval_seconds": interval,
+                            "processing_failures": failure_summary,
+                        },
+                    )
             except Exception as e:
                 log.error(f"Email watcher cycle error: {e}")
+                record_health = getattr(self._db, "record_operational_state", None)
+                if record_health is not None:
+                    await record_health(
+                        "gmail",
+                        success=False,
+                        error=f"{type(e).__name__}: {e}",
+                    )
 
             await asyncio.sleep(interval)
 
     def status_info(self) -> dict:
+        interval = getattr(self._config, "email_poll_interval", 300)
+        running = (
+            self._last_poll_time is not None
+            and time.time() - self._last_poll_time <= 2 * interval + 60
+        )
         return {
-            "running": True,
+            "running": running,
             "last_poll": self._last_poll_time,
             "uptime_seconds": time.time() - self._start_time,
             "total_processed": self._total_processed,

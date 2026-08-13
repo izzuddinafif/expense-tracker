@@ -8,6 +8,7 @@ __pycache__
 *.pyd
 .pytest_cache
 data/
+android/
 fix_notion.py
 fix_notion.sh
 *.md

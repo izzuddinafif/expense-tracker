@@ -11,6 +11,7 @@ from typing import cast
 
 import pytest
 import pytest_asyncio
+from cryptography.fernet import Fernet
 
 from models import ExpenseEntry, IncomeEntry, QueryIntent, EmailTransaction, NotionCache, _fuzzy_match, format_self_transfer_label
 from email_watcher import EmailWatcher, _is_jago_pocket_transfer
@@ -273,8 +274,9 @@ class TestNotionCache:
 # ── db.py tests (async, require SQLite) ───────────────────────────────────────
 
 @pytest_asyncio.fixture
-async def db():
+async def db(monkeypatch):
     """Create a temporary database for each test."""
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         path = f.name
     database = await Database.connect(path)
@@ -607,18 +609,22 @@ class TestEmailWatcher:
         assert watcher._last_imap_error == "imap down"
 
     @pytest.mark.asyncio
-    async def test_duplicate_email_marks_processed_before_notify(self):
+    async def test_semantic_match_still_persists_before_notify(self):
         events = []
 
         class FakeDb:
             async def get_email_owner_for_account(self, _account_name):
-                return None
+                return 981749333
 
             async def get_pending_expense(self, _user_id):
                 return None
 
             async def mark_processed(self, uid, sender):
                 events.append(("mark_processed", uid, sender))
+
+            async def create_confirmed_external_transaction(self, user_id, **kwargs):
+                events.append(("ledger", user_id, kwargs["source_ref"]))
+                return {"id": "local-tx-duplicate-looking"}, True
 
         class FakeNotion:
             async def fetch_duplicates(self, owner, amount, date):
@@ -642,15 +648,21 @@ class TestEmailWatcher:
 
         class FakeCache:
             subcategories = {}
-            accounts = {}
+            accounts = {"BSI 9400": "account-url"}
             recurring_payments = {}
 
             def closest_subcategory(self, name):
                 return (name, "subcat-url")
 
+            def closest_account(self, name):
+                return (name, "account-url")
+
         class FakeBot:
             async def send_message(self, *_args, **_kwargs):
                 events.append(("notify",))
+
+        async def user_data(_user_id):
+            return FakeNotion(), FakeCache(), "Afif"
 
         watcher = EmailWatcher(
             config=object(),
@@ -661,11 +673,13 @@ class TestEmailWatcher:
             bot=FakeBot(),
             email_owner_id=981749333,
             email_owner_name="Afif",
+            user_data_fn=user_data,
         )
 
         await watcher._process("66113", "nonereply.byondbybsi@bankbsi.co.id", "Transfer Berhasil", "body")
 
-        assert events[:2] == [
+        assert events[:3] == [
+            ("ledger", 981749333, "gmail:66113:expense"),
             ("mark_processed", "66113", "nonereply.byondbybsi@bankbsi.co.id"),
             ("notify",),
         ]
@@ -676,7 +690,7 @@ class TestEmailWatcher:
 
         class FakeDb:
             async def get_email_owner_for_account(self, _account_name):
-                return None
+                return 981749333
 
             async def get_pending_expense(self, _user_id):
                 return None
@@ -684,16 +698,16 @@ class TestEmailWatcher:
             async def mark_processed(self, uid, sender):
                 events.append(("mark_processed", uid, sender))
 
+            async def create_confirmed_external_transaction(self, user_id, **kwargs):
+                events.append(("ledger", user_id, kwargs["source_ref"]))
+                return {"id": "local-tx-1"}, True
+
         class FakeNotion:
             async def fetch_duplicates(self, owner, amount, date):
                 return []
 
             async def find_similar_by_merchant(self, *_args, **_kwargs):
                 return []
-
-            async def log_expense(self, *_args, **_kwargs):
-                events.append(("log_expense",))
-                return "https://notion.so/385c2adf84548161a518e2a4536f22b8"
 
         class FakeAgent:
             async def parse_bank_email(self, **_kwargs):
@@ -710,7 +724,7 @@ class TestEmailWatcher:
 
         class FakeCache:
             subcategories = {}
-            accounts = {}
+            accounts = {"BSI 9400": "account-url"}
             recurring_payments = {}
 
             def closest_subcategory(self, name):
@@ -722,6 +736,9 @@ class TestEmailWatcher:
         class FakeBot:
             async def send_message(self, *_args, **_kwargs):
                 events.append(("notify",))
+
+        async def user_data(_user_id):
+            return FakeNotion(), FakeCache(), "Afif"
 
         async def on_save(*_args, **_kwargs):
             events.append(("on_save",))
@@ -736,16 +753,88 @@ class TestEmailWatcher:
             email_owner_id=981749333,
             email_owner_name="Afif",
             on_save_fn=on_save,
+            user_data_fn=user_data,
         )
 
         await watcher._process("66114", "nonereply.byondbybsi@bankbsi.co.id", "Transaksi Berhasil", "body")
 
-        assert events[:4] == [
-            ("log_expense",),
+        assert events[:3] == [
+            ("ledger", 981749333, "gmail:66114:expense"),
             ("mark_processed", "66114", "nonereply.byondbybsi@bankbsi.co.id"),
-            ("on_save",),
             ("notify",),
         ]
+
+    @pytest.mark.asyncio
+    async def test_self_transfer_queues_deterministic_ledger_components(self):
+        refs = []
+        events = []
+
+        class FakeDb:
+            async def get_email_owner_for_account(self, _account_name):
+                return 981749333
+
+            async def create_confirmed_external_transaction(self, _user_id, **kwargs):
+                refs.append((kwargs["kind"], kwargs["source_ref"], kwargs["amount_idr"]))
+                return {"id": kwargs["source_ref"]}, True
+
+            async def mark_processed(self, uid, sender):
+                events.append(("processed", uid, sender))
+
+        class FakeNotion:
+            async def fetch_duplicates(self, *_args, **_kwargs):
+                return []
+
+        class FakeAgent:
+            async def parse_bank_email(self, **_kwargs):
+                return EmailTransaction(
+                    type="self_transfer",
+                    description="Transfer antar rekening",
+                    amount=500000,
+                    admin_fee=2500,
+                    date="2026-07-29",
+                    subcategory="Transfer",
+                    account="Mandiri",
+                    source_account="Mandiri",
+                    destination_account="BSI",
+                    income_subcategory="Transfer",
+                )
+
+        class FakeBot:
+            async def send_message(self, *_args, **_kwargs):
+                events.append(("notify",))
+
+        class FakeCache:
+            accounts = {"Mandiri": "account-url"}
+            recurring_payments = {}
+
+        async def user_data(_user_id):
+            return FakeNotion(), FakeCache(), "Afif"
+
+        watcher = EmailWatcher(
+            config=object(),
+            db=cast(Database, FakeDb()),
+            notion=FakeNotion(),
+            agent=FakeAgent(),
+            cache_getter=lambda: FakeCache(),
+            bot=FakeBot(),
+            email_owner_id=981749333,
+            email_owner_name="Afif",
+            user_data_fn=user_data,
+        )
+        await watcher._process(
+            "66115", "no-reply@bankmandiri.co.id", "Transfer Berhasil", "body"
+        )
+
+        assert refs == [
+            ("expense", "gmail:66115:transfer-out", 500000),
+            ("income", "gmail:66115:transfer-in", 500000),
+            ("expense", "gmail:66115:fee", 2500),
+        ]
+        assert events[0] == (
+            "processed",
+            "66115",
+            "no-reply@bankmandiri.co.id",
+        )
 
     @pytest.mark.asyncio
     async def test_budget_alert_resolves_fuzzy_subcategory(self):
@@ -849,4 +938,3 @@ class TestCoerceDate:
     def test_rejects_invalid_type(self):
         with pytest.raises(TypeError):
             _coerce_date(12345)
-

@@ -29,6 +29,11 @@ class Config:
     webhook_secret: str = ""
     port: int = 8080
 
+    # Personal Android API (disabled when API_TOKEN is blank)
+    api_token: str = ""
+    api_user_id: int = 0
+    api_max_body_bytes: int = 65_536
+
     # SQLite persistent storage
     db_path: str = "data/expense_tracker.db"
 
@@ -67,6 +72,9 @@ def load_config() -> Config:
         webhook_path=os.getenv("WEBHOOK_PATH", "/webhook"),
         webhook_secret=os.getenv("WEBHOOK_SECRET", ""),
         port=int(os.getenv("PORT", "8080")),
+        api_token=os.getenv("API_TOKEN", ""),
+        api_user_id=int(os.getenv("API_USER_ID", "0")),
+        api_max_body_bytes=int(os.getenv("API_MAX_BODY_BYTES", "65536")),
         db_path=os.getenv("DB_PATH", "data/expense_tracker.db"),
         # Legacy single-tenant env vars (optional, for backward compat)
         notion_token=os.getenv("NOTION_TOKEN", ""),

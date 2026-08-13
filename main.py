@@ -1,9 +1,8 @@
 import asyncio
-import csv
-import io
 import math
 import logging
 import os
+import signal
 import socket
 from logging.handlers import RotatingFileHandler
 from datetime import date, datetime, timedelta
@@ -35,6 +34,16 @@ from keyboards import (
 )
 from models import NotionCache, ExpenseEntry, IncomeEntry
 from notion import NotionClient, _url_to_id
+from notion_sync import NotionSyncWorker
+from budget_commands import BudgetCommandService
+from local_budgets import BudgetStore
+from local_query import LocalQueryService
+from reference_store import ReferenceStore, load_resilient_cache
+from reporting import LedgerReporting
+from reporting_views import (
+    format_monthly_stats,
+    format_search_results,
+)
 from agent import Agent
 from email_watcher import EmailWatcher
 
@@ -96,12 +105,17 @@ async def main() -> None:
     dp = Dispatcher()
 
     db = await Database.connect(config.db_path)
+    reporting = LedgerReporting(db)
+    budgets = BudgetStore(db)
+    await budgets.initialize()
+    references = ReferenceStore(db)
     log.info(f"Database connected: {config.db_path}")
 
     # Migrate legacy env vars to users table (one-time)
     await db.migrate_from_env(config.notion_token, config.users)
 
     agent = Agent(config)
+    local_queries = LocalQueryService(db, reporting, agent)
 
     pending_edit: dict[int, str] = {}
     photo_queue: dict[int, list[str]] = {}
@@ -109,6 +123,7 @@ async def main() -> None:
     email_cache_holder: list[NotionCache] = []
     watcher_holder: list[EmailWatcher | None] = []
     watcher_task_ref: asyncio.Task | None = None
+    email_notion: NotionClient | None = None
     last_saved_page: dict[int, str] = await db.get_all_user_undo()  # user_id → notion page_id (for undo), persisted
     email_saved_pages: dict[int, dict] = await db.get_all_email_saved_pages()  # persisted across restarts
     email_pending_edit: dict[int, str] = {}  # user_id → field being edited (post-save email edit)
@@ -117,6 +132,8 @@ async def main() -> None:
     cat_suggestions_cache: dict[tuple[int, str], list[str]] = {}  # (user_id, description) → recommended categories
     saving_locks: dict[int, asyncio.Lock] = {}  # per-user lock to prevent confirm vs auto-confirm double-save
     auto_confirm_task: asyncio.Task | None = None  # background task handle for graceful shutdown
+    notion_sync_task: asyncio.Task | None = None
+    app_heartbeat_task: asyncio.Task | None = None
 
     def _parse_cb(data: str, idx: int = 1) -> int | None:
         try:
@@ -166,6 +183,8 @@ async def main() -> None:
         if not math.isfinite(amount_val) or amount_val <= 0:
             raise ValueError("Jumlah tidak valid")
         return amount_val
+
+    budget_commands = BudgetCommandService(budgets, _parse_idr_amount)
 
     async def _get_email_saved(user_id: int) -> dict | None:
         saved = email_saved_pages.get(user_id)
@@ -252,35 +271,57 @@ async def main() -> None:
         if not user or not user.is_setup_complete:
             return None
         client = NotionClient.from_user(user)
-        try:
-            cache_entry = await client.load_cache()
-        except Exception as e:
-            log.error(f"Failed to load cache for user {user_id}: {e}")
-            return None  # don't cache broken state
+        loaded = await load_resilient_cache(
+            references,
+            user_id,
+            client.load_cache,
+            timeout=10,
+            prefer_snapshot=True,
+        )
+        cache_entry = loaded.cache
+        if loaded.error is not None:
+            # Capture and ledger operations must remain available during a
+            # Notion outage. Prefer the last successful taxonomy snapshot so
+            # parsing, keyboards, and recurring rules remain useful.
+            log.warning(
+                "Using %s Notion cache for user %s after load failure: %s",
+                loaded.source,
+                user_id,
+                loaded.error,
+            )
+            await db.record_operational_state(
+                "notion_cache",
+                success=False,
+                error=(
+                    f"{type(loaded.error).__name__}: {loaded.error}; "
+                    f"fallback={loaded.source}"
+                ),
+            )
+        elif loaded.source == "remote":
+            await db.record_operational_state("notion_cache", success=True)
         user_notions[user_id] = client
         user_caches[user_id] = cache_entry
         return client, cache_entry
 
     async def _undo_last_saved(user_id: int) -> tuple[bool, str]:
-        """Archive the user's latest saved Notion page and clear undo state."""
+        """Void the latest saved canonical transaction and queue its archive."""
         undo = await db.get_user_undo(user_id)
         if not undo:
             return False, "Tidak ada transaksi terakhir yang bisa di-undo."
-
-        result = await get_user_notion(user_id)
-        if not result:
-            return False, "Ketik /setup untuk menghubungkan Notion workspace kamu."
-        user_notion, _ = result
 
         page_id = undo["page_id"]
         desc = undo.get("description") or "transaksi terakhir"
         amount = undo.get("amount") or 0
         tx_date = undo.get("date") or ""
+        transaction = await db.find_transaction_by_notion_page_id(user_id, page_id)
+        if transaction is None:
+            await db.clear_user_undo(user_id)
+            return False, "Undo lama kedaluwarsa karena belum terhubung ke ledger lokal."
         try:
-            await user_notion.archive_page(page_id)
+            await db.void_transaction(user_id, transaction["id"])
         except Exception as e:
-            log.error("Undo archive failed for user %s page %s: %s", user_id, page_id, e)
-            return False, f"❌ Gagal undo di Notion.\n`{type(e).__name__}: {str(e)[:80]}`"
+            log.error("Local undo failed for user %s transaction %s: %s", user_id, transaction["id"], e)
+            return False, f"❌ Gagal undo transaksi.\n`{type(e).__name__}: {str(e)[:80]}`"
 
         await db.clear_user_undo(user_id)
         last_saved_page.pop(user_id, None)
@@ -289,7 +330,7 @@ async def main() -> None:
             email_saved_pages.pop(user_id, None)
             await db.clear_email_saved_page(user_id)
 
-        lines = ["↩️ *Undo berhasil.*", f"Transaksi diarsipkan dari Notion: *{desc}*"]
+        lines = ["↩️ *Undo berhasil.*", f"Transaksi dibatalkan lokal: *{desc}*"]
         if amount:
             lines.append(f"💰 Rp {amount:,.0f}")
         if tx_date:
@@ -441,7 +482,7 @@ async def main() -> None:
                     file = await bot.get_file(file_id)
                     image_bytes = await bot.download_file(file.file_path)
                     today = date.today().isoformat()
-                    recent = await user_notion.fetch_recent_expenses(owner, user_cache, 10)
+                    recent = await reporting.recent_expenses(user_id, limit=10)
                     entry = await agent.extract_from_image(image_bytes.read(), user_cache, today, recent_expenses=recent)
                 except Exception as e:
                     retries += 1
@@ -463,7 +504,9 @@ async def main() -> None:
                     await status_msg.delete()
                     dup_warning = ""
                     try:
-                        matches = await user_notion.fetch_duplicates(owner, entry.amount, entry.date)
+                        matches = await reporting.duplicate_descriptions(
+                            user_id, entry.amount, entry.date
+                        )
                         if matches:
                             is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date, new_merchant=entry.merchant)
                             if is_dup:
@@ -596,33 +639,26 @@ async def main() -> None:
     @dp.message(Command("budget"))
     async def handle_budget(msg: Message) -> None:
         user_id = msg.from_user.id
-        result = await get_user_notion(user_id)
-        if not result:
-            await msg.answer("Ketik /setup untuk menghubungkan Notion workspace kamu.")
+        user = await db.get_user(user_id)
+        if not user or user.setup_step != "done":
+            await msg.answer("Ketik /setup untuk menyelesaikan pengaturan aplikasi.")
             return
-        user_notion, user_cache = result
+
         try:
-            budgets = await user_notion.fetch_budgets(user_cache)
-            if not budgets:
-                await msg.answer("Belum ada anggaran. Tambahkan dulu di database Budget Notion.")
-                return
-            lines = ["💰 *Anggaran (Budget)*\n"]
-            for b in budgets:
-                if b["percentage"] > 100:
-                    status = "🔴 OVER"
-                elif b["percentage"] > 80:
-                    status = "🟡"
-                else:
-                    status = "🟢"
-                subs = f" ({', '.join(b['subcategories'])})" if b["subcategories"] else ""
-                lines.append(
-                    f"{status} *{b['name']}{subs}* ({b['period']})\n"
-                    f"  Rp {b['spent']:,.0f} / Rp {b['budget']:,.0f}  ({b['percentage']:.0f}%)"
-                )
-            await msg.answer("\n".join(lines), parse_mode="Markdown")
+            result = await budget_commands.execute(user_id, msg.text or "/budget")
+            await msg.answer(
+                result.text,
+                parse_mode=result.parse_mode,
+            )
+        except ValueError as e:
+            await msg.answer(f"❌ {e}")
         except Exception as e:
             log.error(f"/budget failed: {e}")
-            await msg.answer(f"❌ Gagal ambil data anggaran.\n`{type(e).__name__}: {str(e)[:80]}`", parse_mode="Markdown")
+            await msg.answer(
+                f"❌ Gagal membaca budget lokal.\n"
+                f"`{type(e).__name__}: {str(e)[:80]}`",
+                parse_mode="Markdown",
+            )
 
     @dp.message(Command("recurring"))
     async def handle_recurring(msg: Message) -> None:
@@ -735,6 +771,7 @@ async def main() -> None:
                 user_notions[user_id] = user_notion
             new_cache = await user_notion.load_cache()
             user_caches[user_id] = new_cache
+            await references.save(user_id, new_cache)
             if email_cache_holder and email_owner_record and user_id == email_owner_record.telegram_id:
                 email_cache_holder[0] = new_cache
             await msg.answer(
@@ -774,23 +811,28 @@ async def main() -> None:
     @dp.message(Command("health"))
     async def handle_health(msg: Message) -> None:
         user_id = msg.from_user.id
-        user = await db.get_user(user_id)
-        if not user or user.setup_step != "done":
-            await msg.answer("Ketik /setup untuk menghubungkan Notion workspace kamu.")
-            return
         try:
-            # Quick DB check
-            user_count = len(await db.get_all_users())
-            # Quick Notion check
-            result = await get_user_notion(user_id)
-            notion_ok = result is not None
-            watcher_running = watcher_holder[0].status_info()["running"] if watcher_holder else False
+            health = await db.get_operational_health(user_id)
+            icon = {"ok": "✅", "degraded": "⚠️", "critical": "❌", "unknown": "❔"}
             lines = [
                 "🩺 *Health Check*\n",
-                f"✅ Database: OK ({user_count} pengguna)",
-                f"✅ Notion: {'OK' if notion_ok else '❌ Gagal'}",
-                f"✅ Email Watcher: {'Aktif' if watcher_running else '❌ Mati'}",
+                f"{icon.get(health['status'], '❔')} Overall: {health['status'].upper()}",
+                f"{icon.get(health['outbox']['status'], '❔')} Notion outbox: "
+                f"{health['outbox']['depth']} pending, {health['outbox']['failed']} failed",
             ]
+            for name, label in (
+                ("app_loop", "App"),
+                ("notion_sync", "Notion worker"),
+                ("gmail", "Gmail"),
+                ("backup", "Backup"),
+            ):
+                worker = health["workers"].get(name)
+                if worker:
+                    detail = worker.get("reason") or worker.get("last_success_at") or "no successful attempt"
+                    lines.append(
+                        f"{icon.get(worker['status'], '❔')} {label}: "
+                        f"{worker['status']} — {str(detail)[:80]}"
+                    )
             await msg.answer("\n".join(lines), parse_mode="Markdown")
         except Exception as e:
             await msg.answer(f"❌ Health check gagal.\n`{type(e).__name__}: {str(e)[:80]}`", parse_mode="Markdown")
@@ -798,13 +840,6 @@ async def main() -> None:
     @dp.message(Command("search"))
     async def handle_search(msg: Message) -> None:
         user_id = msg.from_user.id
-        result = await get_user_notion(user_id)
-        if not result:
-            await msg.answer("Ketik /setup untuk menghubungkan Notion workspace kamu.")
-            return
-        user_notion, _ = result
-        user = await db.get_user(user_id)
-        owner = user.owner_name
         parts = msg.text.split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
             await msg.answer("🔍 *Cari pengeluaran*\n\nGunakan: `/search kata kunci`\nContoh: `/search indomie`", parse_mode="Markdown")
@@ -812,7 +847,9 @@ async def main() -> None:
         keyword = parts[1].strip()
         await msg.answer(f"🔍 Mencari \"{keyword}\"...")
         try:
-            results = await user_notion.search_expenses(owner, keyword)
+            results = await reporting.search(
+                user_id, keyword, limit=200, kind="expense"
+            )
         except Exception as e:
             log.error(f"/search failed: {e}")
             await msg.answer(f"❌ Gagal mencari.\n`{type(e).__name__}: {str(e)[:80]}`", parse_mode="Markdown")
@@ -820,188 +857,68 @@ async def main() -> None:
         if not results:
             await msg.answer(f"Tidak ada pengeluaran dengan kata kunci \"{keyword}\".")
             return
-        total = sum(r["amount"] for r in results)
-        lines = [f"🔍 *Hasil pencarian: \"{keyword}\"* ({len(results)} transaksi, Rp {total:,.0f})\n"]
-        for r in results[:10]:
-            lines.append(f"• Rp {r['amount']:,.0f} — {r['description']} ({r['date']})")
-        if len(results) > 10:
-            lines.append(f"\n...dan {len(results) - 10} transaksi lainnya.")
-        lines.append(f"\n🔍 *Pencarian selesai.*")
-        await msg.answer("\n".join(lines), parse_mode="Markdown")
+        await msg.answer(
+            format_search_results(keyword, results), parse_mode="Markdown"
+        )
 
     @dp.message(Command("stats"))
     async def handle_stats(msg: Message) -> None:
         user_id = msg.from_user.id
-        result = await get_user_notion(user_id)
-        if not result:
-            await msg.answer("Ketik /setup untuk menghubungkan Notion workspace kamu.")
-            return
-        user_notion, user_cache = result
-        user = await db.get_user(user_id)
-        owner = user.owner_name
-
-        await msg.answer("📊 Mengambil data pengeluaran...")
-
-        expenses, budgets = await asyncio.gather(
-            user_notion.fetch_expenses(owner, user_cache),
-            user_notion.fetch_budgets(user_cache),
-            return_exceptions=True,
-        )
-        if isinstance(expenses, Exception):
-            log.error(f"/stats fetch_expenses failed: {expenses}")
-            await msg.answer(f"❌ Gagal ambil data.\n`{type(expenses).__name__}: {str(expenses)[:80]}`", parse_mode="Markdown")
-            return
-        if isinstance(budgets, Exception):
-            log.warning(f"/stats fetch_budgets failed (skipping budget section): {budgets}")
-            budgets = None
-
         now = datetime.now()
         month_str = now.strftime("%Y-%m")
         last_month_str = (now.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
-
-        month_expenses = [e for e in expenses if e["date"].startswith(month_str)]
-        if not month_expenses:
-            await msg.answer("📊 Belum ada pengeluaran untuk bulan ini.")
+        try:
+            summary, previous = await asyncio.gather(
+                reporting.monthly_summary(user_id, month_str),
+                reporting.monthly_summary(user_id, last_month_str),
+            )
+        except Exception as exc:
+            log.error("/stats SQLite report failed: %s", exc)
+            await msg.answer(
+                f"❌ Gagal membuat ringkasan lokal.\n"
+                f"`{type(exc).__name__}: {str(exc)[:80]}`",
+                parse_mode="Markdown",
+            )
             return
 
-        total = sum(e["amount"] for e in month_expenses)
-        count = len(month_expenses)
-
-        # ── Trend line ───────────────────────────────────────────────────────
-        last_month_expenses = [e for e in expenses if e["date"].startswith(last_month_str)]
-        trend_line = None
-        if last_month_expenses:
-            last_total = sum(e["amount"] for e in last_month_expenses)
-            if last_total > 0:
-                delta_pct = (total - last_total) / last_total * 100
-                sign = "+" if delta_pct >= 0 else ""
-                trend_line = f"📈 vs bulan lalu: {sign}{delta_pct:.0f}% (Rp {last_total:,.0f})"
-
-        # ── Daily average + projection ───────────────────────────────────────
-        days_elapsed = now.day
-        days_in_month = (now.replace(month=now.month % 12 + 1, day=1) - timedelta(days=1)).day
-        daily_avg = total / days_elapsed
-        projected = daily_avg * days_in_month
-
-        # ── Top categories ───────────────────────────────────────────────────
-        cat_totals: dict[str, float] = {}
-        for e in month_expenses:
-            sub = e.get("subcategory", "-")
-            cat_totals[sub] = cat_totals.get(sub, 0) + e["amount"]
-        sorted_cats = sorted(cat_totals.items(), key=lambda x: -x[1])
-        medals = ["🥇", "🥈", "🥉"]
-        top3 = sorted_cats[:3]
-        rest = sorted_cats[3:]
-        rest_total = sum(v for _, v in rest) if rest else 0
-
-        # ── Biggest transaction ──────────────────────────────────────────────
-        biggest = max(month_expenses, key=lambda e: e["amount"])
-        big_date_parts = biggest["date"].split("-")
-        months_id = ["", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
-        big_day = int(big_date_parts[2])
-        big_month = months_id[int(big_date_parts[1])]
-        biggest_line = f"💸 Terbesar: Rp {biggest['amount']:,.0f} — {biggest.get('description', '-')} ({big_day} {big_month})"
-
-        # ── Build message ────────────────────────────────────────────────────
-        month_names = ["", "Januari", "Februari", "Maret", "April", "Mei", "Juni",
-                       "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
-        lines = [f"📊 *Ringkasan {month_names[now.month]} {now.year}*\n"]
-        lines.append(f"💰 Total: Rp {total:,.0f}")
-        if trend_line:
-            lines.append(trend_line)
-        lines.append(f"📋 Transaksi: {count}  •  Rata-rata/hari: Rp {daily_avg:,.0f}")
-        lines.append(f"🔮 Proyeksi akhir bulan: Rp ~{projected:,.0f}")
-
-        lines.append("")
-        lines.append("Top kategori:")
-        for i, (cat, amt) in enumerate(top3):
-            pct = amt / total * 100
-            lines.append(f"  {medals[i]} {cat}: Rp {amt:,.0f} ({pct:.0f}%)")
-        if rest:
-            pct = rest_total / total * 100
-            lines.append(f"  • Lainnya: Rp {rest_total:,.0f} ({pct:.0f}%)")
-
-        lines.append("")
-        lines.append(biggest_line)
-
-        # ── Budget comparison ────────────────────────────────────────────────
-        if budgets:
-            lines.append("")
-            lines.append("📊 vs Anggaran:")
-            for b in budgets:
-                if b["budget"] <= 0:
-                    continue
-                spent = b["spent"]
-                budget = b["budget"]
-                pct = b["percentage"]
-                if pct >= 100:
-                    emoji = "🔴"
-                    warn = " ⚠️"
-                elif pct >= 80:
-                    emoji = "🟡"
-                    warn = ""
-                else:
-                    emoji = "🟢"
-                    warn = ""
-                lines.append(f"  {emoji} {b['name']}: Rp {spent:,.0f} / {budget:,.0f} ({pct:.0f}%{warn})")
-
-        await msg.answer("\n".join(lines), parse_mode="Markdown")
+        await msg.answer(
+            format_monthly_stats(summary, previous, now),
+            parse_mode="Markdown",
+        )
 
     @dp.message(Command("export"))
     async def handle_export(msg: Message) -> None:
         user_id = msg.from_user.id
-        result = await get_user_notion(user_id)
-        if not result:
-            await msg.answer("Ketik /setup untuk menghubungkan Notion workspace kamu.")
-            return
-        user_notion, user_cache = result
-        user = await db.get_user(user_id)
-        owner = user.owner_name
-
         parts = msg.text.split(maxsplit=1)
         # Optional filter: /export thismonth | /export <month> | /export all
         filter_type = parts[1].lower().strip() if len(parts) > 1 else "thismonth"
 
-        try:
-            expenses = await user_notion.fetch_expenses(owner, user_cache)
-        except Exception as e:
-            log.error(f"/export fetch_expenses failed: {e}")
-            await msg.answer(f"❌ Gagal ambil data.\n`{type(e).__name__}: {str(e)[:80]}`", parse_mode="Markdown")
-            return
-
-        if not expenses:
-            await msg.answer("Belum ada pengeluaran untuk diekspor.")
-            return
-
         # Filter by date
         now = datetime.now()
         if filter_type == "thismonth":
-            prefix = now.strftime("%Y-%m")
-            expenses = [e for e in expenses if e["date"].startswith(prefix)]
-            filename = f"expenses_{prefix}.csv"
-        elif filter_type.strip().count("-") == 1 and len(filter_type.strip()) == 7:
-            # looks like YYYY-MM
-            expenses = [e for e in expenses if e["date"].startswith(filter_type.strip())]
-            filename = f"expenses_{filter_type.strip()}.csv"
+            month = now.strftime("%Y-%m")
+        elif filter_type == "all":
+            month = None
+        elif filter_type.count("-") == 1 and len(filter_type) == 7:
+            month = filter_type
         else:
-            filename = "expenses_all.csv"
-
-        if not expenses:
-            await msg.answer(f"Tidak ada data untuk filter `{filter_type}`.")
+            await msg.answer(
+                "Gunakan `/export thismonth`, `/export YYYY-MM`, atau `/export all`.",
+                parse_mode="Markdown",
+            )
             return
 
-        # Build CSV in memory
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["Tanggal", "Deskripsi", "Jumlah (IDR)", "Kategori"])
-        for e in expenses:
-            writer.writerow([e["date"], e.get("description", ""), int(e["amount"]), e.get("subcategory", "-")])
-
-        csv_bytes = output.getvalue().encode("utf-8-sig")  # BOM for Excel compatibility
+        try:
+            csv_bytes = await reporting.export_csv(user_id, month)
+        except ValueError as exc:
+            await msg.answer(f"❌ {exc}")
+            return
+        filename = f"transactions_{month or 'all'}.csv"
 
         await msg.answer_document(
             BufferedInputFile(csv_bytes, filename=filename),
-            caption=f"📊 *Export {len(expenses)} transaksi*\n{filter_type}"
+            caption=f"📊 *Export ledger lokal*\n{filter_type}",
+            parse_mode="Markdown",
         )
 
     @dp.message(F.photo)
@@ -1034,7 +951,7 @@ async def main() -> None:
         file = await bot.get_file(photo.file_id)
         image_bytes = await bot.download_file(file.file_path)
         today = date.today().isoformat()
-        recent = await user_notion.fetch_recent_expenses(owner, user_cache, 10)
+        recent = await reporting.recent_expenses(user_id, limit=10)
 
         try:
             entry = await agent.extract_from_image(image_bytes.read(), user_cache, today, recent_expenses=recent)
@@ -1060,7 +977,9 @@ async def main() -> None:
 
         dup_warning = ""
         try:
-            matches = await user_notion.fetch_duplicates(owner, entry.amount, entry.date)
+            matches = await reporting.duplicate_descriptions(
+                user_id, entry.amount, entry.date
+            )
             if matches:
                 is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date, new_merchant=entry.merchant)
                 if is_dup:
@@ -1091,13 +1010,54 @@ async def main() -> None:
             await run_setup(msg)
             return
 
+        owner = user.owner_name
+        # Pending conversational workflows must win over intent detection: a
+        # free-text edit or Jago merchant reply can otherwise look like a new
+        # expense/query. When no workflow is pending, queries can be answered
+        # without initializing Notion at all.
+        pending_tx = await db.get_pending_email_expense(user_id)
+        intent = None
+        has_pending_text_workflow = (
+            user_id in pending_edit
+            or user_id in income_pending_edit
+            or user_id in email_pending_edit
+            or pending_tx is not None
+        )
+        if not has_pending_text_workflow:
+            try:
+                intent = await agent.detect_intent(text)
+            except Exception as e:
+                log.error(f"detect_intent failed: {e}")
+                await msg.answer(
+                    "❌ Gagal memahami pesan. Coba lagi ya.\n"
+                    f"`{type(e).__name__}: {str(e)[:80]}`",
+                    parse_mode="Markdown",
+                )
+                return
+            if intent.type == "query":
+                await msg.answer("🔎 Membaca ledger lokal...")
+                try:
+                    answer = await local_queries.answer(
+                        user_id,
+                        text,
+                        owner,
+                    )
+                    await msg.answer(answer)
+                except Exception as e:
+                    log.error(f"query flow failed: {e}")
+                    await msg.answer(
+                        "❌ Gagal membaca ledger lokal.\n"
+                        f"`{type(e).__name__}: {str(e)[:80]}`",
+                        parse_mode="Markdown",
+                    )
+                return
+
         # Get per-user Notion client and cache
         result = await get_user_notion(user_id)
         if not result:
             await msg.answer("Ketik /setup untuk menghubungkan Notion workspace kamu.")
             return
         user_notion, user_cache = result
-        owner = user.owner_name
 
         # ── Pending edit (check before Jago to avoid race) ──────────────────────
         edit_field = pending_edit.pop(user_id, None)
@@ -1198,39 +1158,51 @@ async def main() -> None:
                 await msg.answer("Sesi kedaluwarsa.")
                 return
             page_id = saved["page_id"]
+            transaction = await db.find_transaction_by_notion_page_id(user_id, page_id)
+            if transaction is None:
+                email_saved_pages.pop(user_id, None)
+                await db.clear_email_saved_page(user_id)
+                await msg.answer("Sesi edit lama kedaluwarsa karena belum terhubung ke ledger lokal.")
+                return
             try:
+                changes: dict[str, object] = {}
                 if email_field == "desc":
-                    await user_notion.update_expense_title(page_id, text, owner)
+                    changes["description"] = text
                     email_saved_pages[user_id]["description"] = text
                 elif email_field == "amount":
                     amount = _parse_idr_amount(text)
-                    await user_notion.update_expense_amount(page_id, amount)
+                    if not float(amount).is_integer():
+                        raise ValueError("Jumlah IDR harus berupa rupiah bulat")
+                    changes["amount_idr"] = int(amount)
                     email_saved_pages[user_id]["amount"] = amount
                 elif email_field == "date":
-                    await user_notion.update_expense_date(page_id, text)
+                    changes["occurred_on"] = text
                     email_saved_pages[user_id]["date"] = text
                 elif email_field == "account":
-                    await user_notion.update_expense_account(page_id, text, user_cache)
+                    changes["account"] = text
                 elif email_field == "detail":
                     cats = list(user_cache.category_subcategories.keys())
                     past = None
                     try:
                         kw = _search_keyword(text)
                         if kw:
-                            past = await user_notion.search_expenses(owner, kw, user_cache)
+                            past = await reporting.search_expense_context(
+                                user_id, kw
+                            )
                     except Exception as e:
                         log.warning(f"Past suggest-category search failed: {e}")
                     recommended = await agent.suggest_categories(text, cats, past_similar=past)
                     new_desc = f"{saved['description']} — {text}"
-                    await user_notion.update_expense_title(page_id, new_desc, owner)
+                    changes["description"] = new_desc
                     email_saved_pages[user_id]["description"] = new_desc
                     if recommended:
                         top_cat = recommended[0]
                         subcats = user_cache.category_subcategories.get(top_cat, [])
                         if subcats:
                             new_subcat = subcats[0]
-                            await user_notion.update_expense_subcategory(page_id, new_subcat, user_cache)
+                            changes["subcategory"] = new_subcat
                             email_saved_pages[user_id]["subcat"] = new_subcat
+                await db.update_transaction(user_id, transaction["id"], changes)
                 s = email_saved_pages[user_id]
                 await db.set_email_saved_page(user_id, s["page_id"], s["description"], s["amount"], s["date"], s["subcat"], s["timestamp"], merchant=s.get("merchant", ""))
                 await msg.answer(f"✅ Tersimpan!")
@@ -1242,7 +1214,6 @@ async def main() -> None:
             return
 
         # ── Jago debit card follow-up ──────────────────────────────────────────
-        pending_tx = await db.get_pending_email_expense(user_id)
         if pending_tx:
             if text.lower().strip() in ("batal", "cancel", "skip", "/cancel"):
                 await db.clear_pending_email_expense(user_id)
@@ -1254,7 +1225,7 @@ async def main() -> None:
             try:
                 today = date.today().isoformat()
                 # Fetch recent expenses for context
-                recent = await user_notion.fetch_recent_expenses(owner, user_cache, 10)
+                recent = await reporting.recent_expenses(user_id, limit=10)
                 entry = await agent.extract_from_text(
                     text, user_cache, today, recent_expenses=recent
                 )
@@ -1289,33 +1260,27 @@ async def main() -> None:
             return
 
         # ── Intent detection ──────────────────────────────────────────────────
-        try:
-            intent = await agent.detect_intent(text)
-        except Exception as e:
-            log.error(f"detect_intent failed: {e}")
-            await msg.answer(
-                "❌ Gagal memahami pesan. Coba lagi ya.\n"
-                f"`{type(e).__name__}: {str(e)[:80]}`",
-                parse_mode="Markdown",
-            )
-            return
+        if intent is None:
+            try:
+                intent = await agent.detect_intent(text)
+            except Exception as e:
+                log.error(f"detect_intent failed: {e}")
+                await msg.answer(
+                    "❌ Gagal memahami pesan. Coba lagi ya.\n"
+                    f"`{type(e).__name__}: {str(e)[:80]}`",
+                    parse_mode="Markdown",
+                )
+                return
 
         if intent.type == "query":
-            await msg.answer("🔎 Mengambil data pengeluaran...")
+            await msg.answer("🔎 Membaca ledger lokal...")
             try:
-                expenses, assets = await asyncio.gather(
-                    user_notion.fetch_expenses(owner, user_cache),
-                    user_notion.fetch_assets(),
-                )
-                history = await db.get_history(user_id)
-                answer, history = await agent.answer_query(text, expenses, owner, history, assets=assets)
-                await db.append_history(user_id, "user", text)
-                await db.append_history(user_id, "assistant", answer)
+                answer = await local_queries.answer(user_id, text, owner)
                 await msg.answer(answer)
             except Exception as e:
                 log.error(f"query flow failed: {e}")
                 await msg.answer(
-                    f"❌ Gagal ambil data pengeluaran.\n"
+                    f"❌ Gagal membaca ledger lokal.\n"
                     f"`{type(e).__name__}: {str(e)[:80]}`",
                     parse_mode="Markdown",
                 )
@@ -1325,12 +1290,12 @@ async def main() -> None:
             # Fetch recent expenses and search past transactions in parallel
             kw = _search_keyword(text)
             recent, past = await asyncio.gather(
-                user_notion.fetch_recent_expenses(owner, user_cache, 10),
-                user_notion.search_expenses(owner, kw, user_cache) if kw else asyncio.sleep(0, result=None),
+                reporting.recent_expenses(user_id, limit=10),
+                reporting.search_expense_context(user_id, kw) if kw else asyncio.sleep(0, result=None),
                 return_exceptions=True,
             )
             if isinstance(recent, Exception):
-                log.warning(f"fetch_recent_expenses failed: {recent}")
+                log.warning(f"Local recent-expense lookup failed: {recent}")
                 recent = []
             if isinstance(past, Exception):
                 log.warning(f"Past expense search failed: {past}")
@@ -1352,7 +1317,9 @@ async def main() -> None:
             await db.set_pending_since(user_id, ts)
             dup_warning = ""
             try:
-                matches = await user_notion.fetch_duplicates(owner, entry.amount, entry.date)
+                matches = await reporting.duplicate_descriptions(
+                    user_id, entry.amount, entry.date
+                )
                 if matches:
                     is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date, new_merchant=entry.merchant)
                     if is_dup:
@@ -1432,7 +1399,9 @@ async def main() -> None:
 
         # Re-check duplicates before saving — email may have logged it in the meantime
         try:
-            matches = await user_notion.fetch_duplicates(owner, entry.amount, entry.date)
+            matches = await reporting.duplicate_descriptions(
+                user_id, entry.amount, entry.date
+            )
             if matches:
                 is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date, new_merchant=entry.merchant)
                 if is_dup:
@@ -1457,13 +1426,24 @@ async def main() -> None:
             log.warning(f"Confirm duplicate check failed: {e}")
 
         await callback.answer("Menyimpan...")
-        status_msg = await callback.message.answer("⏳ Menyimpan ke Notion...")
+        status_msg = await callback.message.answer("⏳ Menyimpan ke ledger lokal...")
+        source = "bank_email" if pending_rec else "telegram_text"
+        source_ref = pending_rec["uid"] if pending_rec else None
         try:
             rec_page_url = pending_rec["recurring_page_url"] if pending_rec else None
 
-            url = await user_notion.log_expense(entry, owner, user_cache, recurring_page_url=rec_page_url)
-            page_id = _url_to_id(url)
-            last_saved_page[user_id] = page_id
+            # Commit to the local ledger first.  This atomically removes the
+            # pending row and queues the Notion outbox item, so a Notion outage
+            # cannot lose a confirmed transaction.
+            tx_id = await db.confirm_pending_expense(
+                user_id,
+                source=source,
+                source_ref=source_ref,
+                recurring_page_id=_url_to_id(rec_page_url) if rec_page_url else None,
+            )
+            if not tx_id:
+                await status_msg.edit_text("❌ Pengeluaran pending sudah tidak tersedia.")
+                return
 
             if pending_rec:
                 await db.mark_processed(pending_rec["uid"], pending_rec["sender"])
@@ -1474,25 +1454,32 @@ async def main() -> None:
             if pending_rec:
                 await db.clear_pending_recurring(user_id)
 
-            await db.set_user_undo(user_id, page_id, entry.description, entry.amount, entry.date, entry.subcategory, merchant=entry.merchant)
             await db.record_pattern(
                 user_id, entry.merchant, entry.subcategory,
                 entry.account, entry.amount, entry.date,
             )
             await status_msg.edit_text(
-                f"✅ Tersimpan! [Lihat di Notion]({url})",
-                parse_mode="Markdown",
-                reply_markup=make_undo_keyboard(user_id),
+                "✅ Tersimpan lokal. Sinkronisasi Notion sudah diantrikan.",
             )
             await _prompt_next_debit(user_id)
             photo_task = asyncio.create_task(_process_next_photo(user_id, owner))
             photo_task.add_done_callback(lambda t: t.exception() and log.warning(f"Photo queue task failed: {t.exception()}"))
         except Exception as e:
-            log.error(f"Notion write failed: {e}")
-            await db.set_pending_expense(user_id, entry)
-            ts = datetime.now().timestamp()
-            pending_since[user_id] = ts
-            await db.set_pending_since(user_id, ts)
+            log.error(f"Local expense confirmation failed: {e}")
+            if "tx_id" in locals() and tx_id:
+                if pending_rec:
+                    await db.mark_processed(pending_rec["uid"], pending_rec["sender"])
+                    await db.clear_pending_recurring(user_id)
+                pending_since.pop(user_id, None)
+                await db.clear_pending_since(user_id)
+                await db.clear_pending_expense(user_id)
+                await status_msg.edit_text(
+                    "⚠️ Tersimpan lokal, tetapi sinkronisasi Notion masih tertunda.",
+                )
+                await _prompt_next_debit(user_id)
+                photo_task = asyncio.create_task(_process_next_photo(user_id, owner))
+                photo_task.add_done_callback(lambda t: t.exception() and log.warning(f"Photo queue task failed: {t.exception()}"))
+                return
             await status_msg.edit_text(
                 f"❌ Gagal simpan ke Notion.\n`{type(e).__name__}: {str(e)[:80]}`",
                 parse_mode="Markdown",
@@ -1823,7 +1810,9 @@ async def main() -> None:
 
         # Re-check duplicates before saving
         try:
-            income_matches = await user_notion.fetch_duplicates(owner, income.amount, income.date, db_key="income_ds")
+            income_matches = await reporting.duplicate_descriptions(
+                user_id, income.amount, income.date, kind="income"
+            )
             if income_matches:
                 is_dup = await agent.check_duplicate(income_matches, income.description, income.amount, income.date, new_merchant="")
                 if is_dup:
@@ -1838,20 +1827,22 @@ async def main() -> None:
             log.warning(f"Income confirm duplicate check failed: {e}")
 
         await callback.answer("Menyimpan pemasukan...")
-        status_msg = await callback.message.answer("⏳ Menyimpan pemasukan ke Notion...")
+        status_msg = await callback.message.answer("⏳ Menyimpan pemasukan ke ledger lokal...")
         try:
-            url = await user_notion.log_income(income, owner, user_cache)
-            await db.clear_pending_income(user_id)
-            page_id = _url_to_id(url)
-            last_saved_page[user_id] = page_id
-            await db.set_user_undo(user_id, page_id, income.description, income.amount, income.date, income.subcategory)
+            tx_id = await db.confirm_pending_income(user_id, source="telegram_text")
+            if not tx_id:
+                await status_msg.edit_text("❌ Pemasukan pending sudah tidak tersedia.")
+                return
             await status_msg.edit_text(
-                f"✅ Pemasukan tersimpan! [Lihat di Notion]({url})",
-                parse_mode="Markdown",
-                reply_markup=make_undo_keyboard(user_id),
+                "✅ Pemasukan tersimpan lokal. Sinkronisasi Notion sudah diantrikan.",
             )
         except Exception as e:
-            log.error(f"Notion income write failed: {e}")
+            log.error(f"Local income confirmation failed: {e}")
+            if "tx_id" in locals() and tx_id:
+                await status_msg.edit_text(
+                    "⚠️ Pemasukan tersimpan lokal, tetapi sinkronisasi Notion masih tertunda.",
+                )
+                return
             await status_msg.edit_text(
                 f"❌ Gagal simpan pemasukan ke Notion.\n`{type(e).__name__}: {str(e)[:80]}`",
                 parse_mode="Markdown",
@@ -2223,7 +2214,15 @@ async def main() -> None:
             return
         subcat_name = subcats[subcat_index]
         try:
-            await user_notion.update_expense_subcategory(saved["page_id"], subcat_name, user_cache)
+            transaction = await db.find_transaction_by_notion_page_id(
+                user_id, saved["page_id"]
+            )
+            if transaction is None:
+                await callback.answer("Sesi edit lama kedaluwarsa.")
+                return
+            await db.update_transaction(
+                user_id, transaction["id"], {"subcategory": subcat_name}
+            )
             email_saved_pages[user_id]["subcat"] = subcat_name
             s = email_saved_pages[user_id]
             await db.set_email_saved_page(user_id, s["page_id"], s["description"], s["amount"], s["date"], s["subcat"], s["timestamp"], merchant=s.get("merchant", ""))
@@ -2320,7 +2319,7 @@ async def main() -> None:
         if not result:
             await callback.answer("Tidak punya akses.")
             return
-        user_notion, user_cache = result
+        _, user_cache = result
 
         cats = list(user_cache.category_subcategories.keys())
         if cat_index >= len(cats):
@@ -2334,9 +2333,17 @@ async def main() -> None:
         subcat_name = subcats[subcat_index]
 
         try:
-            await user_notion.update_expense_subcategory(page_id, subcat_name, user_cache)
+            transaction = await db.find_transaction_by_notion_page_id(
+                user_id, page_id
+            )
+            if transaction is None:
+                await callback.answer("Callback lama kedaluwarsa.")
+                return
+            await db.update_transaction(
+                user_id, transaction["id"], {"subcategory": subcat_name}
+            )
         except Exception as e:
-            log.error(f"update_expense_subcategory failed: {e}")
+            log.error(f"Local subcategory update failed: {e}")
             await callback.answer("❌ Gagal mengubah kategori.")
             return
 
@@ -2394,10 +2401,13 @@ async def main() -> None:
                     if not user_record:
                         continue
                     owner = user_record.owner_name
+                    tx_id = None
                     try:
                         rec_url = pending_rec["recurring_page_url"] if pending_rec else None
                         # Re-check duplicates — email may have logged it
-                        matches = await n.fetch_duplicates(owner, entry.amount, entry.date)
+                        matches = await reporting.duplicate_descriptions(
+                            user_id, entry.amount, entry.date
+                        )
                         is_dup = False
                         if matches:
                             is_dup = await agent.check_duplicate(matches, entry.description, entry.amount, entry.date, new_merchant=entry.merchant)
@@ -2419,12 +2429,16 @@ async def main() -> None:
                             )
                             await _prompt_next_debit(user_id)
                             continue
-                        url = await n.log_expense(entry, owner, c, recurring_page_url=rec_url)
-                        page_id = _url_to_id(url)
-                        last_saved_page[user_id] = page_id
+                        tx_id = await db.confirm_pending_expense(
+                            user_id,
+                            source="bank_email" if pending_rec else "telegram_text",
+                            source_ref=pending_rec["uid"] if pending_rec else None,
+                            recurring_page_id=_url_to_id(rec_url) if rec_url else None,
+                        )
+                        if not tx_id:
+                            continue
                         if pending_rec:
                             await db.mark_processed(pending_rec["uid"], pending_rec["sender"])
-                        await db.set_user_undo(user_id, page_id, entry.description, entry.amount, entry.date, entry.subcategory, merchant=entry.merchant)
                         await db.record_pattern(
                             user_id, entry.merchant, entry.subcategory,
                             entry.account, entry.amount, entry.date,
@@ -2436,15 +2450,29 @@ async def main() -> None:
                             await db.clear_pending_recurring(user_id)
                         await bot.send_message(
                             user_id,
-                            f"⏰ Waktu habis — otomatis tersimpan!\n\n{format_entry(entry, c)}",
+                            "⏰ Waktu habis — tersimpan lokal dan sinkronisasi "
+                            f"Notion diantrikan.\n\n{format_entry(entry, c)}",
                             parse_mode="Markdown",
-                            reply_markup=make_undo_keyboard(user_id),
                         )
                         await _prompt_next_debit(user_id)
                         photo_task = asyncio.create_task(_process_next_photo(user_id, owner))
                         photo_task.add_done_callback(lambda t: t.exception() and log.warning(f"Photo queue task failed: {t.exception()}"))
                     except Exception as e:
                         log.error(f"Auto-confirm failed for user {user_id}: {e}")
+                        if "tx_id" in locals() and tx_id:
+                            if pending_rec:
+                                await db.mark_processed(pending_rec["uid"], pending_rec["sender"])
+                                await db.clear_pending_recurring(user_id)
+                            pending_since.pop(user_id, None)
+                            await db.clear_pending_since(user_id)
+                            await db.clear_pending_expense(user_id)
+                            await bot.send_message(
+                                user_id,
+                                "⚠️ Tersimpan lokal, tetapi sinkronisasi Notion masih tertunda.",
+                            )
+                            await _prompt_next_debit(user_id)
+                            photo_task = asyncio.create_task(_process_next_photo(user_id, owner))
+                            photo_task.add_done_callback(lambda t: t.exception() and log.warning(f"Photo queue task failed: {t.exception()}"))
 
     # ── Startup ───────────────────────────────────────────────────────────────
     watch_over_task: asyncio.Task | None = None
@@ -2461,7 +2489,30 @@ async def main() -> None:
 
     if email_owner_record:
         email_notion = NotionClient.from_user(email_owner_record)
-        email_cache_holder.append(await email_notion.load_cache())
+        email_loaded = await load_resilient_cache(
+            references,
+            email_owner_record.telegram_id,
+            email_notion.load_cache,
+            timeout=20,
+            prefer_snapshot=True,
+        )
+        email_cache = email_loaded.cache
+        if email_loaded.error is not None:
+            log.warning(
+                "Email watcher starting with %s Notion cache: %s",
+                email_loaded.source,
+                email_loaded.error,
+            )
+            await db.record_operational_state(
+                "gmail",
+                success=False,
+                error=(
+                    "Notion cache unavailable at startup: "
+                    f"{type(email_loaded.error).__name__}: {email_loaded.error}; "
+                    f"fallback={email_loaded.source}"
+                ),
+            )
+        email_cache_holder.append(email_cache)
 
         async def _resolve_email_user(telegram_id: int) -> tuple | None:
             data = await get_user_notion(telegram_id)
@@ -2500,6 +2551,8 @@ async def main() -> None:
             on_save_fn=_on_email_saved,
             pending_since=pending_since,
             alert_fn=alert_owner,
+            budget_reporter=budgets.report,
+            reporting=reporting,
         )
         watcher_holder.append(email_watcher)
         watcher_task_ref = asyncio.create_task(email_watcher.run())
@@ -2525,7 +2578,34 @@ async def main() -> None:
 
     log.info("Bot starting...")
 
-    auto_confirm_task = asyncio.create_task(_auto_confirm_stale())
+    async def _supervise(name: str, factory) -> None:
+        """Restart a required background component if it exits unexpectedly."""
+        while True:
+            try:
+                await factory()
+                error = "worker exited unexpectedly"
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                log.exception("%s worker died; restarting in 10 seconds", name)
+            await db.record_operational_state(name, success=False, error=error)
+            await asyncio.sleep(10)
+
+    async def _app_heartbeat() -> None:
+        while True:
+            await db.record_operational_heartbeat(
+                "app_loop", metadata={"interval_seconds": 10}
+            )
+            await asyncio.sleep(10)
+
+    auto_confirm_task = asyncio.create_task(
+        _supervise("auto_confirm", _auto_confirm_stale)
+    )
+    notion_sync_task = asyncio.create_task(
+        _supervise("notion_sync", lambda: NotionSyncWorker(db).run())
+    )
+    app_heartbeat_task = asyncio.create_task(_app_heartbeat())
 
     async def _cleanup() -> None:
         # Cancel background tasks before closing DB
@@ -2533,11 +2613,26 @@ async def main() -> None:
             watcher_task_ref.cancel()
         if auto_confirm_task:
             auto_confirm_task.cancel()
+        if notion_sync_task:
+            notion_sync_task.cancel()
+        if app_heartbeat_task:
+            app_heartbeat_task.cancel()
         if watch_over_task:
             watch_over_task.cancel()
         # Allow cancelled tasks to process their CancelledError
         await asyncio.gather(
-            *(t for t in [watcher_task_ref, auto_confirm_task, watch_over_task] if t),
+            *(t for t in [
+                watcher_task_ref,
+                auto_confirm_task,
+                notion_sync_task,
+                app_heartbeat_task,
+                watch_over_task,
+            ] if t),
+            return_exceptions=True,
+        )
+        await asyncio.gather(
+            *(client.aclose() for client in user_notions.values()),
+            *([email_notion.aclose()] if email_notion is not None else []),
             return_exceptions=True,
         )
         await db.close()
@@ -2563,6 +2658,18 @@ async def main() -> None:
         dp.shutdown.register(on_shutdown)
 
         app = web.Application()
+        from api import register_system_routes
+        register_system_routes(app, db=db)
+        if config.api_token and config.api_user_id > 0:
+            from api import register_api_routes
+            register_api_routes(
+                app,
+                db=db,
+                token=config.api_token,
+                user_id=config.api_user_id,
+                max_body_bytes=config.api_max_body_bytes,
+            )
+            log.info("Android API enabled at /api/v1")
         SimpleRequestHandler(
             dispatcher=dp,
             bot=bot,
@@ -2575,15 +2682,56 @@ async def main() -> None:
         site = web.TCPSite(runner, host="0.0.0.0", port=config.port)
         await site.start()
         log.info("Webhook server listening on 0.0.0.0:%s, webhook URL: %s", config.port, webhook_url)
+        stop_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        registered_signals: list[signal.Signals] = []
+        for stop_signal in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(stop_signal, stop_event.set)
+                registered_signals.append(stop_signal)
+            except (NotImplementedError, RuntimeError):
+                log.warning(
+                    "Could not register graceful handler for %s",
+                    stop_signal.name,
+                )
         try:
-            await asyncio.Event().wait()
+            await stop_event.wait()
         finally:
+            for stop_signal in registered_signals:
+                loop.remove_signal_handler(stop_signal)
             await runner.cleanup()
             await _cleanup()
     else:
+        api_runner = None
         try:
+            from aiohttp import web
+            from api import register_system_routes
+
+            api_app = web.Application()
+            register_system_routes(api_app, db=db)
+            if config.api_token and config.api_user_id > 0:
+                from api import register_api_routes
+
+                register_api_routes(
+                    api_app,
+                    db=db,
+                    token=config.api_token,
+                    user_id=config.api_user_id,
+                    max_body_bytes=config.api_max_body_bytes,
+                )
+            api_runner = web.AppRunner(api_app)
+            await api_runner.setup()
+            api_site = web.TCPSite(api_runner, host="0.0.0.0", port=config.port)
+            await api_site.start()
+            log.info("Local HTTP service listening on 0.0.0.0:%s", config.port)
+            # A webhook configured by an earlier deployment must not block this
+            # polling-mode instance after a restart or environment change. Keep
+            # queued updates intact; Telegram will deliver them to polling.
+            await bot.delete_webhook(drop_pending_updates=False)
             await dp.start_polling(bot)
         finally:
+            if api_runner:
+                await api_runner.cleanup()
             await _cleanup()
 
 

@@ -2,35 +2,32 @@
 """
 Health check script for Docker and monitoring.
 
-Checks that the bot process (main.py) is running.
+Checks the application's local event loop and SQLite connection.
 Exit code 0 = healthy, 1 = unhealthy.
 """
 import os
 import sys
+import urllib.error
+import urllib.request
 
 
-def check_bot_running() -> bool:
-    """Check if python main.py process is alive by scanning /proc."""
+def check_app_liveness() -> bool:
+    """Return whether the local non-disclosing liveness endpoint responds."""
     try:
-        for pid in os.listdir("/proc"):
-            if not pid.isdigit():
-                continue
-            try:
-                cmdline_path = f"/proc/{pid}/cmdline"
-                with open(cmdline_path, "rb") as f:
-                    cmdline = f.read().decode("utf-8", errors="replace")
-                # cmdline is null-separated
-                if "main.py" in cmdline:
-                    return True
-            except (FileNotFoundError, PermissionError, ProcessLookupError):
-                continue
-    except Exception:
-        pass
-    return False
+        port = int(os.getenv("PORT", "8080"))
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/livez", timeout=2
+        ) as response:
+            return response.status == 200
+    except (OSError, urllib.error.URLError):
+        return False
+
+
+check_bot_running = check_app_liveness
 
 
 if __name__ == "__main__":
-    if check_bot_running():
+    if check_app_liveness():
         sys.exit(0)
     else:
         sys.exit(1)

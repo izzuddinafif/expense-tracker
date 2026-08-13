@@ -1,6 +1,7 @@
 import math
 from dataclasses import dataclass, field
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
+from datetime import date as _date
 
 
 def _validate_amount(cls, v: float) -> float:
@@ -55,6 +56,38 @@ class EmailTransaction(BaseModel):
     destination_account: str = ""  # for self-transfers: destination account name / bank label
     income_subcategory: str = ""  # for self-transfers: subcategory for the destination income entry
     skip_reason: str = ""      # why skipped (if type == "skip")
+
+    @field_validator("type")
+    @classmethod
+    def _valid_type(cls, v: str) -> str:
+        if v not in {"expense", "self_transfer", "skip"}:
+            raise ValueError("type must be expense, self_transfer, or skip")
+        return v
+
+    @field_validator("amount", "admin_fee", mode="before")
+    @classmethod
+    def _idr_integer(cls, v: float, info) -> float:
+        if isinstance(v, bool) or isinstance(v, str):
+            raise ValueError("IDR amounts must be numeric, not bool/string")
+        v = float(v)
+        if not math.isfinite(v) or not float(v).is_integer():
+            raise ValueError("IDR amounts must be integral")
+        if info.field_name == "admin_fee" and v < 0:
+            raise ValueError("admin_fee must be nonnegative")
+        return v
+
+    @model_validator(mode="after")
+    def _transaction_constraints(self):
+        if self.type != "skip":
+            if self.amount <= 0:
+                raise ValueError("amount must be positive")
+            try:
+                _date.fromisoformat(self.date)
+            except (TypeError, ValueError):
+                raise ValueError("date must be ISO YYYY-MM-DD")
+            if not self.account.strip():
+                raise ValueError("account is required for transactions")
+        return self
 
 
 def format_self_transfer_label(source_account: str, destination_account: str, kind: str) -> str:
@@ -186,6 +219,6 @@ class UserRecord:
             self.expenses_ds, self.subcategories_ds, self.accounts_ds,
             self.months_ds, self.years_ds, self.recurring_ds,
             self.income_ds, self.income_subcategories_ds,
-            self.income_months_ds, self.income_years_ds, self.budget_ds,
+            self.income_months_ds, self.income_years_ds,
             self.categories_ds,
         ])
