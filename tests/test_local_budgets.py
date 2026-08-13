@@ -89,6 +89,73 @@ async def test_budget_report_fuzzy_subcategory_and_warning(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_overlapping_budget_labels_assign_an_expense_once(tmp_path):
+    db = await Database.connect(str(tmp_path / "budgets.db"))
+    store = BudgetStore(db)
+    await store.initialize()
+    now = datetime.now(timezone.utc).isoformat()
+    await db._conn.execute(
+        "INSERT INTO transactions "
+        "(id,user_id,kind,status,amount_idr,occurred_on,description,"
+        "category,subcategory,account,source,created_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "overlap",
+            7,
+            "expense",
+            "confirmed",
+            50_000,
+            "2026-07-20",
+            "Nasi goreng",
+            "Food",
+            "Food delivery",
+            "Cash",
+            "test",
+            now,
+            now,
+        ),
+    )
+    await db._conn.commit()
+    try:
+        await store.set(7, "2026-07", "Food", 100_000)
+        await store.set(7, "2026-07", "Food delivery", 100_000)
+        report = await store.report(7, "2026-07")
+        assert {row["category"]: row["spent_idr"] for row in report} == {
+            "Food": 0,
+            "Food delivery": 50_000,
+        }
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_budget_uses_category_when_subcategory_differs_and_avoids_substring_collision(tmp_path):
+    db = await Database.connect(str(tmp_path / "budgets.db"))
+    store = BudgetStore(db)
+    await store.initialize()
+    now = datetime.now(timezone.utc).isoformat()
+    await db._conn.executemany(
+        "INSERT INTO transactions "
+        "(id,user_id,kind,status,amount_idr,occurred_on,description,"
+        "category,subcategory,account,source,created_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [
+            ("category-fallback", 7, "expense", "confirmed", 40_000, "2026-07-20", "Lunch", "Food", "Dining", "Cash", "test", now, now),
+            ("collision", 7, "expense", "confirmed", 60_000, "2026-07-21", "Card fee", "Fees", "Card fee", "Cash", "test", now, now),
+        ],
+    )
+    await db._conn.commit()
+    try:
+        await store.set(7, "2026-07", "Food", 100_000)
+        await store.set(7, "2026-07", "Car", 100_000)
+        report = {row["category"]: row for row in await store.report(7, "2026-07")}
+        assert report["Food"]["spent_idr"] == 40_000
+        assert report["Car"]["spent_idr"] == 0
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_budget_validation_and_upsert(tmp_path):
     db = await Database.connect(str(tmp_path / "budgets.db"))
     store = BudgetStore(db)

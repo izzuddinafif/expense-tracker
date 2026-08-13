@@ -80,7 +80,13 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
                     finishUpdate(db, ownerToken, generation, operation, claimToken, canonical)
                 }
                 "transaction_void" -> {
-                    val response = runCatching { api.deleteTransaction(operation.entityId) }
+                    val expectedUpdatedAt = runCatching {
+                        JSONObject(operation.payload).optString("expected_updated_at")
+                            .takeIf { it.isNotBlank() }
+                    }.getOrNull()
+                    val response = runCatching {
+                        api.deleteTransaction(operation.entityId, expectedUpdatedAt)
+                    }
                         .onFailure { Log.w(TAG, "Void failed for ${operation.entityId}", it) }
                     if (!response.getOrDefault(false)) {
                         val error = response.exceptionOrNull()?.message ?: api.lastError ?: "void failed"

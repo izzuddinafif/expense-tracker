@@ -84,7 +84,7 @@ class BankNotificationParserTest {
         val prefix = BankNotificationParser.parse(
             "id.bmri.livin",
             "Livin' by Mandiri",
-            "Transaksi berhasil IDR 75.500 ke KOPI SENJA",
+            "Pembayaran berhasil IDR 75.500 ke KOPI SENJA",
         )
         val suffix = BankNotificationParser.parse(
             "com.jago.digitalBanking",
@@ -96,6 +96,18 @@ class BankNotificationParserTest {
         assertTrue(!prefix.reviewRequired)
         assertEquals(9000L, suffix.amountIdr)
         assertTrue(!suffix.reviewRequired)
+    }
+
+    @Test
+    fun genericSuccessTemplateStaysInReview() {
+        val parsed = BankNotificationParser.parse(
+            "id.bmri.livin",
+            "Livin' by Mandiri",
+            "Transaksi berhasil Rp75.500 ke KOPI SENJA",
+        )
+
+        assertEquals(BankTransactionDirection.UNKNOWN, parsed.direction)
+        assertTrue(parsed.reviewRequired)
     }
 
     @Test
@@ -129,5 +141,29 @@ class BankNotificationParserTest {
         assertEquals(Bank.UNKNOWN, unknown.bank)
         assertTrue(unknown.reviewRequired)
         assertNotNull(unknown.amountIdr)
+    }
+
+    @Test
+    fun creditsAreNeverAutoSavedAsExpenses() {
+        val parsed = BankNotificationParser.parse(
+            "id.bmri.livin",
+            "Livin' by Mandiri",
+            "Dana masuk Rp 2.000.000 dari TRANSFER MASUK",
+        )
+
+        assertEquals(BankTransactionDirection.CREDIT, parsed.direction)
+        assertTrue(parsed.reviewRequired)
+    }
+
+    @Test
+    fun ambiguousDirectionRequiresReview() {
+        val parsed = BankNotificationParser.parse(
+            BankNotificationSources.BSI_BYOND_PACKAGE,
+            "BYOND by BSI",
+            "Rp 15.000 di TOKO SERBA ADA",
+        )
+
+        assertEquals(BankTransactionDirection.UNKNOWN, parsed.direction)
+        assertTrue(parsed.reviewRequired)
     }
 }

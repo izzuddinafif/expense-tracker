@@ -17,6 +17,7 @@ data class NotificationRecord(
     val amountIdr: Long? = null,
     val merchant: String? = null,
     val bank: String = "UNKNOWN",
+    val direction: String = "UNKNOWN",
     val occurredOn: String? = null,
     val reviewRequired: Boolean = true,
     val receivedAt: Long = System.currentTimeMillis(),

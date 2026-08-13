@@ -15,6 +15,7 @@ data class ParsedBankNotification(
     val transactionDate: LocalDate?,
     val sourceRef: String,
     val bank: Bank,
+    val direction: BankTransactionDirection,
     val reviewRequired: Boolean,
 ) {
     /** Alias useful to ingestion clients that call the value a transaction date. */
@@ -22,6 +23,9 @@ data class ParsedBankNotification(
 }
 
 enum class Bank { BSI, LIVIN_MANDIRI, JAGO, UNKNOWN }
+
+/** Direction is deliberately conservative: UNKNOWN always stays in review. */
+enum class BankTransactionDirection { DEBIT, CREDIT, UNKNOWN }
 
 /**
  * Notification sources accepted for ingestion.
@@ -61,6 +65,11 @@ object BankNotificationParser {
         val text = "$normalizedTitle $normalizedBody"
         val amount = extractAmount(text)
         val merchant = extractMerchant(text)
+        val direction = detectDirection(text)
+        val genericSuccess = Regex("(?i)\\btransaksi berhasil\\b").containsMatchIn(text)
+        val explicitDebit = Regex(
+            "(?i)\\b(?:pembayaran|payment|purchase|pembelian|debit|keluar|dibayar|kamu melakukan)\\b",
+        ).containsMatchIn(text)
         return ParsedBankNotification(
             packageName = normalizedPackage,
             title = normalizedTitle,
@@ -70,10 +79,12 @@ object BankNotificationParser {
             transactionDate = extractDate(text),
             sourceRef = fingerprint(normalizedPackage, normalizedTitle, normalizedBody),
             bank = bank,
+            direction = direction,
             // Package allowlisting is only a coarse signal. An unexpected
             // template (or a partially redacted notification) must stay in
             // the review inbox instead of being silently treated as parsed.
-            reviewRequired = bank == Bank.UNKNOWN || amount == null || merchant == null,
+            reviewRequired = bank == Bank.UNKNOWN || amount == null || merchant == null ||
+                direction != BankTransactionDirection.DEBIT || (genericSuccess && !explicitDebit),
         )
     }
 
@@ -122,6 +133,17 @@ object BankNotificationParser {
     }
 
     private fun extractMerchant(text: String): String? = merchantPattern.find(text)?.groupValues?.get(1)?.trim()?.trimEnd('.', ',')?.takeIf { it.isNotBlank() }
+
+    private fun detectDirection(text: String): BankTransactionDirection {
+        val normalized = text.lowercase(Locale.ROOT)
+        val credit = Regex("\\b(?:credit(?:ed)?|credited|diterima|received|masuk|pemasukan|transfer masuk)\\b")
+        val debit = Regex("\\b(?:pembayaran|payment|purchase|pembelian|debit|keluar|dibayar|kamu melakukan)\\b")
+        return when {
+            credit.containsMatchIn(normalized) -> BankTransactionDirection.CREDIT
+            debit.containsMatchIn(normalized) -> BankTransactionDirection.DEBIT
+            else -> BankTransactionDirection.UNKNOWN
+        }
+    }
 
     private fun extractDate(text: String): LocalDate? {
         datePattern.find(text)?.let {

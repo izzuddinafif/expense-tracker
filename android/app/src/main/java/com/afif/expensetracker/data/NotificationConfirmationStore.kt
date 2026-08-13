@@ -14,6 +14,7 @@ data class NotificationConfirmationDraft(
     val description: String,
     val category: String,
     val account: String,
+    val kind: String = "expense",
 )
 
 /**
@@ -41,6 +42,7 @@ class NotificationConfirmationStore(private val database: LedgerDatabase) {
             description = record.title,
             category = "Uncategorized",
             account = record.bank,
+            kind = if (record.direction == "CREDIT") "income" else "expense",
         )
         if (!isValid(values)) return@withTransaction false
         val occurredAt = LocalDate.parse(values.occurredOn.trim())
@@ -52,7 +54,7 @@ class NotificationConfirmationStore(private val database: LedgerDatabase) {
             TransactionEntity(
                 id = transactionId,
                 merchant = values.merchant.trim(),
-                amountMinor = -values.amountIdr,
+                amountMinor = if (values.kind == "income") values.amountIdr else -values.amountIdr,
                 description = values.description.trim(),
                 category = values.category.trim(),
                 account = values.account.trim(),
@@ -66,7 +68,7 @@ class NotificationConfirmationStore(private val database: LedgerDatabase) {
                 kind = "transaction",
                 entityId = transactionId,
                 payload = JSONObject()
-                    .put("kind", "expense")
+                    .put("kind", values.kind)
                     .put("amount_idr", values.amountIdr)
                     .put("occurred_on", values.occurredOn.trim())
                     .put("description", values.description.trim())

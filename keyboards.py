@@ -63,6 +63,13 @@ def make_email_edit_keyboard(user_id: int) -> InlineKeyboardMarkup:
     ])
 
 
+def make_post_save_edit_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Keep saved notifications quiet; expand into field actions on demand."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✏️ Edit", callback_data=f"email_edit:{user_id}"),
+    ]])
+
+
 def make_undo_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="↩️ Undo", callback_data=f"undo:{user_id}"),
@@ -93,7 +100,6 @@ def make_subcategory_keyboard(
         InlineKeyboardButton(text="⬅️ Kembali", callback_data=f"cat_back:{page_id}")
     ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
-
 
 
 

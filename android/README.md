@@ -21,6 +21,22 @@ and sync Gradle. Run:
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
+For a local signed release artifact, keep the keystore and passwords outside
+the repository and provide them only through the environment:
+
+```bash
+export LEDGERLY_SIGNING_STORE_FILE="$HOME/.config/ledgerly/android-release.keystore"
+export LEDGERLY_SIGNING_STORE_PASSWORD='use-your-local-secret'
+export LEDGERLY_SIGNING_KEY_ALIAS='ledgerly'
+export LEDGERLY_SIGNING_KEY_PASSWORD="$LEDGERLY_SIGNING_STORE_PASSWORD"
+./gradlew --no-daemon --max-workers=1 \
+  -Pkotlin.compiler.execution.strategy=in-process \
+  :app:assembleRelease
+```
+
+If signing variables are absent, `assembleRelease` remains useful as an
+unsigned CI/build verification artifact; distribution builds must set all four.
+
 ## Emulator E2E tests
 
 The command-line SDK includes an API 35 AOSP AVD named

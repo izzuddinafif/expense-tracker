@@ -35,8 +35,8 @@ ssh_target="${offsite_user}@${offsite_host}"
 staging_dir=$(mktemp -d "${TMPDIR:-/tmp}/ledgerly-offsite.XXXXXX")
 status_recorded=0
 container=""
-latest_db=""
-db_name=""
+latest_db="pending"
+db_name="unknown.db"
 
 cleanup() { rm -rf "$staging_dir"; }
 
@@ -65,8 +65,6 @@ on_exit() {
 }
 trap on_exit EXIT INT TERM
 
-"$repo_root/ops/ledgerly_backup.sh"
-
 container_list=$(docker ps --filter "label=coolify.name=vamkwvui8e3cq8kkjxdo3zka" --format '{{.Names}}')
 container_count=$(printf '%s\n' "$container_list" | sed '/^$/d' | wc -l | tr -d ' ')
 if [ "$container_count" -ne 1 ]; then
@@ -74,6 +72,11 @@ if [ "$container_count" -ne 1 ]; then
     exit 1
 fi
 container="$container_list"
+
+# Discover all prerequisites before the local wrapper can record a green
+# local-only heartbeat. If the end-to-end step fails later, the EXIT trap can
+# now mark the same health row degraded.
+"$repo_root/ops/ledgerly_backup.sh"
 
 latest_db=$(find "$backup_dir" -maxdepth 1 -type f -name 'expense_tracker-*.db' -printf '%T@ %p\n' \
     | sort -nr | sed -n '1s/^[^ ]* //p')

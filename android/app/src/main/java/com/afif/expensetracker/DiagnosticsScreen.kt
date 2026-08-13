@@ -249,6 +249,27 @@ private fun OperationalHealthCard(context: Context) {
             refresh()
         }
     }
+    fun restoreRemote(operation: SyncOperation) {
+        scope.launch {
+            val remote = withContext(Dispatchers.IO) {
+                runCatching { LedgerApi(baseUrl, token).fetchTransaction(operation.entityId) }
+                    .getOrNull()
+            }
+            if (remote == null) {
+                refresh()
+                return@launch
+            }
+            withContext(Dispatchers.IO) {
+                val db = LedgerDatabase.get(context)
+                db.withTransaction {
+                    if (remote.voided) db.transactionDao().delete(operation.entityId)
+                    else db.transactionDao().upsert(remote.transaction)
+                    db.syncDao().discardFailed(operation.id)
+                }
+            }
+            refresh()
+        }
+    }
     androidx.compose.runtime.LaunchedEffect(baseUrl, token) { refresh() }
 
     Card(
@@ -319,10 +340,15 @@ private fun OperationalHealthCard(context: Context) {
                                 ) { Text("Discard") }
                             } else {
                                 Text(
-                                    "Keep retrying update/void failures to avoid local and server records diverging.",
+                                    "The local mutation is blocked. Restore the server copy or retry it.",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     style = MaterialTheme.typography.bodySmall,
                                 )
+                                OutlinedButton(
+                                    onClick = { restoreRemote(operation) },
+                                    enabled = baseUrl.isNotBlank() && token.isNotBlank(),
+                                    modifier = Modifier.testTag("local_sync_restore_${operation.id}"),
+                                ) { Text("Restore server") }
                             }
                         }
                     }

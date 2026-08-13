@@ -1,6 +1,6 @@
 import pytest
 
-from db import Database
+from db import Database, TransactionConflictError
 
 
 async def make_db(tmp_path):
@@ -120,6 +120,41 @@ async def test_update_transaction_validates_and_scopes_user(tmp_path):
             await db.update_transaction(7, tx_id, {"status": "voided"})
         row, changed = await db.update_transaction(8, tx_id, {"description": "nope"})
         assert row is None and changed is False
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_update_transaction_rejects_stale_server_revision(tmp_path):
+    db = await make_db(tmp_path)
+    try:
+        tx_id = await make_transaction(db)
+        current = (await db.list_transactions(7))[0]
+        with pytest.raises(TransactionConflictError):
+            await db.update_transaction(
+                7,
+                tx_id,
+                {"description": "stale edit"},
+                expected_updated_at="2000-01-01T00:00:00+00:00",
+            )
+        assert (await db.list_transactions(7))[0]["description"] == current["description"]
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_void_transaction_rejects_stale_server_revision(tmp_path):
+    db = await make_db(tmp_path)
+    try:
+        tx_id = await make_transaction(db)
+        current = (await db.list_transactions(7))[0]
+        with pytest.raises(TransactionConflictError):
+            await db.void_transaction(
+                7,
+                tx_id,
+                expected_updated_at="2000-01-01T00:00:00+00:00",
+            )
+        assert (await db.list_transactions(7))[0]["status"] == current["status"]
     finally:
         await db.close()
 

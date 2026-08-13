@@ -109,6 +109,27 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
         ?.filter { it.status == "confirmed" }
         ?.map { it.transaction }
 
+    fun fetchTransaction(transactionId: String): RemoteTransaction? {
+        val request = Request.Builder()
+            .url(baseUrl.trimEnd('/') + "/api/v1/transactions/$transactionId")
+            .header("Authorization", "Bearer $deviceToken")
+            .get()
+            .build()
+        return client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                rememberHttpFailure(response)
+                return@use null
+            }
+            lastError = null
+            val value = JSONObject(response.body?.string().orEmpty())
+                .getJSONObject("transaction")
+            RemoteTransaction(
+                transaction = parseTransaction(value),
+                voided = value.optString("status").equals("voided", ignoreCase = true),
+            )
+        }
+    }
+
     /** Update editable transaction fields using the server's partial-update endpoint. */
     fun updateTransaction(transactionId: String, changes: JSONObject): TransactionEntity? {
         val request = Request.Builder()
@@ -128,10 +149,11 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
     }
 
     /** Void a transaction. The API returns no required body on success. */
-    fun deleteTransaction(transactionId: String): Boolean {
+    fun deleteTransaction(transactionId: String, expectedUpdatedAt: String? = null): Boolean {
         val request = Request.Builder()
             .url(baseUrl.trimEnd('/') + "/api/v1/transactions/$transactionId")
             .header("Authorization", "Bearer $deviceToken")
+            .apply { expectedUpdatedAt?.let { header("If-Match", it) } }
             .delete()
             .build()
         return client.newCall(request).execute().use {
@@ -354,6 +376,7 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
             account = value.optString("account"),
             occurredAt = occurredAt,
             syncState = "synced",
+            serverUpdatedAt = value.optString("updated_at").takeIf { it.isNotBlank() && it != "null" },
         )
     }
 }
@@ -363,6 +386,11 @@ data class SyncStatus(
     val failedCount: Int,
     val oldestPendingAt: String?,
     val recentErrors: List<SyncError>,
+)
+
+data class RemoteTransaction(
+    val transaction: TransactionEntity,
+    val voided: Boolean,
 )
 
 data class SyncError(val transactionId: String?, val message: String)

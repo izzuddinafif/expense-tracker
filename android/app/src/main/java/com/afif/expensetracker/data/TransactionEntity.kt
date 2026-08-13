@@ -14,4 +14,6 @@ data class TransactionEntity(
     val account: String = "",
     val occurredAt: Long = System.currentTimeMillis(),
     val syncState: String = "pending",
+    /** Server revision used to fence edits against a newer remote change. */
+    val serverUpdatedAt: String? = null,
 )

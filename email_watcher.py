@@ -31,7 +31,7 @@ from html.parser import HTMLParser
 from typing import Callable
 
 from db import Database
-from keyboards import make_category_keyboard, make_confirm_keyboard, make_email_edit_keyboard
+from keyboards import make_category_keyboard, make_confirm_keyboard, make_post_save_edit_keyboard
 from models import ExpenseEntry, IncomeEntry, EmailTransaction, NotionCache, format_self_transfer_label
 
 from aiogram.types import (
@@ -887,7 +887,7 @@ class EmailWatcher:
                     )
                     if not float(entry.amount).is_integer():
                         raise ValueError("IDR ledger amounts must be whole rupiah")
-                    _, created = await self._db.create_confirmed_external_transaction(
+                    row, created = await self._db.create_confirmed_external_transaction(
                         target_id,
                         kind="expense",
                         amount_idr=int(entry.amount),
@@ -903,6 +903,19 @@ class EmailWatcher:
                     # The SQLite ledger/outbox commit is durable. Mark the email
                     # processed before best-effort budget and Telegram side effects.
                     await self._db.mark_processed(uid, sender)
+                    if self._on_save_fn:
+                        try:
+                            await self._on_save_fn(
+                                target_id,
+                                row["id"],
+                                entry.description,
+                                entry.amount,
+                                entry.date,
+                                entry.subcategory,
+                                entry.merchant,
+                            )
+                        except Exception:
+                            log.exception("Could not prepare post-save edit for email [%s]", uid)
                     alert_task = asyncio.create_task(
                         self._check_budget_alert(
                             entry,
@@ -921,7 +934,7 @@ class EmailWatcher:
                     sub_text = subcat_match[0] if subcat_match else "📦 Miscellaneous"
                     acc_text = acc_match[0] if acc_match else f"❓ {tx.account}"
                     merchant_line = f"🏪 {tx.merchant}\n" if tx.merchant else ""
-                    await self._notify(
+                    await self._notify_with_markup(
                         f"📧 *Otomatis tercatat dari email*\n"
                         f"📝 {tx.description}\n"
                         f"💰 Rp {tx.amount:,.0f}\n"
@@ -930,6 +943,7 @@ class EmailWatcher:
                         f"🏷 {sub_text}\n"
                         f"🏦 {acc_text}\n\n"
                         f"Sinkronisasi Notion diantrikan.",
+                        make_post_save_edit_keyboard(target_id),
                         user_id=target_id,
                     )
 

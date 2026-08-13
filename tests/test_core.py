@@ -15,6 +15,7 @@ from cryptography.fernet import Fernet
 
 from models import ExpenseEntry, IncomeEntry, QueryIntent, EmailTransaction, NotionCache, _fuzzy_match, format_self_transfer_label
 from email_watcher import EmailWatcher, _is_jago_pocket_transfer
+from agent import _looks_like_self_transfer
 from db import Database
 from notion import _coerce_date
 
@@ -171,6 +172,16 @@ class TestEmailTransaction:
         body = "Rp500.000 telah dipindahkan dari Kantong Utama ke Kantong Spending."
         assert _is_jago_pocket_transfer("noreply@jago.com", subject, body) is True
         assert _is_jago_pocket_transfer("noreply@jago.com", "Bukti transfer", "Pindah saldo ke bank lain") is False
+
+    def test_explicit_own_account_transfer_language_is_detectable(self):
+        assert _looks_like_self_transfer(
+            "Transfer berhasil",
+            "Dana dipindahkan ke rekening sendiri dari Mandiri ke Jago",
+        )
+        assert not _looks_like_self_transfer(
+            "Pembayaran",
+            "Transfer ke toko langganan",
+        )
 
     def test_skip(self):
         tx = EmailTransaction(

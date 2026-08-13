@@ -30,6 +30,7 @@ from keyboards import (
     make_edit_field_keyboard,
     make_undo_keyboard,
     make_email_edit_keyboard,
+    make_post_save_edit_keyboard,
     make_income_edit_field_keyboard,
 )
 from models import NotionCache, ExpenseEntry, IncomeEntry
@@ -222,15 +223,49 @@ async def main() -> None:
 
     budget_commands = BudgetCommandService(budgets, _parse_idr_amount)
 
+    POST_SAVE_EDIT_TTL_SECONDS = 60 * 60
+
     async def _get_email_saved(user_id: int) -> dict | None:
         saved = email_saved_pages.get(user_id)
         if not saved:
             return None
-        if datetime.now().timestamp() - saved["timestamp"] > 600:
+        if datetime.now().timestamp() - saved["timestamp"] > POST_SAVE_EDIT_TTL_SECONDS:
             email_saved_pages.pop(user_id, None)
             await db.clear_email_saved_page(user_id)
             return None
         return saved
+
+    async def _find_saved_transaction(user_id: int, saved: dict) -> dict | None:
+        """Resolve new local transaction IDs and legacy Notion page IDs."""
+        transaction = await db.find_transaction_by_id(user_id, saved.get("page_id", ""))
+        if transaction is not None:
+            return transaction
+        return await db.find_transaction_by_notion_page_id(user_id, saved.get("page_id", ""))
+
+    async def _remember_saved_transaction(
+        user_id: int,
+        transaction_id: str,
+        description: str,
+        amount: float,
+        occurred_on: str,
+        subcategory: str,
+        merchant: str = "",
+    ) -> None:
+        timestamp = datetime.now().timestamp()
+        saved = {
+            "page_id": transaction_id,
+            "description": description,
+            "amount": amount,
+            "date": occurred_on,
+            "subcat": subcategory,
+            "merchant": merchant,
+            "timestamp": timestamp,
+        }
+        email_saved_pages[user_id] = saved
+        await db.set_email_saved_page(
+            user_id, transaction_id, description, amount, occurred_on,
+            subcategory, timestamp, merchant=merchant,
+        )
 
     async def _prompt_next_debit(user_id: int) -> None:
         """Promote the next queued Jago debit email after the current pending expense is terminal.
@@ -349,7 +384,9 @@ async def main() -> None:
         desc = undo.get("description") or "transaksi terakhir"
         amount = undo.get("amount") or 0
         tx_date = undo.get("date") or ""
-        transaction = await db.find_transaction_by_notion_page_id(user_id, page_id)
+        transaction = await db.find_transaction_by_id(user_id, page_id)
+        if transaction is None:
+            transaction = await db.find_transaction_by_notion_page_id(user_id, page_id)
         if transaction is None:
             await db.clear_user_undo(user_id)
             return False, "Undo lama kedaluwarsa karena belum terhubung ke ledger lokal."
@@ -1202,7 +1239,7 @@ async def main() -> None:
                 await msg.answer("Sesi kedaluwarsa.")
                 return
             page_id = saved["page_id"]
-            transaction = await db.find_transaction_by_notion_page_id(user_id, page_id)
+            transaction = await _find_saved_transaction(user_id, saved)
             if transaction is None:
                 email_saved_pages.pop(user_id, None)
                 await db.clear_email_saved_page(user_id)
@@ -1492,6 +1529,16 @@ async def main() -> None:
             if pending_rec:
                 await db.mark_processed(pending_rec["uid"], pending_rec["sender"])
 
+            await _remember_saved_transaction(
+                user_id,
+                tx_id,
+                entry.description,
+                entry.amount,
+                entry.date,
+                entry.subcategory,
+                entry.merchant,
+            )
+
             await db.clear_pending_expense(user_id)
             pending_since.pop(user_id, None)
             await db.clear_pending_since(user_id)
@@ -1504,6 +1551,7 @@ async def main() -> None:
             )
             await status_msg.edit_text(
                 "✅ Tersimpan lokal. Sinkronisasi Notion sudah diantrikan.",
+                reply_markup=make_post_save_edit_keyboard(user_id),
             )
             await _prompt_next_debit(user_id)
             photo_task = asyncio.create_task(_process_next_photo(user_id, owner))
@@ -2026,9 +2074,10 @@ async def main() -> None:
             return
         saved = await _get_email_saved(user_id)
         if not saved:
-            await callback.answer("Waktu edit sudah habis (10 menit).")
+            await callback.answer("Waktu edit sudah habis (1 jam).")
             await callback.message.edit_reply_markup(reply_markup=None)
             return
+        await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(
             f"✏️ *Edit transaksi*\n\n"
             f"📝 {saved['description']}\n"
@@ -2049,7 +2098,7 @@ async def main() -> None:
             await callback.answer("Tidak punya akses.")
             return
         if not await _get_email_saved(user_id):
-            await callback.answer("Waktu edit sudah habis (10 menit).")
+            await callback.answer("Waktu edit sudah habis (1 jam).")
             return
         email_pending_edit[user_id] = "desc"
         await callback.message.edit_reply_markup(reply_markup=None)
@@ -2064,7 +2113,7 @@ async def main() -> None:
             await callback.answer("Tidak punya akses.")
             return
         if not await _get_email_saved(user_id):
-            await callback.answer("Waktu edit sudah habis (10 menit).")
+            await callback.answer("Waktu edit sudah habis (1 jam).")
             return
         email_pending_edit[user_id] = "amount"
         await callback.message.edit_reply_markup(reply_markup=None)
@@ -2079,7 +2128,7 @@ async def main() -> None:
             await callback.answer("Tidak punya akses.")
             return
         if not await _get_email_saved(user_id):
-            await callback.answer("Waktu edit sudah habis (10 menit).")
+            await callback.answer("Waktu edit sudah habis (1 jam).")
             return
         email_pending_edit[user_id] = "date"
         await callback.message.edit_reply_markup(reply_markup=None)
@@ -2094,7 +2143,7 @@ async def main() -> None:
             await callback.answer("Tidak punya akses.")
             return
         if not await _get_email_saved(user_id):
-            await callback.answer("Waktu edit sudah habis (10 menit).")
+            await callback.answer("Waktu edit sudah habis (1 jam).")
             return
         email_pending_edit[user_id] = "account"
         await callback.message.edit_reply_markup(reply_markup=None)
@@ -2109,7 +2158,7 @@ async def main() -> None:
             await callback.answer("Tidak punya akses.")
             return
         if not await _get_email_saved(user_id):
-            await callback.answer("Waktu edit sudah habis (10 menit).")
+            await callback.answer("Waktu edit sudah habis (1 jam).")
             return
         email_pending_edit[user_id] = "detail"
         await callback.message.edit_reply_markup(reply_markup=None)
@@ -2129,7 +2178,7 @@ async def main() -> None:
             return
         saved = await _get_email_saved(user_id)
         if not saved:
-            await callback.answer("Waktu edit sudah habis (10 menit).")
+            await callback.answer("Waktu edit sudah habis (1 jam).")
             return
         result = await get_user_notion(user_id)
         if not result:
@@ -2258,9 +2307,7 @@ async def main() -> None:
             return
         subcat_name = subcats[subcat_index]
         try:
-            transaction = await db.find_transaction_by_notion_page_id(
-                user_id, saved["page_id"]
-            )
+            transaction = await _find_saved_transaction(user_id, saved)
             if transaction is None:
                 await callback.answer("Sesi edit lama kedaluwarsa.")
                 return
@@ -2377,9 +2424,8 @@ async def main() -> None:
         subcat_name = subcats[subcat_index]
 
         try:
-            transaction = await db.find_transaction_by_notion_page_id(
-                user_id, page_id
-            )
+            saved = await _get_email_saved(user_id)
+            transaction = await _find_saved_transaction(user_id, saved or {"page_id": page_id})
             if transaction is None:
                 await callback.answer("Callback lama kedaluwarsa.")
                 return
@@ -2483,6 +2529,15 @@ async def main() -> None:
                             continue
                         if pending_rec:
                             await db.mark_processed(pending_rec["uid"], pending_rec["sender"])
+                        await _remember_saved_transaction(
+                            user_id,
+                            tx_id,
+                            entry.description,
+                            entry.amount,
+                            entry.date,
+                            entry.subcategory,
+                            entry.merchant,
+                        )
                         await db.record_pattern(
                             user_id, entry.merchant, entry.subcategory,
                             entry.account, entry.amount, entry.date,
@@ -2497,6 +2552,7 @@ async def main() -> None:
                             "⏰ Waktu habis — tersimpan lokal dan sinkronisasi "
                             f"Notion diantrikan.\n\n{format_entry(entry, c)}",
                             parse_mode="Markdown",
+                            reply_markup=make_post_save_edit_keyboard(user_id),
                         )
                         await _prompt_next_debit(user_id)
                         photo_task = asyncio.create_task(_process_next_photo(user_id, owner))

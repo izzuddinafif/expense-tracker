@@ -11,7 +11,7 @@ from typing import Any, Awaitable, Callable
 
 from aiohttp import web
 
-from db import Database
+from db import Database, TransactionConflictError
 from local_budgets import BudgetStore
 
 log = logging.getLogger(__name__)
@@ -210,6 +210,17 @@ def register_api_routes(
             "checkpoint_cursor": checkpoint_cursor,
         })
 
+    async def get_transaction(request: web.Request) -> web.Response:
+        denied = await require_auth(request)
+        if denied is not None:
+            return denied
+        row = await db.find_transaction_by_id(
+            user_id, request.match_info["transaction_id"]
+        )
+        if row is None:
+            return web.json_response({"error": "not_found"}, status=404)
+        return web.json_response({"transaction": _public_transaction(row)})
+
     async def create_transaction(request: web.Request) -> web.Response:
         denied = await require_auth(request)
         if denied is not None:
@@ -288,11 +299,19 @@ def register_api_routes(
             return denied
         try:
             changes = await read_json(request)
+            expected_updated_at = changes.pop("expected_updated_at", None)
+            if expected_updated_at is not None and not isinstance(expected_updated_at, str):
+                raise ValueError("expected_updated_at must be a string")
             if "occurred_on" in changes:
                 changes["occurred_on"] = _canonical_date(changes["occurred_on"])
             row, changed = await db.update_transaction(
-                user_id, request.match_info["transaction_id"], changes
+                user_id,
+                request.match_info["transaction_id"],
+                changes,
+                expected_updated_at=expected_updated_at,
             )
+        except TransactionConflictError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
         except (TypeError, ValueError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
         if row is None:
@@ -305,9 +324,15 @@ def register_api_routes(
         denied = await require_auth(request)
         if denied is not None:
             return denied
-        row, changed = await db.void_transaction(
-            user_id, request.match_info["transaction_id"]
-        )
+        expected_updated_at = request.headers.get("If-Match")
+        try:
+            row, changed = await db.void_transaction(
+                user_id,
+                request.match_info["transaction_id"],
+                expected_updated_at=expected_updated_at,
+            )
+        except TransactionConflictError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
         if row is None:
             return web.json_response({"error": "not_found"}, status=404)
         return web.json_response(
@@ -447,6 +472,9 @@ def register_api_routes(
     app.router.add_delete("/api/v1/budgets", delete_budget)
     app.router.add_get("/api/v1/transactions", list_transactions)
     app.router.add_get("/api/v1/transactions/changes", transaction_changes)
+    app.router.add_get(
+        "/api/v1/transactions/{transaction_id}", get_transaction
+    )
     app.router.add_post("/api/v1/transactions", create_transaction)
     app.router.add_patch(
         "/api/v1/transactions/{transaction_id}/confirm", confirm_transaction

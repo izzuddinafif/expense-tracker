@@ -15,7 +15,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SyncCheckpoint::class,
         SyncRunLock::class,
     ],
-    version = 8,
+    version = 10,
     exportSchema = false,
 )
 abstract class LedgerDatabase : RoomDatabase() {
@@ -53,13 +53,23 @@ abstract class LedgerDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE ingestion_queue ADD COLUMN suspectedDuplicateOf INTEGER")
             }
         }
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE ingestion_queue ADD COLUMN direction TEXT NOT NULL DEFAULT 'UNKNOWN'")
+            }
+        }
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE transactions ADD COLUMN serverUpdatedAt TEXT")
+            }
+        }
         @Volatile private var instance: LedgerDatabase? = null
         fun get(context: Context): LedgerDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context,
                 LedgerDatabase::class.java,
                 "ledgerly.db",
-            ).addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8).build().also { instance = it }
+            ).addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10).build().also { instance = it }
         }
     }
 }

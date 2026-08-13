@@ -39,6 +39,7 @@ class NotificationIngestor(
             amountIdr = parsed.amountIdr,
             merchant = parsed.merchant,
             bank = parsed.bank.name,
+            direction = parsed.direction.name,
             occurredOn = parsed.transactionDate?.toString(),
             reviewRequired = parsed.reviewRequired,
             receivedAt = receivedAt,

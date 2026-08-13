@@ -5,6 +5,17 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+val releaseStoreFile = System.getenv("LEDGERLY_SIGNING_STORE_FILE").orEmpty()
+val releaseStorePassword = System.getenv("LEDGERLY_SIGNING_STORE_PASSWORD").orEmpty()
+val releaseKeyAlias = System.getenv("LEDGERLY_SIGNING_KEY_ALIAS").orEmpty()
+val releaseKeyPassword = System.getenv("LEDGERLY_SIGNING_KEY_PASSWORD").orEmpty()
+val releaseSigningReady = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all(String::isNotBlank)
+
 android { namespace = "com.afif.expensetracker"; compileSdk = 35
     defaultConfig {
         applicationId = "com.afif.expensetracker"
@@ -13,6 +24,21 @@ android { namespace = "com.afif.expensetracker"; compileSdk = 35
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+    signingConfigs {
+        create("release") {
+            if (releaseSigningReady) {
+                storeFile = file(releaseStoreFile)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            if (releaseSigningReady) signingConfig = signingConfigs.getByName("release")
+        }
     }
     buildFeatures { compose = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }

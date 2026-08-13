@@ -81,6 +81,9 @@ def load_config() -> Config:
         else {}
     )
     explicit_allowed_ids = _parse_telegram_ids(os.getenv("TELEGRAM_ALLOWED_IDS", ""))
+    api_token = os.getenv("API_TOKEN", "").strip()
+    if api_token and len(api_token) < 32:
+        raise ValueError("API_TOKEN must contain at least 32 characters")
     return Config(
         telegram_token=os.environ["TELEGRAM_TOKEN"],
         openrouter_api_key=os.environ["OPENROUTER_API_KEY"],
@@ -96,7 +99,7 @@ def load_config() -> Config:
         webhook_path=os.getenv("WEBHOOK_PATH", "/webhook"),
         webhook_secret=os.getenv("WEBHOOK_SECRET", ""),
         port=int(os.getenv("PORT", "8080")),
-        api_token=os.getenv("API_TOKEN", ""),
+        api_token=api_token,
         api_user_id=int(os.getenv("API_USER_ID", "0")),
         api_max_body_bytes=int(os.getenv("API_MAX_BODY_BYTES", "65536")),
         db_path=os.getenv("DB_PATH", "data/expense_tracker.db"),

@@ -172,9 +172,10 @@ private fun Dashboard(openInbox: () -> Unit) {
     val month = remember { YearMonth.now() }
     val monthStart = remember(month) { month.atDay(1).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli() }
     val monthEnd = remember(month) { month.plusMonths(1).atDay(1).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli() }
-    val transactionsState by db.transactionDao().observeOccurredBetween(monthStart, monthEnd)
-        .map<List<TransactionEntity>, List<TransactionEntity>?> { it }
-        .collectAsState(initial = null)
+    val transactionsFlow = remember(db, monthStart, monthEnd) {
+        db.transactionDao().observeOccurredBetween(monthStart, monthEnd)
+    }
+    val transactionsState by transactionsFlow.collectAsState(initial = null)
     val transactions = transactionsState.orEmpty()
     val summary = remember(transactions, month) {
         DashboardSummaryCalculator.summarize(transactions, month)
@@ -342,9 +343,8 @@ private fun Dashboard(openInbox: () -> Unit) {
 private fun Inbox() {
     val context = LocalContext.current
     val db = LedgerDatabase.get(context)
-    val recordsState by db.notificationDao().observeByStatus("pending", 100)
-        .map<List<NotificationRecord>, List<NotificationRecord>?> { it }
-        .collectAsState(initial = null)
+    val recordsFlow = remember(db) { db.notificationDao().observeByStatus("pending", 100) }
+    val recordsState by recordsFlow.collectAsState(initial = null)
     val records = recordsState.orEmpty()
     val scope = rememberCoroutineScope()
     val pending = records
@@ -417,7 +417,7 @@ private fun Inbox() {
                                 }
                             },
                         ) {
-                            Text(if (rec.reviewRequired) "Review expense" else "Add expense")
+                            Text(if (rec.reviewRequired) "Review capture" else "Add expense")
                         }
                     }
                 }
@@ -439,13 +439,18 @@ private fun Inbox() {
                 scope.launch {
                     reviewSaving = true
                     reviewError = null
-                    val confirmed = NotificationConfirmationStore(db).confirm(record.id, draft)
-                    reviewSaving = false
-                    if (confirmed) {
-                        reviewingId = null
-                        SyncScheduler.enqueue(context)
-                    } else {
-                        reviewError = "This capture changed or could not be saved. Review it again."
+                    try {
+                        val confirmed = NotificationConfirmationStore(db).confirm(record.id, draft)
+                        if (confirmed) {
+                            reviewingId = null
+                            SyncScheduler.enqueue(context)
+                        } else {
+                            reviewError = "This capture changed or could not be saved. Review it again."
+                        }
+                    } catch (error: Exception) {
+                        reviewError = "Could not save this capture. Try again."
+                    } finally {
+                        reviewSaving = false
                     }
                 }
             },
@@ -476,12 +481,15 @@ private fun NotificationReviewDialog(
     var description by rememberSaveable(record.id) { mutableStateOf(record.title) }
     var category by rememberSaveable(record.id) { mutableStateOf("Uncategorized") }
     var account by rememberSaveable(record.id) { mutableStateOf(record.bank) }
+    var kind by rememberSaveable(record.id) {
+        mutableStateOf(if (record.direction == "CREDIT") "income" else "expense")
+    }
     var validationError by rememberSaveable(record.id) { mutableStateOf<String?>(null) }
     var showDatePicker by rememberSaveable(record.id) { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Review captured expense") },
+        title = { Text("Review captured transaction") },
         text = {
             Column(
                 Modifier
@@ -519,6 +527,21 @@ private fun NotificationReviewDialog(
                     modifier = Modifier.fillMaxWidth(),
                     testTag = "review_amount",
                 )
+                Text("Type", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = kind == "expense",
+                        onClick = { kind = "expense" },
+                        label = { Text("Expense") },
+                        modifier = Modifier.testTag("review_kind_expense"),
+                    )
+                    FilterChip(
+                        selected = kind == "income",
+                        onClick = { kind = "income" },
+                        label = { Text("Income") },
+                        modifier = Modifier.testTag("review_kind_income"),
+                    )
+                }
                 LedgerDateField(
                     occurredOn,
                     { occurredOn = it },
@@ -581,12 +604,13 @@ private fun NotificationReviewDialog(
                                 description = description.trim(),
                                 category = category.trim(),
                                 account = account.trim(),
+                                kind = kind,
                             ),
                         )
                     }
                 },
             ) {
-                Text(if (saving) "Saving…" else "Save expense")
+                Text(if (saving) "Saving…" else "Save transaction")
             }
         },
         dismissButton = {
@@ -609,9 +633,8 @@ private fun NotificationReviewDialog(
 private fun Transactions(openDetail: (TransactionEntity) -> Unit) {
     val context = LocalContext.current
     val db = LedgerDatabase.get(context)
-    val transactionsState by db.transactionDao().observeRecent(500)
-        .map<List<TransactionEntity>, List<TransactionEntity>?> { it }
-        .collectAsState(initial = null)
+    val transactionsFlow = remember(db) { db.transactionDao().observeRecent(500) }
+    val transactionsState by transactionsFlow.collectAsState(initial = null)
     val transactions = transactionsState.orEmpty()
     var query by rememberSaveable { mutableStateOf("") }
     var kindName by rememberSaveable { mutableStateOf(TransactionKind.ALL.name) }
@@ -993,6 +1016,7 @@ private fun TransactionEntity.toDetailSnapshot(): String = JSONObject()
     .put("account", account)
     .put("occurredAt", occurredAt)
     .put("syncState", syncState)
+    .put("serverUpdatedAt", serverUpdatedAt)
     .toString()
 
 private fun detailSnapshotToTransaction(snapshot: String?): TransactionEntity? = runCatching {
@@ -1007,6 +1031,7 @@ private fun detailSnapshotToTransaction(snapshot: String?): TransactionEntity? =
         account = value.optString("account"),
         occurredAt = value.getLong("occurredAt"),
         syncState = value.optString("syncState", "pending"),
+        serverUpdatedAt = value.optString("serverUpdatedAt").takeIf { it.isNotBlank() && it != "null" },
     )
 }.getOrNull()
 
@@ -1020,9 +1045,13 @@ private fun TransactionDetail(transactionId: String, onBack: () -> Unit) {
     val context = LocalContext.current
     val db = LedgerDatabase.get(context)
     val scope = rememberCoroutineScope()
-    val observation by db.transactionDao().observeById(transactionId)
-        .map<TransactionEntity?, TransactionObservation> { TransactionObservation.Loaded(it) }
-        .collectAsState(initial = TransactionObservation.Loading)
+    val observationFlow = remember(db, transactionId) {
+        db.transactionDao().observeById(transactionId)
+    }
+    val observationStateFlow = remember(observationFlow) {
+        observationFlow.map<TransactionEntity?, TransactionObservation> { TransactionObservation.Loaded(it) }
+    }
+    val observation by observationStateFlow.collectAsState(initial = TransactionObservation.Loading)
     var baselineSnapshot by rememberSaveable(transactionId) { mutableStateOf<String?>(null) }
     var conflictSnapshot by rememberSaveable(transactionId) { mutableStateOf<String?>(null) }
     var baseline by remember(transactionId) { mutableStateOf(detailSnapshotToTransaction(baselineSnapshot)) }
@@ -1170,7 +1199,8 @@ private fun TransactionDetail(transactionId: String, onBack: () -> Unit) {
                     } else {
                         busy = true
                         scope.launch {
-                            if (current.syncState == "synced") {
+                            try {
+                                if (current.syncState == "synced") {
                                 val changes = JSONObject()
                                     .put("description", description.trim())
                                     .put("merchant", merchant.trim())
@@ -1178,6 +1208,7 @@ private fun TransactionDetail(transactionId: String, onBack: () -> Unit) {
                                     .put("account", account.trim())
                                     .put("occurred_on", occurredOn)
                                     .put("amount_idr", amountIdr)
+                                current.serverUpdatedAt?.let { changes.put("expected_updated_at", it) }
                                 val signedAmount = if (current.amountMinor < 0) -amountIdr else amountIdr
                                 val updated = current.copy(
                                     merchant = merchant.trim(),
@@ -1204,7 +1235,7 @@ private fun TransactionDetail(transactionId: String, onBack: () -> Unit) {
                                 setRemoteConflict(null)
                                 SyncScheduler.enqueue(context)
                                 message = "Saved locally; sync queued"
-                            } else {
+                                } else {
                                 val draft = ManualTransactionDraft(
                                     kind = if (current.amountMinor < 0) {
                                         ManualTransactionKind.EXPENSE
@@ -1237,8 +1268,12 @@ private fun TransactionDetail(transactionId: String, onBack: () -> Unit) {
                                         message = "This pending transaction cannot be edited offline"
                                     }
                                 }
+                                }
+                            } catch (error: Exception) {
+                                message = "Could not save changes. Try again."
+                            } finally {
+                                withContext(Dispatchers.Main.immediate) { busy = false }
                             }
-                            busy = false
                         }
                     }
                 }, enabled = !busy && canMutate && remoteConflict == null && !remotelyDeleted, modifier = Modifier.fillMaxWidth().testTag("transaction_save"),
@@ -1273,47 +1308,54 @@ private fun TransactionDetail(transactionId: String, onBack: () -> Unit) {
                 if (!busy) {
                     busy = true
                     scope.launch {
-                        if (current.syncState == "synced") {
-                            db.withTransaction {
-                                db.transactionDao().delete(current.id)
-                                db.syncDao().enqueue(
-                                    SyncOperation(
-                                        kind = "transaction_void",
-                                        entityId = current.id,
-                                        payload = "{}",
+                        try {
+                            if (current.syncState == "synced") {
+                                db.withTransaction {
+                                    db.transactionDao().delete(current.id)
+                                    db.syncDao().enqueue(
+                                        SyncOperation(
+                                            kind = "transaction_void",
+                                            entityId = current.id,
+                                            payload = JSONObject().apply {
+                                                current.serverUpdatedAt?.let {
+                                                    put("expected_updated_at", it)
+                                                }
+                                            }.toString(),
+                                        )
                                     )
-                                )
-                            }
-                            withContext(Dispatchers.Main.immediate) {
-                                SyncScheduler.enqueue(context)
-                                busy = false
-                                onBack()
-                            }
-                        } else {
-                            when (ManualTransactionStore(db).voidPendingManual(current.id)) {
-                                PendingManualMutationResult.APPLIED -> withContext(Dispatchers.Main.immediate) {
-                                    busy = false
+                                }
+                                withContext(Dispatchers.Main.immediate) {
+                                    SyncScheduler.enqueue(context)
                                     onBack()
                                 }
-                                PendingManualMutationResult.INITIAL_SYNC_IN_PROGRESS -> {
-                                    withContext(Dispatchers.Main.immediate) {
-                                        message = "Initial sync is in progress; try again shortly"
-                                        busy = false
+                            } else {
+                                when (ManualTransactionStore(db).voidPendingManual(current.id)) {
+                                    PendingManualMutationResult.APPLIED -> withContext(Dispatchers.Main.immediate) {
+                                        onBack()
                                     }
-                                }
-                                PendingManualMutationResult.NOT_PENDING_MANUAL -> {
-                                    withContext(Dispatchers.Main.immediate) {
-                                        message = "This pending transaction cannot be voided offline"
-                                        busy = false
+                                    PendingManualMutationResult.INITIAL_SYNC_IN_PROGRESS -> {
+                                        withContext(Dispatchers.Main.immediate) {
+                                            message = "Initial sync is in progress; try again shortly"
+                                        }
                                     }
-                                }
-                                PendingManualMutationResult.INVALID_DRAFT -> {
-                                    withContext(Dispatchers.Main.immediate) {
-                                        message = "This pending transaction could not be voided"
-                                        busy = false
+                                    PendingManualMutationResult.NOT_PENDING_MANUAL -> {
+                                        withContext(Dispatchers.Main.immediate) {
+                                            message = "This pending transaction cannot be voided offline"
+                                        }
+                                    }
+                                    PendingManualMutationResult.INVALID_DRAFT -> {
+                                        withContext(Dispatchers.Main.immediate) {
+                                            message = "This pending transaction could not be voided"
+                                        }
                                     }
                                 }
                             }
+                        } catch (error: Exception) {
+                            withContext(Dispatchers.Main.immediate) {
+                                message = "Could not void this transaction. Try again."
+                            }
+                        } finally {
+                            withContext(Dispatchers.Main.immediate) { busy = false }
                         }
                     }
                 }

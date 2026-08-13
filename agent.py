@@ -16,6 +16,16 @@ _API_MAX_ATTEMPTS = 3
 _JSON_MAX_ATTEMPTS = 2
 
 
+def _looks_like_self_transfer(subject: str, body: str) -> bool:
+    """Recognize high-confidence own-account transfer wording before AI drift."""
+    text = f"{subject} {body}".casefold()
+    return bool(re.search(
+        r"(?:rekening\s+sendiri|transfer\s+sendiri|rekening\s+saya|"
+        r"antar\s+rekening\s+saya|pindah(?:kan)?\s+(?:saldo|dana).{0,80}\b(?:rekening|jago|mandiri|bsi)\b)",
+        text,
+    ))
+
+
 EXTRACT_SYSTEM = """You are a receipt/expense extraction assistant.
 Given an image or text description of an expense, extract the details and respond ONLY with valid JSON.
 No markdown, no explanation, just JSON.
@@ -97,7 +107,7 @@ TRANSACTION TYPES:
 
 For any email, locate the relevant fields yourself by reading the body:
 - For expense/transfer: find the merchant/recipient (look for labels like "Penerima", "Merchant", "Nama Merchant", or the business name), the total amount charged (usually labeled "Total Transaksi", "Nominal Transaksi", "Jumlah Transfer", "Jumlah", "Nominal Transfer" — pick the TOTAL/charged amount, not sub-totals), date, and source account.
-- For self-transfer emails: determine BOTH sides from the email body. Set source_account to the sending account (e.g. "Mandiri" / "BSI/BYOND" / "Jago") and destination_account / recipient_bank to the receiving bank or account label (e.g. "Jago"). If the email includes a full account number, use it only to identify the bank label.
+- For self-transfer emails: determine BOTH sides from the email body. Set source_account to the sending account (e.g. "Mandiri" / "BSI/BYOND" / "Jago") and destination_account / recipient_bank to the receiving bank or account label (e.g. "Jago"). If the subject/body says "rekening sendiri", "transfer sendiri", "rekening saya", or an own-account transfer, it MUST be "self_transfer", never "expense" or "skip".
 - For Mandiri QRIS emails: the merchant name is listed under "Penerima" (e.g., "Penerima\nWarung Emak Keputih" → description = "Warung Emak Keputih"). The description MUST be the actual business/merchant name, NOT a generic label like "Seller", "QRIS Payment", or "Transaction".
 - For BYOND/BSI emails: the merchant name is listed under "Nama Merchant" (e.g., "Nama Merchant\nSAKINAH SUPERMARKET" → description = "SAKINAH SUPERMARKET").
 - For Jago debit card emails: these emails ONLY say "transaksi sebesar RpX using kartu debit Jago" with NO merchant info. When you see a Jago email with no merchant/recipient name, set description = "jago debit card transaction" (exact text). This is a special signal to the system to ask the user for merchant info later.
@@ -515,6 +525,16 @@ class Agent:
             EmailTransaction,
             await self._call_json(EmailTransaction, messages, model=self._config.query_model),
         )
+
+        # Bank templates and model outputs occasionally call an own-account
+        # transfer an expense. Correct that only for explicit self-transfer
+        # wording; ordinary third-party transfers remain expenses.
+        if tx.type == "expense" and _looks_like_self_transfer(subject, body):
+            tx.type = "self_transfer"
+            tx.source_account = tx.source_account or tx.account
+            tx.destination_account = tx.destination_account or tx.recipient_bank or "rekening tujuan"
+            tx.recipient_bank = tx.recipient_bank or tx.destination_account
+            tx.income_subcategory = tx.income_subcategory or tx.subcategory
 
         # Normalize self-transfer hints so the watcher can reliably write both sides.
         if tx.type == "self_transfer":

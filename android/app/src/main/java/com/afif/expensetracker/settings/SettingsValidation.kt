@@ -34,8 +34,8 @@ fun validateSettings(
     if (normalizedUrl.isEmpty()) {
         return SettingsValidationResult.Invalid("Enter an API base URL.")
     }
-    if (normalizedToken.isEmpty()) {
-        return SettingsValidationResult.Invalid("Enter an API token.")
+    if (normalizedToken.length < 32) {
+        return SettingsValidationResult.Invalid("API token must be at least 32 characters.")
     }
 
     val parsed = try {

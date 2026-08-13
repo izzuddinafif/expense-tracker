@@ -68,13 +68,13 @@ class LedgerAppTest {
         compose.onNodeWithTag("api_base_url", useUnmergedTree = true)
             .performTextInput("http://10.0.2.2:8080/")
         compose.onNodeWithTag("device_token", useUnmergedTree = true)
-            .performTextInput("test-token")
+            .performTextInput("test-token-012345678901234567890123")
         compose.onNodeWithText("Save and sync").performClick()
         compose.onNodeWithTag("settings_message").assertIsDisplayed()
 
         val settings = LedgerSettingsStore.read(compose.activity)
         assertEquals("http://10.0.2.2:8080", settings.baseUrl)
-        assertEquals("test-token", settings.token)
+        assertEquals("test-token-012345678901234567890123", settings.token)
         assertEquals(null, compose.activity.getSharedPreferences("ledger_settings", 0).getString("device_token", null))
     }
 

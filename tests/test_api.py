@@ -169,6 +169,23 @@ async def test_transaction_can_be_edited_and_voided(api_client):
     assert edited_body["transaction"]["amount_idr"] == 30_000
     assert edited_body["transaction"]["merchant"] == "Warung Baru"
 
+    fetched = await client.get(
+        f"/api/v1/transactions/{row['id']}", headers=headers
+    )
+    assert fetched.status == 200
+    assert (await fetched.json())["transaction"]["updated_at"] == edited_body[
+        "transaction"
+    ]["updated_at"]
+
+    stale_void = await client.delete(
+        f"/api/v1/transactions/{row['id']}",
+        headers={**headers, "If-Match": "2000-01-01T00:00:00+00:00"},
+    )
+    assert stale_void.status == 409
+    assert (await stale_void.json())["error"] == (
+        "Transaction changed on the server; reload it before voiding"
+    )
+
     invalid = await client.patch(
         f"/api/v1/transactions/{row['id']}",
         headers=headers,

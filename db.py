@@ -1,4 +1,5 @@
 import asyncio
+from functools import wraps
 import json
 import logging
 import os
@@ -13,6 +14,26 @@ from cryptography.fernet import Fernet, InvalidToken
 from models import ExpenseEntry, EmailTransaction, IncomeEntry, UserRecord
 
 log = logging.getLogger(__name__)
+
+
+class TransactionConflictError(ValueError):
+    """Raised when a client edits a transaction from an obsolete revision."""
+
+
+def _serialize_write(method):
+    """Serialize writes sharing aiosqlite's single connection.
+
+    aiosqlite serializes work submitted to its worker thread, but a coroutine
+    can still interleave between BEGIN/commit calls. Keeping the critical
+    section at the Database boundary prevents competing transactions from
+    corrupting the connection's implicit transaction state.
+    """
+    @wraps(method)
+    async def guarded(self, *args, **kwargs):
+        async with self._write_lock:
+            return await method(self, *args, **kwargs)
+
+    return guarded
 
 
 def _canonical_occurred_on(value: str) -> str:
@@ -70,6 +91,7 @@ class Database:
         self._conn = conn
         self._ops_conn: aiosqlite.Connection | None = None
         self._ops_lock = asyncio.Lock()
+        self._write_lock = asyncio.Lock()
         self._fernet = _get_fernet()
         if self._fernet:
             log.info("Token encryption enabled (TOKEN_ENCRYPTION_KEY set)")
@@ -532,6 +554,7 @@ class Database:
         except Exception as e:
             log.warning(f"Migration from {json_path} failed: {e}")
 
+    @_serialize_write
     async def migrate_from_env(self, notion_token: str, users: dict[int, str]) -> None:
         """Pre-populate users table from env vars for backward compatibility."""
         if not notion_token or not users:
@@ -565,6 +588,7 @@ class Database:
         )
         return await cur.fetchone() is not None
 
+    @_serialize_write
     async def mark_processed(self, uid: str, sender: str) -> None:
         """Atomically mark success and clear any earlier per-UID failure."""
         await self._conn.execute("BEGIN IMMEDIATE")
@@ -582,6 +606,7 @@ class Database:
             await self._conn.rollback()
             raise
 
+    @_serialize_write
     async def mark_rejected(self, uid: str, sender: str, reason: str) -> None:
         """Exclude a deterministic security reject while retaining its audit trail."""
         now = datetime.now(timezone.utc).isoformat()
@@ -609,6 +634,7 @@ class Database:
         rows = await cur.fetchall()
         return {row["uid"] for row in rows}
 
+    @_serialize_write
     async def record_email_processing_failure(
         self,
         uid: str,
@@ -674,6 +700,7 @@ class Database:
             await self._conn.rollback()
             raise
 
+    @_serialize_write
     async def get_email_excluded_uids(
         self, *, now: datetime | None = None
     ) -> set[str]:
@@ -692,6 +719,7 @@ class Database:
         )
         return {row["uid"] for row in await cur.fetchall()}
 
+    @_serialize_write
     async def clear_email_processing_failure(self, uid: str) -> bool:
         """Allow an operator to retry a degraded or terminal email UID."""
         cur = await self._conn.execute(
@@ -729,6 +757,7 @@ class Database:
         )
         return [dict(row) for row in await cur.fetchall()]
 
+    @_serialize_write
     async def prune_processed(self, days: int = 90) -> int:
         cutoff_dt = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         cur = await self._conn.execute(
@@ -739,6 +768,7 @@ class Database:
 
     # ── Pending expense (one per user) ──────────────────────────────────────────
 
+    @_serialize_write
     async def set_pending_expense(self, user_id: int, entry: ExpenseEntry) -> None:
         await self._conn.execute(
             "INSERT OR REPLACE INTO pending_expenses (user_id, entry_json, created_at) VALUES (?, ?, ?)",
@@ -755,12 +785,14 @@ class Database:
             return None
         return ExpenseEntry.model_validate_json(row["entry_json"])
 
+    @_serialize_write
     async def clear_pending_expense(self, user_id: int) -> None:
         await self._conn.execute(
             "DELETE FROM pending_expenses WHERE user_id = ?", (user_id,)
         )
         await self._conn.commit()
 
+    @_serialize_write
     async def _confirm_pending(self, user_id: int, *, kind: str, source: str,
                                source_ref: str | None = None,
                                recurring_page_id: str | None = None) -> str | None:
@@ -860,6 +892,7 @@ class Database:
                                      source_ref: str | None = None) -> str | None:
         return await self._confirm_pending(user_id, kind="income", source=source, source_ref=source_ref)
 
+    @_serialize_write
     async def mark_notion_sync_success(
         self, outbox_id: int | str, notion_page_id: str | None = None
     ) -> None:
@@ -901,6 +934,7 @@ class Database:
             await self._conn.rollback()
             raise
 
+    @_serialize_write
     async def mark_notion_sync_failure(self, outbox_id: int | str, error: str,
                                        next_attempt_at: str | None = None) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -978,6 +1012,7 @@ class Database:
             "recent_errors": [dict(row) for row in await errors.fetchall()],
         }
 
+    @_serialize_write
     async def retry_notion_sync(self, user_id: int) -> int:
         """Make failed jobs due now without creating duplicate outbox rows."""
         now = datetime.now(timezone.utc).isoformat()
@@ -990,6 +1025,7 @@ class Database:
         await self._conn.commit()
         return cur.rowcount
 
+    @_serialize_write
     async def record_operational_state(
         self,
         name: str,
@@ -1036,6 +1072,7 @@ class Database:
             )
             await conn.commit()
 
+    @_serialize_write
     async def record_operational_heartbeat(
         self, name: str, *, metadata: dict[str, Any] | None = None
     ) -> None:
@@ -1149,6 +1186,17 @@ class Database:
         row = await cur.fetchone()
         return dict(row) if row is not None else None
 
+    async def find_transaction_by_id(
+        self, user_id: int, transaction_id: str
+    ) -> dict[str, Any] | None:
+        cur = await self._conn.execute(
+            "SELECT * FROM transactions WHERE user_id=? AND id=? LIMIT 1",
+            (user_id, transaction_id),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row is not None else None
+
+    @_serialize_write
     async def create_ingested_transaction(
         self,
         user_id: int,
@@ -1224,6 +1272,7 @@ class Database:
             await self._conn.rollback()
             raise
 
+    @_serialize_write
     async def create_confirmed_external_transaction(
         self,
         user_id: int,
@@ -1314,6 +1363,7 @@ class Database:
             await self._conn.rollback()
             raise
 
+    @_serialize_write
     async def confirm_transaction(
         self, user_id: int, transaction_id: str
     ) -> tuple[dict[str, Any] | None, bool]:
@@ -1363,8 +1413,14 @@ class Database:
             await self._conn.rollback()
             raise
 
+    @_serialize_write
     async def update_transaction(
-        self, user_id: int, transaction_id: str, changes: dict[str, Any]
+        self,
+        user_id: int,
+        transaction_id: str,
+        changes: dict[str, Any],
+        *,
+        expected_updated_at: str | None = None,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Atomically edit a ledger row and queue a Notion upsert.
 
@@ -1409,6 +1465,11 @@ class Database:
                 return None, False
             if row["status"] != "confirmed":
                 raise ValueError("Only confirmed transactions can be updated")
+            if expected_updated_at is not None and expected_updated_at != row["updated_at"]:
+                await self._conn.rollback()
+                raise TransactionConflictError(
+                    "Transaction changed on the server; reload it before editing"
+                )
 
             normalized = {
                 field: (
@@ -1456,8 +1517,13 @@ class Database:
             await self._conn.rollback()
             raise
 
+    @_serialize_write
     async def void_transaction(
-        self, user_id: int, transaction_id: str
+        self,
+        user_id: int,
+        transaction_id: str,
+        *,
+        expected_updated_at: str | None = None,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Atomically void a transaction and enqueue a Notion archive.
 
@@ -1479,6 +1545,11 @@ class Database:
             if row["status"] == "voided":
                 await self._conn.rollback()
                 return dict(row), False
+            if expected_updated_at is not None and expected_updated_at != row["updated_at"]:
+                await self._conn.rollback()
+                raise TransactionConflictError(
+                    "Transaction changed on the server; reload it before voiding"
+                )
 
             await self._conn.execute(
                 "UPDATE transactions SET status='voided',updated_at=? WHERE id=? AND user_id=?",
@@ -1506,6 +1577,7 @@ class Database:
 
     # ── Pending income (one per user) ──────────────────────────────────────────
 
+    @_serialize_write
     async def set_pending_income(self, user_id: int, entry: IncomeEntry) -> None:
         await self._conn.execute(
             "INSERT OR REPLACE INTO pending_income (user_id, entry_json, created_at) VALUES (?, ?, ?)",
@@ -1522,6 +1594,7 @@ class Database:
             return None
         return IncomeEntry.model_validate_json(row["entry_json"])
 
+    @_serialize_write
     async def clear_pending_income(self, user_id: int) -> None:
         await self._conn.execute(
             "DELETE FROM pending_income WHERE user_id = ?", (user_id,)
@@ -1530,6 +1603,7 @@ class Database:
 
     # ── Pending email expense (current debit card follow-up) ────────────────────
 
+    @_serialize_write
     async def set_pending_email_expense(self, user_id: int, tx: EmailTransaction) -> None:
         await self._conn.execute(
             "INSERT OR REPLACE INTO pending_email_expenses (user_id, tx_json, created_at) VALUES (?, ?, ?)",
@@ -1546,6 +1620,7 @@ class Database:
             return None
         return EmailTransaction.model_validate_json(row["tx_json"])
 
+    @_serialize_write
     async def clear_pending_email_expense(self, user_id: int) -> None:
         await self._conn.execute(
             "DELETE FROM pending_email_expenses WHERE user_id = ?", (user_id,)
@@ -1554,6 +1629,7 @@ class Database:
 
     # ── Debit queue (FIFO per user) ─────────────────────────────────────────────
 
+    @_serialize_write
     async def push_debit(self, user_id: int, tx: EmailTransaction) -> None:
         await self._conn.execute(
             "INSERT INTO pending_debit_queue (user_id, tx_json, created_at) VALUES (?, ?, ?)",
@@ -1561,6 +1637,7 @@ class Database:
         )
         await self._conn.commit()
 
+    @_serialize_write
     async def pop_debit(self, user_id: int) -> EmailTransaction | None:
         """Pop the oldest queued debit tx for this user. Returns None if empty.
         Uses DELETE ... RETURNING to prevent SELECT-then-DELETE race."""
@@ -1584,6 +1661,7 @@ class Database:
         row = await cur.fetchone()
         return row["cnt"] if row else 0
 
+    @_serialize_write
     async def clear_debit_queue(self, user_id: int) -> None:
         await self._conn.execute(
             "DELETE FROM pending_debit_queue WHERE user_id = ?", (user_id,)
@@ -1600,6 +1678,7 @@ class Database:
         row = await cur.fetchone()
         return row["description"] if row else None
 
+    @_serialize_write
     async def set_debit_merchant(self, user_id: int, amount: float, description: str) -> None:
         await self._conn.execute(
             "INSERT OR REPLACE INTO debit_merchant_cache (user_id, amount, description, created_at) VALUES (?, ?, ?, ?)",
@@ -1609,6 +1688,7 @@ class Database:
 
     # ── Merchant patterns (amount-bucketed auto-detection) ─────────────────────
 
+    @_serialize_write
     async def record_pattern(self, user_id: int, merchant: str, subcategory: str, account: str, amount: float, date: str) -> None:
         merchant = merchant.strip()
         if not merchant:
@@ -1646,6 +1726,7 @@ class Database:
 
     # ── Conversation history ────────────────────────────────────────────────────
 
+    @_serialize_write
     async def append_history(self, user_id: int, role: str, content: str) -> None:
         await self._conn.execute(
             "INSERT INTO conversation_history (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
@@ -1670,6 +1751,7 @@ class Database:
         rows = await cur.fetchall()
         return [{"role": row["role"], "content": row["content"]} for row in rows]
 
+    @_serialize_write
     async def clear_history(self, user_id: int) -> None:
         await self._conn.execute(
             "DELETE FROM conversation_history WHERE user_id = ?", (user_id,)
@@ -1678,6 +1760,7 @@ class Database:
 
     # ── Pending since (auto-confirm timestamps) ──────────────────────────────
 
+    @_serialize_write
     async def set_pending_since(self, user_id: int, timestamp: float) -> None:
         await self._conn.execute(
             "INSERT OR REPLACE INTO pending_since (user_id, created_at) VALUES (?, ?)",
@@ -1685,6 +1768,7 @@ class Database:
         )
         await self._conn.commit()
 
+    @_serialize_write
     async def clear_pending_since(self, user_id: int) -> None:
         await self._conn.execute(
             "DELETE FROM pending_since WHERE user_id = ?", (user_id,)
@@ -1705,6 +1789,7 @@ class Database:
 
     # ── User undo (persist last_saved_page across restarts) ───────────────────
 
+    @_serialize_write
     async def set_user_undo(self, user_id: int, page_id: str, description: str = "", amount: float = 0, date: str = "", subcat: str = "", merchant: str = "") -> None:
         await self._conn.execute(
             "INSERT OR REPLACE INTO user_undo (user_id, page_id, description, amount, date, subcat, merchant, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1729,6 +1814,7 @@ class Database:
             "created_at": row["created_at"],
         }
 
+    @_serialize_write
     async def clear_user_undo(self, user_id: int) -> None:
         await self._conn.execute(
             "DELETE FROM user_undo WHERE user_id = ?", (user_id,)
@@ -1744,6 +1830,7 @@ class Database:
 
     # ── Email saved pages (persist email_saved_pages across restarts) ─────────
 
+    @_serialize_write
     async def set_email_saved_page(self, user_id: int, page_id: str, description: str, amount: float, date: str, subcat: str, timestamp: float, merchant: str = "") -> None:
         await self._conn.execute(
             "INSERT OR REPLACE INTO email_saved_pages (user_id, page_id, description, amount, date, subcat, merchant, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1768,6 +1855,7 @@ class Database:
             "timestamp": row["timestamp"],
         }
 
+    @_serialize_write
     async def clear_email_saved_page(self, user_id: int) -> None:
         await self._conn.execute(
             "DELETE FROM email_saved_pages WHERE user_id = ?", (user_id,)
@@ -1794,6 +1882,7 @@ class Database:
 
     # ── Email account owners (multi-user email watcher) ───────────────────────
 
+    @_serialize_write
     async def set_email_account_owner(self, account_pattern: str, telegram_id: int) -> None:
         cur = await self._conn.execute(
             "SELECT telegram_id FROM email_account_owners WHERE account_pattern = ?",
@@ -1809,6 +1898,7 @@ class Database:
         )
         await self._conn.commit()
 
+    @_serialize_write
     async def remove_email_account_owner(self, account_pattern: str) -> None:
         await self._conn.execute(
             "DELETE FROM email_account_owners WHERE account_pattern = ?", (account_pattern,)
@@ -1844,6 +1934,7 @@ class Database:
 
     # ── Pending recurring (one-tap confirm for recurring expenses) ────────────
 
+    @_serialize_write
     async def set_pending_recurring(
         self, user_id: int, entry: ExpenseEntry, recurring_page_url: str | None, uid: str, sender: str
     ) -> None:
@@ -1868,6 +1959,7 @@ class Database:
             "sender": row["sender"],
         }
 
+    @_serialize_write
     async def clear_pending_recurring(self, user_id: int) -> None:
         await self._conn.execute(
             "DELETE FROM pending_recurring WHERE user_id = ?", (user_id,)
@@ -1885,6 +1977,7 @@ class Database:
             return None
         return self._row_to_user(row)
 
+    @_serialize_write
     async def upsert_user(self, telegram_id: int, **fields) -> None:
         allowed = {
             "owner_name", "notion_token", "setup_step",
