@@ -14,6 +14,10 @@ _STALE_THRESHOLDS: dict[str, tuple[int, int]] = {
     "backup": (26 * 3600, 72 * 3600),
 }
 _LEVELS = {"unknown": 0, "ok": 1, "degraded": 2, "critical": 3}
+# The application workers are created dynamically based on configured
+# integrations. The host-level backup timer is the one required control that
+# is otherwise completely invisible when it has never run.
+_REQUIRED_WORKERS = ("backup",)
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:
@@ -45,6 +49,25 @@ def classify_operational_health(
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     overall = "ok"
     classified_workers: dict[str, dict[str, Any]] = {}
+
+    # Missing rows are meaningful: a worker or the external backup timer that
+    # has never emitted a heartbeat must not disappear from an otherwise green
+    # health response.
+    for name in _REQUIRED_WORKERS:
+        if name not in workers:
+            classified_workers[name] = {
+                "last_attempt_at": None,
+                "last_success_at": None,
+                "last_error": None,
+                "started_at": None,
+                "last_heartbeat_at": None,
+                "consecutive_failures": 0,
+                "metadata": {},
+                "status": "degraded",
+                "reason": "no heartbeat recorded",
+                "age_seconds": None,
+            }
+            overall = "degraded"
 
     for name, worker in workers.items():
         value = dict(worker)

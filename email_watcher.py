@@ -22,6 +22,7 @@ import email
 import email.header
 import imaplib
 import logging
+import os
 import re
 import time
 from email.utils import parseaddr
@@ -57,7 +58,7 @@ SKIP_SUBJECT_KEYWORDS = [
 ]
 
 IMAP_HOST = "imap.gmail.com"
-LOOKBACK_DAYS = 3    # scan last 3 days — catches emails after brief downtime
+LOOKBACK_DAYS = int(os.getenv("EMAIL_LOOKBACK_DAYS", "30"))
 
 # Description the AI returns for Jago debit card emails (no merchant info)
 JAGO_DEBIT_DESCRIPTION = "jago debit card transaction"
@@ -420,7 +421,10 @@ class EmailWatcher:
             else:
                 uids = []
             log.info(f"IMAP: found {len(uids)} UIDs for {sender}")
-            for uid_bytes in uids[-100:]:
+            # Process every matching UID in the bounded lookback window. A
+            # newest-100 cap silently loses transactions after a long outage;
+            # processed_emails and source-ref idempotency make replays safe.
+            for uid_bytes in uids:
                 if isinstance(uid_bytes, int):
                     uid = str(uid_bytes)
                     uid_bytes = uid.encode()

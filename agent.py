@@ -248,7 +248,7 @@ class Agent:
                     raw = await self._call(messages=fix_messages, **kwargs)
                     raw = _strip_fences(raw)
                 else:
-                    log.error(f"JSON parse failed after fix attempt. Raw: {raw[:200]}")
+                    log.error("JSON parse failed after fix attempt (response length=%d)", len(raw))
                     raise
 
     # ── Public methods ─────────────────────────────────────────────────────────
@@ -497,6 +497,7 @@ class Agent:
         # transaction labels and amounts while removing addresses, URLs, and
         # account/card identifiers.
         body_text = self._redact_email_content(body[:4000])
+        subject_text = self._redact_email_content(subject[:500])
         if len(body) > 4000:
             log.warning(f"Email body truncated from {len(body)} to 4000 chars for sender={sender}")
         messages = [
@@ -505,7 +506,7 @@ class Agent:
                 "role": "user",
                 "content": (
                     f"From: {sender}\n"
-                    f"Subject: {subject}\n\n"
+                    f"Subject: {subject_text}\n\n"
                     f"Body:\n{body_text}"
                 ),
             },

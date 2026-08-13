@@ -73,3 +73,19 @@ def test_email_poison_state_affects_health_without_fake_imap_failures():
     assert health["workers"]["gmail"]["reason"] == (
         "repeated email processing failure present"
     )
+
+
+def test_missing_required_backup_heartbeat_is_visible():
+    now = datetime(2026, 7, 29, tzinfo=timezone.utc)
+    health = classify_operational_health(
+        {
+            "pending_count": 0,
+            "failed_count": 0,
+            "oldest_pending_at": None,
+            "max_attempt_count": 0,
+        },
+        {},
+        now=now,
+    )
+    assert health["status"] == "degraded"
+    assert health["workers"]["backup"]["reason"] == "no heartbeat recorded"

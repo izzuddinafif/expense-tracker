@@ -195,6 +195,7 @@ async def test_operational_health_endpoint(api_client):
     await db.record_operational_state(
         "gmail", success=True, metadata={"messages_found": 1}
     )
+    await db.record_operational_state("backup", success=True)
     response = await client.get(
         "/api/v1/ops/health",
         headers={"Authorization": "Bearer test-device-token"},

@@ -7,12 +7,14 @@
 set -eu
 
 application_label="coolify.name=vamkwvui8e3cq8kkjxdo3zka"
-container="$(docker ps --filter "label=${application_label}" --format '{{.Names}}' | head -n 1)"
+containers="$(docker ps --filter "label=${application_label}" --format '{{.Names}}')"
+container_count="$(printf '%s\n' "$containers" | sed '/^$/d' | wc -l | tr -d ' ')"
 
-if [ -z "$container" ]; then
-    echo "Ledgerly Coolify container is not running" >&2
+if [ "$container_count" -ne 1 ]; then
+    echo "Expected exactly one running Ledgerly Coolify container; found $container_count" >&2
     exit 1
 fi
+container="$containers"
 
 exec docker exec --user appuser "$container" python -m scripts.sqlite_backup maintain \
     --source /app/data/expense_tracker.db \
