@@ -60,6 +60,7 @@ import com.afif.expensetracker.ui.theme.Warning
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.work.WorkManager
 import androidx.room.withTransaction
 
@@ -89,6 +90,7 @@ fun DiagnosticsScreen(onBack: () -> Unit = {}) {
     val context = LocalContext.current
     val db = LedgerDatabase.get(context)
     val records by db.notificationDao().observeRecent(20).collectAsState(initial = emptyList())
+    val scope = rememberCoroutineScope()
     var enabled by remember { mutableStateOf(listenerEnabled(context)) }
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, context) {
@@ -100,7 +102,7 @@ fun DiagnosticsScreen(onBack: () -> Unit = {}) {
     }
 
     LazyColumn(
-        Modifier.fillMaxSize().background(Ink).padding(20.dp),
+        Modifier.fillMaxSize().background(Ink).padding(20.dp).testTag("diagnostics_list"),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
@@ -150,7 +152,15 @@ fun DiagnosticsScreen(onBack: () -> Unit = {}) {
         }
         item { HorizontalDivider(); Text("Recent captures", style = androidx.compose.material3.MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
         if (records.isEmpty()) item { Text("No supported notifications captured yet.", color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant) }
-        items(records, key = { it.id }) { record -> CaptureRow(record) }
+        items(records, key = { it.id }) { record ->
+            CaptureRow(record) {
+                scope.launch {
+                    withContext(Dispatchers.IO) {
+                        db.notificationDao().updateStatus(record.id, "pending")
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -526,7 +536,7 @@ private fun SyncDiagnosticsCard(context: Context) {
 }
 
 @Composable
-private fun CaptureRow(record: NotificationRecord) {
+private fun CaptureRow(record: NotificationRecord, onRestore: () -> Unit) {
     val parseStatus = if (record.amountIdr != null && record.merchant != null && !record.reviewRequired) "Parsed" else "Needs review"
     val syncStatus = when (record.status) { "confirmed" -> "Confirmed locally"; "dismissed" -> "Dismissed"; else -> "Awaiting review" }
     Card(modifier = Modifier.fillMaxWidth().testTag("diagnostic_capture_${record.id}"), colors = CardDefaults.cardColors(containerColor = Elevated)) {
@@ -535,6 +545,12 @@ private fun CaptureRow(record: NotificationRecord) {
             Text(record.body, color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant)
             Text("${record.bank} • $parseStatus • $syncStatus", color = if (record.status == "confirmed") Income else Warning)
             Text(record.packageName, color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant)
+            if (record.status == "dismissed") {
+                OutlinedButton(
+                    onClick = onRestore,
+                    modifier = Modifier.testTag("restore_capture_${record.id}"),
+                ) { Text("Restore to inbox") }
+            }
         }
     }
 }

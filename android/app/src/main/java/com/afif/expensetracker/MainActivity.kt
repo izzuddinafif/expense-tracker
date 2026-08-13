@@ -125,7 +125,9 @@ private data class TopLevelDestination(
                                     restoreState = true
                                 }
                             },
-                            icon = { Icon(destination.icon, destination.label) },
+                            // The visible label already names this destination;
+                            // avoid making TalkBack announce it twice.
+                            icon = { Icon(destination.icon, contentDescription = null) },
                             label = { Text(destination.label) },
                             alwaysShowLabel = true,
                         )
@@ -349,6 +351,7 @@ private fun Inbox() {
     val scope = rememberCoroutineScope()
     val pending = records
     var reviewingId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var dismissing by remember { mutableStateOf<NotificationRecord?>(null) }
     val reviewing = reviewingId?.let { id -> pending.firstOrNull { it.id == id } }
     var reviewSaving by rememberSaveable { mutableStateOf(false) }
     var reviewError by rememberSaveable { mutableStateOf<String?>(null) }
@@ -398,9 +401,9 @@ private fun Inbox() {
                         )
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        TextButton(onClick = {
-                            scope.launch { db.notificationDao().updateStatus(rec.id, "dismissed") }
-                        }) { Text(if (rec.suspectedDuplicateOf != null) "Discard repost" else "Dismiss") }
+                        TextButton(onClick = { dismissing = rec }) {
+                            Text(if (rec.suspectedDuplicateOf != null) "Discard repost" else "Dismiss")
+                        }
                         Button(
                             modifier = Modifier.testTag("confirm_${rec.sourceRef}"),
                             enabled = rec.reviewRequired || (rec.amountIdr ?: 0L) > 0,
@@ -453,6 +456,25 @@ private fun Inbox() {
                         reviewSaving = false
                     }
                 }
+            },
+        )
+    }
+    dismissing?.let { record ->
+        AlertDialog(
+            onDismissRequest = { dismissing = null },
+            title = { Text(if (record.suspectedDuplicateOf != null) "Discard repost?" else "Dismiss capture?") },
+            text = { Text("You can restore dismissed captures later from Notification diagnostics.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        dismissing = null
+                        scope.launch { db.notificationDao().updateStatus(record.id, "dismissed") }
+                    },
+                    modifier = Modifier.testTag("dismiss_confirm_${record.sourceRef}"),
+                ) { Text("Dismiss") }
+            },
+            dismissButton = {
+                TextButton(onClick = { dismissing = null }) { Text("Cancel") }
             },
         )
     }

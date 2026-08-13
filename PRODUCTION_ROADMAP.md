@@ -304,7 +304,7 @@ Remaining milestones are:
 4. keep Assets/net-worth synchronization Notion-backed until a local asset
    model is introduced.
 
-The API 35 emulator suite is currently green at 14/14, the Android JVM suite
+The API 35 emulator suite is currently green at 15/15, the Android JVM suite
 at 47/47, and focused backend regressions at 70/70. The signed release APK was
 built and verified locally. The SG deployment now runs commit `5278994`, the
 encrypted off-host backup timer has completed a verified backup and a local

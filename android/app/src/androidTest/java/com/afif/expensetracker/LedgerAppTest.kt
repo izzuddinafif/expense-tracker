@@ -6,6 +6,8 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextClearance
@@ -13,6 +15,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.afif.expensetracker.data.LedgerDatabase
 import com.afif.expensetracker.data.LedgerSettingsStore
+import com.afif.expensetracker.data.NotificationRecord
 import com.afif.expensetracker.data.TransactionEntity
 import com.afif.expensetracker.data.SyncOperation
 import kotlinx.coroutines.Dispatchers
@@ -112,6 +115,60 @@ class LedgerAppTest {
             runBlocking(Dispatchers.IO) {
                 db.syncDao().findById(discardId) == null &&
                     db.transactionDao().findById(discardEntityId) == null
+            }
+        }
+    }
+
+    @Test
+    fun notificationDismissalRequiresConfirmationAndCanBeRestored() {
+        val sourceRef = "dismiss-restore-ui"
+        runBlocking(Dispatchers.IO) {
+            LedgerDatabase.get(compose.activity).notificationDao().enqueue(
+                NotificationRecord(
+                    sourceRef = sourceRef,
+                    packageName = "id.bmri.livin",
+                    title = "Livin' by Mandiri",
+                    body = "Pembayaran Rp10.000 di TOKO",
+                    amountIdr = 10_000,
+                    merchant = "TOKO",
+                    bank = "LIVIN_MANDIRI",
+                    reviewRequired = true,
+                    receivedAt = System.currentTimeMillis(),
+                ),
+            )
+        }
+        compose.onNodeWithTag("nav_inbox").performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag("inbox_item_$sourceRef").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("Dismiss").performClick()
+        compose.onNodeWithText("Dismiss capture?").assertIsDisplayed()
+        compose.onNodeWithText("Cancel").performClick()
+        runBlocking(Dispatchers.IO) {
+            assertEquals("pending", LedgerDatabase.get(compose.activity).notificationDao().findBySourceRef(sourceRef)?.status)
+        }
+        compose.onNodeWithText("Dismiss").performClick()
+        compose.onNodeWithTag("dismiss_confirm_$sourceRef").performClick()
+        val dismissedId = runBlocking(Dispatchers.IO) {
+            LedgerDatabase.get(compose.activity).notificationDao().findBySourceRef(sourceRef)!!.id
+        }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            runBlocking(Dispatchers.IO) {
+                LedgerDatabase.get(compose.activity).notificationDao().findBySourceRef(sourceRef)?.status == "dismissed"
+            }
+        }
+        compose.onNodeWithTag("nav_settings").performClick()
+        compose.onNodeWithTag("open_diagnostics").performClick()
+        compose.onNodeWithTag("diagnostics_list")
+            .performScrollToNode(hasTestTag("diagnostic_capture_$dismissedId"))
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag("restore_capture_$dismissedId")
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag("restore_capture_$dismissedId").performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            runBlocking(Dispatchers.IO) {
+                LedgerDatabase.get(compose.activity).notificationDao().findBySourceRef(sourceRef)?.status == "pending"
             }
         }
     }
