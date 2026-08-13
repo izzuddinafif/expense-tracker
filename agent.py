@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 from openai import AsyncOpenAI, APIError, APITimeoutError, APIConnectionError, RateLimitError
 from config import Config
 from models import ExpenseEntry, IncomeEntry, QueryIntent, EmailTransaction, NotionCache
@@ -186,6 +187,10 @@ class Agent:
 
         for attempt in range(_API_MAX_ATTEMPTS):
             try:
+                # Explicit max_tokens cap: without it the SDK/OpenRouter defaults
+                # to a huge value (65536/16384), which fails OpenRouter's
+                # affordability check on a low-balance account with HTTP 402.
+                kwargs.setdefault("max_tokens", 2048)
                 resp = await self._client.chat.completions.create(**kwargs)
                 content = resp.choices[0].message.content or ""
                 if content.strip():
@@ -488,7 +493,10 @@ class Agent:
             .replace("{accounts}", accounts)
         )
 
-        body_text = body[:4000]
+        # Minimize sensitive content before sending to the external model: retain
+        # transaction labels and amounts while removing addresses, URLs, and
+        # account/card identifiers.
+        body_text = self._redact_email_content(body[:4000])
         if len(body) > 4000:
             log.warning(f"Email body truncated from {len(body)} to 4000 chars for sender={sender}")
         messages = [
@@ -545,3 +553,10 @@ class Agent:
                     log.warning(f"[agent] Subcategory retry failed: {e} — keeping original")
 
         return tx
+
+    @staticmethod
+    def _redact_email_content(text: str) -> str:
+        text = re.sub(r"[\w.+-]+@[\w.-]+", "[REDACTED_EMAIL]", text)
+        text = re.sub(r"https?://\S+", "[REDACTED_URL]", text)
+        text = re.sub(r"(?<!\d)(?:\d[ -]?){8,}(?!\d)", "[REDACTED_ACCOUNT]", text)
+        return text[:4000]
