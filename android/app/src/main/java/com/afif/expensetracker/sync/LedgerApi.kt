@@ -17,11 +17,33 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
         private set
 
     private fun rememberHttpFailure(response: okhttp3.Response) {
-        val detail = runCatching { response.body?.string().orEmpty() }
-            .getOrDefault("")
-            .replace(Regex("\\s+"), " ")
-            .take(180)
-        lastError = "HTTP ${response.code}" + if (detail.isBlank()) "" else ": $detail"
+        val detail = when (response.code) {
+            401, 403 -> "Authentication failed. Check the device token."
+            404 -> "Ledger endpoint was not found. Check the API base URL."
+            408, 504 -> "The ledger server timed out. Try again."
+            429 -> "The ledger server is busy. Try again shortly."
+            in 500..599 -> "The ledger server is temporarily unavailable."
+            else -> "The ledger server rejected the request."
+        }
+        lastError = "HTTP ${response.code}: $detail"
+    }
+
+    /** Lightweight authenticated probe used by Settings before a user starts syncing. */
+    fun health(): Boolean {
+        val request = Request.Builder()
+            .url(baseUrl.trimEnd('/') + "/api/v1/health")
+            .header("Authorization", "Bearer $deviceToken")
+            .get()
+            .build()
+        return client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                rememberHttpFailure(response)
+                false
+            } else {
+                lastError = null
+                true
+            }
+        }
     }
 
     fun push(payload: String): TransactionEntity? {

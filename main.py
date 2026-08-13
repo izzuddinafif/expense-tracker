@@ -8,7 +8,7 @@ from logging.handlers import RotatingFileHandler
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.filters import CommandStart, Command
@@ -60,6 +60,21 @@ logging.getLogger().addHandler(_file_handler)
 log = logging.getLogger(__name__)
 
 
+class TelegramAllowlistMiddleware(BaseMiddleware):
+    """Reject updates from Telegram accounts that are not operator-approved."""
+
+    def __init__(self, allowed_ids: frozenset[int]) -> None:
+        self.allowed_ids = allowed_ids
+
+    async def __call__(self, handler, event, data):
+        user = getattr(event, "from_user", None)
+        user_id = getattr(user, "id", None)
+        if user_id not in self.allowed_ids:
+            log.warning("Rejected Telegram update from non-allowlisted user %s", user_id)
+            return None
+        return await handler(event, data)
+
+
 class ResilientBot(Bot):
     """Bot wrapper that retries transient Telegram network resets.
 
@@ -96,6 +111,24 @@ class ResilientBot(Bot):
 
 async def main() -> None:
     config = load_config()
+    if config.webhook_domain and len(config.webhook_secret) < 32:
+        raise RuntimeError(
+            "WEBHOOK_SECRET must be at least 32 characters when webhook mode is enabled"
+        )
+    if config.webhook_domain and not config.telegram_allowed_ids:
+        raise RuntimeError(
+            "TELEGRAM_ALLOWED_IDS or TELEGRAM_USERS is required when webhook mode is enabled"
+        )
+    if config.webhook_domain:
+        from urllib.parse import urlparse
+
+        webhook_domain = urlparse(config.webhook_domain)
+        if webhook_domain.scheme != "https" or not webhook_domain.hostname:
+            raise RuntimeError("WEBHOOK_DOMAIN must be an HTTPS origin")
+        if webhook_domain.path not in ("", "/") or webhook_domain.query or webhook_domain.fragment:
+            raise RuntimeError("WEBHOOK_DOMAIN must contain only the HTTPS origin")
+        if not config.webhook_path.startswith("/") or config.webhook_path == "/":
+            raise RuntimeError("WEBHOOK_PATH must be an absolute non-root path")
     telegram_session = AiohttpSession(limit=20)
     telegram_session._connector_init.update({
         "family": socket.AF_INET,
@@ -103,6 +136,9 @@ async def main() -> None:
     })
     bot = ResilientBot(token=config.telegram_token, session=telegram_session)
     dp = Dispatcher()
+    allowlist = TelegramAllowlistMiddleware(config.telegram_allowed_ids)
+    dp.message.outer_middleware(allowlist)
+    dp.callback_query.outer_middleware(allowlist)
 
     db = await Database.connect(config.db_path)
     reporting = LedgerReporting(db)
@@ -747,7 +783,15 @@ async def main() -> None:
 
         else:
             pattern = cmd
-            await db.set_email_account_owner(pattern, user_id)
+            try:
+                await db.set_email_account_owner(pattern, user_id)
+            except ValueError:
+                await msg.answer(
+                    f"❌ Akun `{pattern}` sudah terhubung ke pengguna lain. "
+                    "Putuskan link lama terlebih dahulu.",
+                    parse_mode="Markdown",
+                )
+                return
             await msg.answer(
                 f"✅ Akun `{pattern}` terhubung!\n\n"
                 f"Email yang menyebutkan akun ini akan dirutekan ke chat kamu.",
@@ -2648,14 +2692,10 @@ async def main() -> None:
             await bot.set_webhook(
                 url=webhook_url,
                 secret_token=config.webhook_secret or None,
-                drop_pending_updates=True,
+                drop_pending_updates=False,
             )
 
-        async def on_shutdown(bot: Bot) -> None:
-            await bot.delete_webhook()
-
         dp.startup.register(on_startup)
-        dp.shutdown.register(on_shutdown)
 
         app = web.Application()
         from api import register_system_routes

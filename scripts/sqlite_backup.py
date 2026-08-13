@@ -107,6 +107,9 @@ def maintain_backups(
             }:
                 continue
             path.unlink()
+            sidecar = _metadata_path(path)
+            if sidecar.is_file() and not sidecar.is_symlink():
+                sidecar.unlink()
             deleted.append(str(path))
     return {
         "source": str(source),
@@ -135,6 +138,10 @@ def integrity_check(path: Path) -> None:
 def _timestamped_name(source: Path) -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     return f"{source.stem}-{stamp}{source.suffix or '.sqlite3'}"
+
+
+def _metadata_path(backup: Path) -> Path:
+    return backup.with_suffix(backup.suffix + ".json")
 
 
 def _record_backup_heartbeat(
@@ -223,6 +230,7 @@ def backup_database(source: Path, destination_dir: Path, *, overwrite: bool = Fa
         raise BackupError(f"source database does not exist: {source}")
     destination = destination_dir / _timestamped_name(source)
     temp_path: Path | None = None
+    temp_metadata_path: Path | None = None
     try:
         destination_dir.mkdir(parents=True, exist_ok=True)
         if destination.exists() and not overwrite:
@@ -241,10 +249,29 @@ def backup_database(source: Path, destination_dir: Path, *, overwrite: bool = Fa
                 digest.update(chunk)
             stream.flush()
             os.fsync(stream.fileno())
+        metadata = {
+            "backup": destination.name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "size_bytes": temp_path.stat().st_size,
+            "sha256": digest.hexdigest(),
+            "source": str(source),
+        }
+        metadata_path = _metadata_path(destination)
+        metadata_fd, metadata_name = tempfile.mkstemp(
+            dir=destination_dir, prefix=f".{metadata_path.name}.", suffix=".tmp"
+        )
+        temp_metadata_path = Path(metadata_name)
+        with os.fdopen(metadata_fd, "w", encoding="utf-8") as metadata_stream:
+            json.dump(metadata, metadata_stream, sort_keys=True)
+            metadata_stream.write("\n")
+            metadata_stream.flush()
+            os.fsync(metadata_stream.fileno())
         if destination.exists() and not overwrite:
             raise BackupError(f"refusing to overwrite existing backup: {destination}")
         os.replace(temp_path, destination)
         temp_path = None
+        os.replace(temp_metadata_path, metadata_path)
+        temp_metadata_path = None
         try:
             dir_fd = os.open(destination_dir, os.O_RDONLY)
             try:
@@ -266,6 +293,8 @@ def backup_database(source: Path, destination_dir: Path, *, overwrite: bool = Fa
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
+        if temp_metadata_path is not None:
+            temp_metadata_path.unlink(missing_ok=True)
 
 
 def restore_database(backup: Path, target: Path, *, allow_existing: bool = False) -> Path:

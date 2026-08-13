@@ -43,13 +43,18 @@ private fun budgetMoney(value: Long) = NumberFormat.getCurrencyInstance(Locale("
  * Cancelling is an efficiency measure; the request version is the correctness guard.
  */
 @Composable
-fun BudgetScreen() {
+fun BudgetScreen(onOpenSettings: () -> Unit = {}) {
     val context = LocalContext.current
     val settings = remember { LedgerSettingsStore.read(context) }
     val baseUrl = settings.baseUrl
     val token = settings.token
     if (baseUrl.isBlank() || token.isBlank()) {
-        BudgetMessage("Connect the ledger first", "Add your API base URL and device token in Settings.")
+        BudgetMessage(
+            "Connect the ledger first",
+            "Add your API base URL and device token in Settings.",
+            actionLabel = "Open Settings",
+            action = onOpenSettings,
+        )
         return
     }
     val repository = remember(baseUrl, token) { BudgetRepository(LedgerApi(baseUrl, token)) }
@@ -194,4 +199,20 @@ fun BudgetScreen() {
 }
 
 @Composable private fun BudgetError(message: String, retry: () -> Unit) { Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.testTag("budget_error").semantics { liveRegion = LiveRegionMode.Assertive }) { Text(message, color = Expense); OutlinedButton(onClick = retry) { Text("Retry") } } }
-@Composable private fun BudgetMessage(title: String, body: String) { LedgerCard(contentPadding = 18.dp) { Text(title, fontWeight = FontWeight.Bold); Text(body, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
+@Composable
+private fun BudgetMessage(
+    title: String,
+    body: String,
+    actionLabel: String? = null,
+    action: (() -> Unit)? = null,
+) {
+    LedgerCard(contentPadding = 18.dp) {
+        Text(title, fontWeight = FontWeight.Bold)
+        Text(body, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (actionLabel != null && action != null) {
+            OutlinedButton(onClick = action, modifier = Modifier.testTag("budget_message_action")) {
+                Text(actionLabel)
+            }
+        }
+    }
+}

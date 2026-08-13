@@ -5,6 +5,7 @@ import android.content.pm.ApplicationInfo
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -52,6 +53,7 @@ import com.afif.expensetracker.manual.PendingManualMutationResult
 import com.afif.expensetracker.settings.SettingsValidationResult
 import com.afif.expensetracker.settings.validateSettings
 import com.afif.expensetracker.sync.SyncScheduler
+import com.afif.expensetracker.sync.LedgerApi
 import com.afif.expensetracker.transactions.TransactionKind
 import com.afif.expensetracker.transactions.filterTransactions
 import com.afif.expensetracker.transactions.groupTransactions
@@ -125,7 +127,7 @@ private data class TopLevelDestination(
                             },
                             icon = { Icon(destination.icon, destination.label) },
                             label = { Text(destination.label) },
-                            alwaysShowLabel = false,
+                            alwaysShowLabel = true,
                         )
                     }
                 }
@@ -152,7 +154,7 @@ private data class TopLevelDestination(
                 }
             }
             composable("budgets") {
-                BudgetScreen()
+                BudgetScreen(onOpenSettings = { nav.navigate("settings") })
             }
             composable("settings") {
                 SettingsScreen { nav.navigate("diagnostics") }
@@ -822,6 +824,8 @@ private fun SettingsScreen(openDiagnostics: () -> Unit) {
     var tokenVisible by rememberSaveable { mutableStateOf(false) }
     var message by rememberSaveable { mutableStateOf<String?>(null) }
     var messageIsError by rememberSaveable { mutableStateOf(false) }
+    var testingConnection by rememberSaveable { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     Column(
         Modifier
             .fillMaxSize()
@@ -883,6 +887,38 @@ private fun SettingsScreen(openDiagnostics: () -> Unit) {
                 modifier = Modifier.fillMaxWidth().testTag("settings_save"),
             ) {
                 Text("Save and sync")
+            }
+            OutlinedButton(
+                onClick = {
+                    when (val result = validateSettings(baseUrl, token, allowCleartext = allowCleartext)) {
+                        is SettingsValidationResult.Invalid -> {
+                            message = result.message
+                            messageIsError = true
+                        }
+                        is SettingsValidationResult.Valid -> {
+                            baseUrl = result.settings.baseUrl
+                            token = result.settings.token
+                            testingConnection = true
+                            scope.launch {
+                                val connected = withContext(Dispatchers.IO) {
+                                    runCatching { LedgerApi(result.settings.baseUrl, result.settings.token).health() }
+                                        .getOrDefault(false)
+                                }
+                                testingConnection = false
+                                message = if (connected) {
+                                    "Connection successful. Save to begin syncing."
+                                } else {
+                                    "Connection failed. Check the URL and device token."
+                                }
+                                messageIsError = !connected
+                            }
+                        }
+                    }
+                },
+                enabled = !testingConnection,
+                modifier = Modifier.fillMaxWidth().testTag("settings_test_connection"),
+            ) {
+                Text(if (testingConnection) "Testing connection…" else "Test connection")
             }
             message?.let {
                 Text(
@@ -1000,6 +1036,7 @@ private fun TransactionDetail(transactionId: String, onBack: () -> Unit) {
     var busy by rememberSaveable(transactionId) { mutableStateOf(false) }
     var message by rememberSaveable(transactionId) { mutableStateOf<String?>(null) }
     var showVoidDialog by rememberSaveable(transactionId) { mutableStateOf(false) }
+    var showDiscardDialog by rememberSaveable(transactionId) { mutableStateOf(false) }
     var showDatePicker by rememberSaveable(transactionId) { mutableStateOf(false) }
     var remoteConflict by remember(transactionId) { mutableStateOf(detailSnapshotToTransaction(conflictSnapshot)) }
     var remotelyDeleted by rememberSaveable(transactionId) { mutableStateOf(false) }
@@ -1033,6 +1070,11 @@ private fun TransactionDetail(transactionId: String, onBack: () -> Unit) {
 
     val current = baseline
     val dirty = current?.let(::isDirty) == true
+    fun requestBack() {
+        if (busy) return
+        if (dirty) showDiscardDialog = true else onBack()
+    }
+    BackHandler(enabled = !busy) { requestBack() }
     LaunchedEffect(observation) {
         val loaded = observation as? TransactionObservation.Loaded
             ?: return@LaunchedEffect
@@ -1076,7 +1118,7 @@ private fun TransactionDetail(transactionId: String, onBack: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack, modifier = Modifier.testTag("transaction_back")) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Back") }
+            IconButton(onClick = ::requestBack, modifier = Modifier.testTag("transaction_back")) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Back") }
             Text("Transaction details", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         }
         if (current == null) {
@@ -1278,5 +1320,19 @@ private fun TransactionDetail(transactionId: String, onBack: () -> Unit) {
             }) { Text("Void") }
         },
         dismissButton = { TextButton(onClick = { showVoidDialog = false }, modifier = Modifier.testTag("transaction_void_cancel")) { Text("Cancel") } },
+    )
+    if (showDiscardDialog) AlertDialog(
+        onDismissRequest = { showDiscardDialog = false },
+        title = { Text("Discard unsaved changes?") },
+        text = { Text("Your edits have not been saved to this device yet.") },
+        confirmButton = {
+            TextButton(
+                onClick = { showDiscardDialog = false; onBack() },
+                modifier = Modifier.testTag("transaction_discard_confirm"),
+            ) { Text("Discard") }
+        },
+        dismissButton = {
+            TextButton(onClick = { showDiscardDialog = false }) { Text("Keep editing") }
+        },
     )
 }

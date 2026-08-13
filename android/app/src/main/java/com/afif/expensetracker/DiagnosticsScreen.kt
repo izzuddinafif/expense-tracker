@@ -104,10 +104,6 @@ fun DiagnosticsScreen(onBack: () -> Unit = {}) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
-            SyncDiagnosticsCard(context)
-            Spacer(Modifier.height(8.dp))
-            OperationalHealthCard(context)
-            Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 IconButton(
                     onClick = onBack,
@@ -122,6 +118,10 @@ fun DiagnosticsScreen(onBack: () -> Unit = {}) {
                 )
             }
             Text("Use this screen while validating bank notifications on a real device. Captured content stays on this device.", color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
+            SyncDiagnosticsCard(context)
+            Spacer(Modifier.height(8.dp))
+            OperationalHealthCard(context)
             Spacer(Modifier.height(8.dp))
             Card(modifier = Modifier.fillMaxWidth().testTag("notification_access_status"), colors = CardDefaults.cardColors(containerColor = Elevated)) {
                 Column(Modifier.padding(16.dp)) {
@@ -312,10 +312,18 @@ private fun OperationalHealthCard(context: Context) {
                                 onClick = { retryLocal(operation) },
                                 modifier = Modifier.testTag("local_sync_retry_${operation.id}"),
                             ) { Text("Retry") }
-                            OutlinedButton(
-                                onClick = { discardLocalTarget = operation },
-                                modifier = Modifier.testTag("local_sync_discard_${operation.id}"),
-                            ) { Text("Discard") }
+                            if (operation.kind == "transaction") {
+                                OutlinedButton(
+                                    onClick = { discardLocalTarget = operation },
+                                    modifier = Modifier.testTag("local_sync_discard_${operation.id}"),
+                                ) { Text("Discard") }
+                            } else {
+                                Text(
+                                    "Keep retrying update/void failures to avoid local and server records diverging.",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
                         }
                     }
                 }
@@ -374,7 +382,7 @@ private fun OperationalHealthCard(context: Context) {
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { discardLocalTarget = null },
             title = { Text("Discard failed operation?") },
-            text = { Text("This stops retrying this operation. Its local ledger record remains unchanged.") },
+            text = { Text("This deletes the failed unsynced transaction from this device and stops retrying it. Confirmed transactions can only be recovered by syncing again.") },
             confirmButton = { TextButton(onClick = { discardLocal(operation) }, modifier = Modifier.testTag("local_sync_discard_confirm_${operation.id}")) { Text("Discard") } },
             dismissButton = { TextButton(onClick = { discardLocalTarget = null }) { Text("Cancel") } },
         )

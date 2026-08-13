@@ -54,9 +54,33 @@ class Config:
     budget_ds: str = ""
     categories_ds: str = ""
     users: dict[int, str] = field(default_factory=dict)
+    telegram_allowed_ids: frozenset[int] = field(default_factory=frozenset)
+
+
+def _parse_telegram_ids(raw: str) -> frozenset[int]:
+    values: set[int] = set()
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            values.add(int(item))
+        except ValueError as exc:
+            raise ValueError("TELEGRAM_ALLOWED_IDS must contain comma-separated numeric IDs") from exc
+    return frozenset(values)
 
 
 def load_config() -> Config:
+    configured_users = (
+        {
+            int(item.split(":", 1)[0]): item.split(":", 1)[1]
+            for item in os.getenv("TELEGRAM_USERS", "").split(",")
+            if ":" in item
+        }
+        if os.getenv("TELEGRAM_USERS")
+        else {}
+    )
+    explicit_allowed_ids = _parse_telegram_ids(os.getenv("TELEGRAM_ALLOWED_IDS", ""))
     return Config(
         telegram_token=os.environ["TELEGRAM_TOKEN"],
         openrouter_api_key=os.environ["OPENROUTER_API_KEY"],
@@ -78,13 +102,6 @@ def load_config() -> Config:
         db_path=os.getenv("DB_PATH", "data/expense_tracker.db"),
         # Legacy single-tenant env vars (optional, for backward compat)
         notion_token=os.getenv("NOTION_TOKEN", ""),
-        users=(
-            {
-                int(item.split(":", 1)[0]): item.split(":", 1)[1]
-                for item in os.getenv("TELEGRAM_USERS", "").split(",")
-                if ":" in item
-            }
-            if os.getenv("TELEGRAM_USERS")
-            else {}
-        ),
+        users=configured_users,
+        telegram_allowed_ids=explicit_allowed_ids or frozenset(configured_users),
     )

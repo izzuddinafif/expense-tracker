@@ -53,6 +53,12 @@ fun validateSettings(
     if (parsed.host.isNullOrBlank()) {
         return SettingsValidationResult.Invalid("API URL must include a host.")
     }
+    if (!parsed.rawUserInfo.isNullOrBlank() || !parsed.rawQuery.isNullOrBlank() || !parsed.rawFragment.isNullOrBlank()) {
+        return SettingsValidationResult.Invalid("API URL must contain only the server origin.")
+    }
+    if (!parsed.path.isNullOrBlank() && parsed.path != "/") {
+        return SettingsValidationResult.Invalid("API URL must contain only the server origin.")
+    }
     if (scheme.equals("http", ignoreCase = true) && !allowCleartext) {
         return SettingsValidationResult.Invalid(
             "HTTPS is required outside debug builds.",

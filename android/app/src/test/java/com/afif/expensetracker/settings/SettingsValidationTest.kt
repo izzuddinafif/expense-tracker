@@ -21,9 +21,23 @@ class SettingsValidationTest {
 
     @Test
     fun acceptsHttpsEndpoint() {
-        val result = validateSettings("https://ledgerly.example/api", "token")
+        val result = validateSettings("https://ledgerly.example/", "token")
 
-        assertIs<SettingsValidationResult.Valid>(result)
+        val valid = assertIs<SettingsValidationResult.Valid>(result)
+        assertEquals("https://ledgerly.example", valid.settings.baseUrl)
+    }
+
+    @Test
+    fun rejectsPathQueryFragmentAndUserInfo() {
+        listOf(
+            "https://ledgerly.example/api",
+            "https://ledgerly.example?next=/api",
+            "https://ledgerly.example/#fragment",
+            "https://user:pass@ledgerly.example",
+        ).forEach { baseUrl ->
+            val result = validateSettings(baseUrl, "token")
+            assertIs<SettingsValidationResult.Invalid>(result)
+        }
     }
 
     @Test

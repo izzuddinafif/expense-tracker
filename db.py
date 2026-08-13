@@ -582,6 +582,28 @@ class Database:
             await self._conn.rollback()
             raise
 
+    async def mark_rejected(self, uid: str, sender: str, reason: str) -> None:
+        """Exclude a deterministic security reject while retaining its audit trail."""
+        now = datetime.now(timezone.utc).isoformat()
+        await self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self._conn.execute(
+                "INSERT OR REPLACE INTO processed_emails (uid, sender, processed_at) VALUES (?, ?, ?)",
+                (uid, sender, now),
+            )
+            await self._conn.execute(
+                "INSERT INTO email_processing_failures "
+                "(uid,sender,attempt_count,status,first_failed_at,last_failed_at,last_error,terminal_at) "
+                "VALUES (?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(uid) DO UPDATE SET sender=excluded.sender,status='terminal',"
+                "last_failed_at=excluded.last_failed_at,last_error=excluded.last_error,terminal_at=excluded.terminal_at",
+                (uid, sender, 1, "terminal", now, now, reason[:1000], now),
+            )
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
+
     async def get_all_processed_uids(self) -> set[str]:
         cur = await self._conn.execute("SELECT uid FROM processed_emails")
         rows = await cur.fetchall()
@@ -1773,8 +1795,16 @@ class Database:
     # ── Email account owners (multi-user email watcher) ───────────────────────
 
     async def set_email_account_owner(self, account_pattern: str, telegram_id: int) -> None:
+        cur = await self._conn.execute(
+            "SELECT telegram_id FROM email_account_owners WHERE account_pattern = ?",
+            (account_pattern,),
+        )
+        existing = await cur.fetchone()
+        if existing is not None and existing["telegram_id"] != telegram_id:
+            raise ValueError("email account is already linked to another user")
         await self._conn.execute(
-            "INSERT OR REPLACE INTO email_account_owners (account_pattern, telegram_id, created_at) VALUES (?, ?, ?)",
+            "INSERT INTO email_account_owners (account_pattern, telegram_id, created_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(account_pattern) DO UPDATE SET telegram_id=excluded.telegram_id, created_at=excluded.created_at",
             (account_pattern, telegram_id, datetime.now(timezone.utc).isoformat()),
         )
         await self._conn.commit()

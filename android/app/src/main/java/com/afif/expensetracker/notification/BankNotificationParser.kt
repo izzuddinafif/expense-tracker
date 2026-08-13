@@ -44,7 +44,11 @@ object BankNotificationSources {
 }
 
 object BankNotificationParser {
-    private val idrPattern = Regex("(?i)(?:rp\\.?\\s*)?([0-9][0-9.,]*)\\s*(?:idr|rupiah)?")
+    private val currencyAmountPattern = Regex(
+        "(?i)(?:\\b(?:rp\\.?|idr|rupiah)\\s*([0-9]+(?:[.,][0-9]+)*)|" +
+            "([0-9]+(?:[.,][0-9]+)*)\\s*(?:rp\\.?|idr|rupiah)\\b)",
+    )
+    private val balanceContextPattern = Regex("(?i)\\b(?:saldo|balance)\\b[^.!?;,]{0,60}$")
     private val datePattern = Regex("\\b(\\d{1,2})[/-](\\d{1,2})[/-](\\d{2,4})\\b")
     private val longDatePattern = Regex("(?i)\\b(\\d{1,2})\\s+(jan(?:uari)?|feb(?:ruari)?|mar(?:et)?|apr(?:il)?|mei|jun(?:i)?|jul(?:i)?|agu(?:stus)?|sep(?:t(?:ember)?)?|okt(?:ober)?|nov(?:ember)?|des(?:ember)?)\\s+(\\d{4})\\b")
     private val merchantPattern = Regex("(?i)\\b(?:di|ke|kepada|at|from)\\s+([A-Za-z0-9][A-Za-z0-9 .&'_-]{1,80}?)(?=\\s+(?:pada|tanggal|tgl|\\d{1,2}[/-]\\d{1,2})|[,.]|$)")
@@ -98,12 +102,23 @@ object BankNotificationParser {
     }
 
     private fun extractAmount(text: String): Long? {
-        // Prefer an explicitly labelled currency value; this avoids treating a
-        // notification date or account suffix as the transaction amount.
-        val labelled = Regex("(?i)(?:rp\\.?\\s*|idr\\s*|rupiah\\s*)([0-9][0-9.,]*)").find(text)
-        val match = labelled ?: idrPattern.find(text)
-        val digits = match?.groupValues?.get(1)?.filter(Char::isDigit).orEmpty()
-        return digits.takeIf { it.isNotEmpty() }?.toLongOrNull()
+        val candidates = currencyAmountPattern.findAll(text)
+            .filterNot { match -> isBalanceValue(text, match.range.first) }
+            .map { match ->
+                val rawAmount = match.groupValues[1].ifEmpty { match.groupValues[2] }
+                rawAmount.filter(Char::isDigit).toLongOrNull()
+            }
+            .toList()
+
+        // Without a verified bank-template match, only one explicitly marked
+        // currency value is safe to accept. Multiple candidates are ambiguous
+        // and must stay in the review flow.
+        return candidates.singleOrNull()
+    }
+
+    private fun isBalanceValue(text: String, amountStart: Int): Boolean {
+        val contextStart = (amountStart - 60).coerceAtLeast(0)
+        return balanceContextPattern.containsMatchIn(text.substring(contextStart, amountStart))
     }
 
     private fun extractMerchant(text: String): String? = merchantPattern.find(text)?.groupValues?.get(1)?.trim()?.trimEnd('.', ',')?.takeIf { it.isNotBlank() }

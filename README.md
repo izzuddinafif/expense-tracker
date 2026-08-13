@@ -42,7 +42,10 @@ and bank-notification capture.
 ### 5. User and Android API
 
 Get your Telegram user ID from `@userinfobot`. Set `TELEGRAM_USERS` using
-`id:name` entries. To enable the personal Android API, generate a random
+`id:name` entries. These IDs are also the default Telegram allowlist; set
+`TELEGRAM_ALLOWED_IDS` explicitly when the bot must accept more than the
+legacy setup entries. Unknown Telegram accounts are rejected before setup.
+To enable the personal Android API, generate a random
 `API_TOKEN`, set `API_USER_ID` to that Telegram ID, and configure the same base
 URL and token in the app.
 
@@ -110,7 +113,8 @@ liveness and is used by Docker. Dependency failures do not create restart
 loops.
 
 For webhook mode, set `WEBHOOK_DOMAIN`, `WEBHOOK_PATH`, and a random
-`WEBHOOK_SECRET`. The application serves plain HTTP on `PORT`; Coolify or
+`WEBHOOK_SECRET` of at least 32 characters. The application serves plain HTTP on
+`PORT`; Coolify or
 another reverse proxy must terminate HTTPS with a publicly trusted certificate
 for the exact webhook hostname. Telegram will reject a default/self-signed
 proxy certificate.

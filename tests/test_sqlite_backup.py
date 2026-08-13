@@ -21,6 +21,10 @@ def test_online_backup_is_timestamped_and_valid(tmp_path):
     integrity_check(destination)
     with sqlite3.connect(destination) as conn:
         assert conn.execute("SELECT value FROM values_table").fetchone()[0] == "before"
+    metadata = json.loads(destination.with_suffix(destination.suffix + ".json").read_text())
+    assert metadata["backup"] == destination.name
+    assert metadata["size_bytes"] == destination.stat().st_size
+    assert len(metadata["sha256"]) == 64
 
 
 def test_restore_refuses_existing_target_without_explicit_flag(tmp_path):

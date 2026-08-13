@@ -89,3 +89,30 @@ async def test_success_clears_failure_and_manual_clear_reenables_uid(tmp_path):
         assert row is None
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_security_rejection_is_processed_but_remains_auditable(tmp_path):
+    db = await Database.connect(str(tmp_path / "email-rejected.db"))
+    try:
+        await db.mark_rejected("uid-spoof", "spoof@example.test", "authentication rejected")
+        assert await db.is_processed("uid-spoof")
+        assert "uid-spoof" in await db.get_email_excluded_uids()
+        failure = (await db.list_email_processing_failures())[0]
+        assert failure["uid"] == "uid-spoof"
+        assert failure["status"] == "terminal"
+        assert failure["last_error"] == "authentication rejected"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_email_account_owner_cannot_be_silently_replaced(tmp_path):
+    db = await Database.connect(str(tmp_path / "email-owners.db"))
+    try:
+        await db.set_email_account_owner("Mandiri", 7)
+        with pytest.raises(ValueError, match="already linked"):
+            await db.set_email_account_owner("Mandiri", 8)
+        assert await db.get_email_owner_for_account("Mandiri") == 7
+    finally:
+        await db.close()

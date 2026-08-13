@@ -3,6 +3,7 @@ package com.afif.expensetracker.notification
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class BankNotificationParserTest {
@@ -44,6 +45,69 @@ class BankNotificationParserTest {
         assertEquals(9000L, jago.amountIdr)
         assertEquals("WARUNG PAGI", jago.merchant)
         assertEquals("2026-07-03", jago.transactionDate.toString())
+    }
+
+    @Test
+    fun dateOnlyNotificationDoesNotTreatDateAsAmount() {
+        val parsed = BankNotificationParser.parse(
+            BankNotificationSources.BSI_BYOND_PACKAGE,
+            "BYOND by BSI",
+            "Pembayaran di TOKOPEDIA pada 28/07/2026",
+        )
+
+        assertNull(parsed.amountIdr)
+        assertEquals("2026-07-28", parsed.transactionDate.toString())
+        assertTrue(parsed.reviewRequired)
+    }
+
+    @Test
+    fun accountSuffixAndBalanceDoNotBecomeTransactionAmounts() {
+        val accountSuffix = BankNotificationParser.parse(
+            "id.bmri.livin",
+            "Livin' by Mandiri",
+            "Pembayaran di TOKOPEDIA dari rekening ****1234",
+        )
+        val balance = BankNotificationParser.parse(
+            "com.jago.digitalBanking",
+            "Jago",
+            "Saldo Anda Rp 1.250.000 pada rekening ****5678",
+        )
+
+        assertNull(accountSuffix.amountIdr)
+        assertTrue(accountSuffix.reviewRequired)
+        assertNull(balance.amountIdr)
+        assertTrue(balance.reviewRequired)
+    }
+
+    @Test
+    fun parsesPrefixAndSuffixCurrencyMarkers() {
+        val prefix = BankNotificationParser.parse(
+            "id.bmri.livin",
+            "Livin' by Mandiri",
+            "Transaksi berhasil IDR 75.500 ke KOPI SENJA",
+        )
+        val suffix = BankNotificationParser.parse(
+            "com.jago.digitalBanking",
+            "Jago",
+            "Pembayaran 9.000 rupiah ke WARUNG PAGI",
+        )
+
+        assertEquals(75500L, prefix.amountIdr)
+        assertTrue(!prefix.reviewRequired)
+        assertEquals(9000L, suffix.amountIdr)
+        assertTrue(!suffix.reviewRequired)
+    }
+
+    @Test
+    fun multipleCurrencyAmountsAreAmbiguousAndRequireReview() {
+        val parsed = BankNotificationParser.parse(
+            BankNotificationSources.BSI_BYOND_PACKAGE,
+            "BYOND by BSI",
+            "Pembayaran Rp 25.000 di TOKOPEDIA, biaya Rp 2.500",
+        )
+
+        assertNull(parsed.amountIdr)
+        assertTrue(parsed.reviewRequired)
     }
 
     @Test

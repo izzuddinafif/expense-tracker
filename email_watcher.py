@@ -286,6 +286,13 @@ class EmailWatcher:
 
     async def _reject_message(self, uid: str, sender: str, reason: str) -> None:
         """Record deterministic security rejects and exclude the UID from retries."""
+        mark_rejected = getattr(self._db, "mark_rejected", None)
+        if mark_rejected is not None:
+            try:
+                await mark_rejected(uid, sender, reason)
+                return
+            except Exception:
+                log.exception("Could not persist rejected email [%s]", uid)
         record = getattr(self._db, "record_email_processing_failure", None)
         if record is not None:
             try:
