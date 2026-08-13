@@ -279,6 +279,13 @@ The initial local-ledger and Android foundation is implemented:
   flags suspected duplicates for review;
 - release-only HTTPS enforcement with debug-LAN HTTP opt-in;
 - reproducible `uv.lock`-based container and local dependency installation;
+- revision-fenced Android edits and voids, with a server-copy recovery action
+  for permanently failed local mutations;
+- serialized SQLite writes across Telegram, Gmail, API, backup, and budget
+  paths, including concurrency regression coverage;
+- conservative notification direction detection that keeps credits, generic
+  success templates, and ambiguous captures in review;
+- token-aware budget matching with category fallback and collision coverage;
 - graceful webhook signal handling and documented off-host backup operations.
 
 Ledger/outbox delivery is idempotent because both live Notion databases now
@@ -287,16 +294,21 @@ responses are reconciled by UUID lookup and existing pages are repaired with
 canonical data. Telegram, Android, and Gmail creation paths use the outbox;
 edit/void/undo paths also mutate the canonical ledger and enqueue Notion work.
 
-Next milestones are:
+Remaining milestones are:
 
 1. validate notification capture and parsers on the physical Android device
    using sanitized BSI BYOND, Livin Mandiri, and Jago notifications;
 2. validate real BSI, Mandiri, and Jago notifications on the physical device;
-3. rerun the compiled Android instrumentation suite when the remote host can
-   keep the API 35 emulator alive, then repeat the critical flows on-device;
-4. install the verified backup-maintenance command in the deployment server's
-   scheduler and add an off-host copy following `docs/BACKUP_OPERATIONS.md`;
-5. continue extracting handlers/services from `main.py` and validate budget
+3. continue extracting handlers/services from `main.py` and validate budget
    totals/categories against real usage data;
-6. keep Assets/net-worth synchronization Notion-backed until a local asset
+4. keep Assets/net-worth synchronization Notion-backed until a local asset
    model is introduced.
+
+The API 35 emulator suite is currently green at 14/14, the Android JVM suite
+at 47/47, and focused backend regressions at 70/70. The signed release APK was
+built and verified locally. The SG deployment now runs commit `5278994`, the
+encrypted off-host backup timer has completed a verified backup and a local
+decrypt/SQLite-integrity restore drill, and the resource-limit timer is active.
+Physical BSI/Mandiri/Jago notification delivery remains a real-device gate;
+the parser and notification-queue paths are covered by sanitized fixtures and
+emulator tests but cannot prove banking-template delivery without the device.
