@@ -144,6 +144,11 @@ def _metadata_path(backup: Path) -> Path:
     return backup.with_suffix(backup.suffix + ".json")
 
 
+def _remove_sqlite_sidecars(path: Path) -> None:
+    for suffix in ("-wal", "-shm", "-journal"):
+        Path(f"{path}{suffix}").unlink(missing_ok=True)
+
+
 def _record_backup_heartbeat(
     source: Path,
     destination: Path,
@@ -249,6 +254,7 @@ def backup_database(source: Path, destination_dir: Path, *, overwrite: bool = Fa
                 digest.update(chunk)
             stream.flush()
             os.fsync(stream.fileno())
+        _remove_sqlite_sidecars(temp_path)
         metadata = {
             "backup": destination.name,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -292,6 +298,7 @@ def backup_database(source: Path, destination_dir: Path, *, overwrite: bool = Fa
         raise BackupError(f"backup failed: {exc}") from exc
     finally:
         if temp_path is not None:
+            _remove_sqlite_sidecars(temp_path)
             temp_path.unlink(missing_ok=True)
         if temp_metadata_path is not None:
             temp_metadata_path.unlink(missing_ok=True)
