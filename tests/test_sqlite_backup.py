@@ -3,7 +3,14 @@ import json
 
 import pytest
 
-from scripts.sqlite_backup import BackupError, backup_database, integrity_check, main, restore_database
+from scripts.sqlite_backup import (
+    BackupError,
+    backup_database,
+    integrity_check,
+    main,
+    record_backup_status,
+    restore_database,
+)
 
 
 def make_db(path, value="before"):
@@ -96,3 +103,38 @@ def test_failed_backup_records_attempt_and_cleans_temp_file(tmp_path, monkeypatc
     assert row[0]
     assert row[1] is None
     assert "simulated integrity failure" in row[2]
+
+
+def test_offsite_status_overrides_local_success_health(tmp_path):
+    source = tmp_path / "source.sqlite3"
+    make_db(source)
+    with sqlite3.connect(source) as conn:
+        conn.execute(
+            "CREATE TABLE operational_state ("
+            "name TEXT PRIMARY KEY,last_attempt_at TEXT,last_success_at TEXT,"
+            "last_error TEXT,metadata_json TEXT NOT NULL,updated_at TEXT NOT NULL)"
+        )
+
+    backup = tmp_path / "backups" / "source-20260814T000000000000Z.sqlite3"
+    record_backup_status(
+        source,
+        backup,
+        success=True,
+        metadata={"offsite_host": "backup.example"},
+    )
+    record_backup_status(
+        source,
+        backup,
+        success=False,
+        error="remote checksum mismatch",
+        metadata={"offsite_host": "backup.example"},
+    )
+
+    with sqlite3.connect(source) as conn:
+        row = conn.execute(
+            "SELECT last_success_at,last_error,metadata_json FROM operational_state "
+            "WHERE name='backup'"
+        ).fetchone()
+    assert row[0]
+    assert row[1] == "remote checksum mismatch"
+    assert json.loads(row[2])["offsite_host"] == "backup.example"

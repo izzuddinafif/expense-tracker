@@ -1,8 +1,15 @@
 services:
   bot:
+    # Local development must be explicit. Production runs from Coolify; this
+    # guard prevents an accidental `docker compose up` from starting a second
+    # Telegram worker with the production token.
+    profiles: ["local"]
     build: .
     env_file: .env
-    restart: unless-stopped
+    restart: "no"
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
     network_mode: host
     volumes:
       - ./data:/app/data

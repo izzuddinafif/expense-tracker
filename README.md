@@ -84,11 +84,10 @@ python -m scripts.sqlite_backup maintain \
 ```
 
 Run `maintain` once daily from the deployment server's scheduler after
-verifying the destination and dry-run output. Copy completed backups and their
-`.json` metadata to a different machine or storage provider; a backup on the
-same server does not protect against disk or host loss. See
-[`docs/BACKUP_OPERATIONS.md`](docs/BACKUP_OPERATIONS.md) for a systemd example
-and an off-host verification checklist.
+verifying the destination and dry-run output. Production uses the encrypted
+off-host wrapper and verifies remote checksums before reporting backup health;
+see [`docs/BACKUP_OPERATIONS.md`](docs/BACKUP_OPERATIONS.md) for the systemd
+example and recovery-key checklist.
 
 Restore into a new path first, then run an integrity check by opening it with
 the application. Restoring over an existing database requires
@@ -100,6 +99,11 @@ python -m scripts.sqlite_backup restore \
   --source data/backups/expense_tracker-TIMESTAMP.db \
   --destination data/expense_tracker-restored.db
 ```
+
+The root `docker-compose.yaml` is intentionally scoped to the explicit
+`local` profile and has no restart policy. Use
+`docker compose --profile local up --build` only for a deliberate local bot
+instance; production is deployed by Coolify.
 
 The API is mounted at `/api/v1` when `API_TOKEN` and `API_USER_ID` are set. It
 runs alongside either webhook or polling mode.

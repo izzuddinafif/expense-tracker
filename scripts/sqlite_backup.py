@@ -226,6 +226,30 @@ def _record_backup_heartbeat(
         return
 
 
+def record_backup_status(
+    source: Path,
+    destination: Path,
+    *,
+    success: bool,
+    error: str | None = None,
+    metadata: dict[str, object] | None = None,
+) -> None:
+    """Record the result of a post-backup verification step.
+
+    The host-level off-site uploader calls this after its remote checksums
+    pass. A locally valid copy must not make operational health green when the
+    required off-site copy is missing or corrupt.
+    """
+
+    _record_backup_heartbeat(
+        Path(source),
+        Path(destination),
+        success=success,
+        error=error,
+        metadata=metadata,
+    )
+
+
 def backup_database(source: Path, destination_dir: Path, *, overwrite: bool = False) -> Path:
     """Create a timestamped online backup under ``destination_dir``."""
 
@@ -353,6 +377,17 @@ def _parser() -> argparse.ArgumentParser:
     maintain.add_argument("--daily", type=int, default=7, help="daily generations to retain")
     maintain.add_argument("--weekly", type=int, default=4, help="weekly generations to retain")
     maintain.add_argument("--dry-run", action="store_true", help="report changes without writing or deleting")
+
+    offsite = commands.add_parser(
+        "offsite-status", help="record the result of off-site backup verification"
+    )
+    offsite.add_argument("--source", type=Path, required=True, help="source SQLite database")
+    offsite.add_argument("--destination", type=Path, required=True, help="local backup path")
+    offsite.add_argument("--success", action="store_true", help="mark off-site verification successful")
+    offsite.add_argument("--failure", action="store_true", help="mark off-site verification failed")
+    offsite.add_argument("--error", default=None, help="failure reason")
+    offsite.add_argument("--offsite-host", required=True, help="off-site SSH host")
+    offsite.add_argument("--offsite-path", required=True, help="off-site backup directory")
     return parser
 
 
@@ -368,7 +403,7 @@ def main(argv: list[str] | None = None) -> int:
             result = backup_database(args.source, args.destination, overwrite=args.overwrite)
         elif args.command == "restore":
             result = restore_database(args.source, args.destination, allow_existing=args.allow_existing)
-        else:
+        elif args.command == "maintain":
             result = maintain_backups(
                 args.source,
                 args.destination,
@@ -376,12 +411,26 @@ def main(argv: list[str] | None = None) -> int:
                 weekly_generations=args.weekly,
                 dry_run=args.dry_run,
             )
+        else:
+            if args.success == args.failure:
+                _parser().error("choose exactly one of --success or --failure")
+            record_backup_status(
+                args.source,
+                args.destination,
+                success=args.success,
+                error=args.error,
+                metadata={
+                    "offsite_host": args.offsite_host,
+                    "offsite_path": args.offsite_path,
+                },
+            )
+            result = None
     except BackupError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if isinstance(result, dict):
         print(json.dumps(result, sort_keys=True))
-    else:
+    elif result is not None:
         print(result)
     return 0
 
