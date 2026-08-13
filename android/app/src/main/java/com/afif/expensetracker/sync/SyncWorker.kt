@@ -12,6 +12,7 @@ import com.afif.expensetracker.data.SyncOperation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.security.MessageDigest
 import java.util.UUID
 
 class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
@@ -42,6 +43,7 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         val token = settings.token
         if (baseUrl.isBlank() || token.isBlank()) return Result.failure()
         val api = LedgerApi(baseUrl, token)
+        val feed = transactionFeedKey(baseUrl, token)
         var retryNeeded = false
 
         for (candidate in db.syncDao().pending()) {
@@ -95,7 +97,7 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             }
         }
 
-        val feedResult = runCatching { consumeChangeFeed(db, api, ownerToken, generation) }
+        val feedResult = runCatching { consumeChangeFeed(db, api, ownerToken, generation, feed) }
             .onFailure { Log.w(TAG, "Canonical change feed failed", it) }
         if (feedResult.isFailure) return Result.retry()
         return if (retryNeeded) Result.retry() else Result.success()
@@ -169,8 +171,9 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         api: LedgerApi,
         ownerToken: String,
         generation: Long,
+        feed: String,
     ) {
-        var cursor = db.syncDao().checkpoint(TRANSACTION_FEED)
+        var cursor = db.syncDao().checkpoint(feed)
         val seenCursors = mutableSetOf<String>()
         while (true) {
             if (!renewLease(db, ownerToken, generation)) error("sync lease lost")
@@ -209,7 +212,7 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
                 // still safe, while a null terminal cursor intentionally falls
                 // back to a replay rather than inventing an opaque cursor.
                 cursorAfterPage?.let {
-                    db.syncDao().saveCheckpoint(SyncCheckpoint(TRANSACTION_FEED, it))
+                    db.syncDao().saveCheckpoint(SyncCheckpoint(feed, it))
                 }
             }
             val next = page.nextCursor ?: break
@@ -228,9 +231,15 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
 
     private companion object {
         const val TAG = "LedgerSyncWorker"
-        const val TRANSACTION_FEED = "transactions"
         const val MAX_ATTEMPTS = 5
         const val CLAIM_TIMEOUT_MS = 5 * 60 * 1000L
         const val RUN_LEASE_MS = 15 * 60 * 1000L
+    }
+
+    private fun transactionFeedKey(baseUrl: String, token: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest("${baseUrl.trimEnd('/')}\u001f$token".toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        return "transactions:${digest.take(16)}"
     }
 }
