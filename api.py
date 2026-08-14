@@ -25,6 +25,17 @@ log = logging.getLogger(__name__)
 _PORTFOLIO_ACCOUNT_NAMES = ("Mandiri 1854", "BSI 9400", "Jago", "Cash")
 
 
+def _portfolio_account_key(value: str) -> str:
+    aliases = {
+        "mandiri": "mandiri 1854",
+        "mandiri 1854": "mandiri 1854",
+        "bsi": "bsi 9400",
+        "bsi 9400": "bsi 9400",
+    }
+    normalized = str(value or "").strip().casefold()
+    return aliases.get(normalized, normalized)
+
+
 def register_system_routes(app: web.Application, *, db: Database) -> None:
     """Register non-disclosing liveness routes used by the local runtime."""
 
@@ -141,6 +152,9 @@ async def _default_portfolio(db: Database, user_id: int) -> dict[str, Any]:
     fetched_at = datetime.now(timezone.utc).isoformat()
     client = NotionClient.from_user(user)
     warnings: list[str] = []
+    freshness = "live"
+    accounts_complete = True
+    assets_complete = True
     try:
         account_rows = await client.fetch_accounts()
         try:
@@ -148,6 +162,8 @@ async def _default_portfolio(db: Database, user_id: int) -> dict[str, Any]:
         except Exception as exc:
             log.warning("Optional Notion assets fetch failed: %s", type(exc).__name__)
             notion_assets = []
+            freshness = "partial"
+            assets_complete = False
             warnings.append("Notion assets could not be fetched; local assets are still included.")
     finally:
         await client.aclose()
@@ -155,11 +171,23 @@ async def _default_portfolio(db: Database, user_id: int) -> dict[str, Any]:
     accounts: list[dict[str, Any]] = []
     seen_names: set[str] = set()
     total_liquid_idr = 0
+    required_names = {name.casefold() for name in _PORTFOLIO_ACCOUNT_NAMES}
     for raw in account_rows:
         title = str(raw.get("title", "")).strip()
         if not title:
             continue
-        seen_names.add(title.casefold())
+        normalized_name = title.casefold()
+        if normalized_name not in required_names:
+            warnings.append(f"Notion account '{title}' is not part of the configured portfolio and was excluded.")
+            freshness = "partial"
+            accounts_complete = False
+            continue
+        if normalized_name in seen_names:
+            warnings.append(f"Duplicate Notion account '{title}' was excluded from totals.")
+            freshness = "partial"
+            accounts_complete = False
+            continue
+        seen_names.add(normalized_name)
         balance = _idr_number(raw.get("current_balance_idr"))
         account_type = str(raw.get("type", ""))
         accounts.append({
@@ -172,8 +200,10 @@ async def _default_portfolio(db: Database, user_id: int) -> dict[str, Any]:
             "source": "notion_accounts",
             "as_of": fetched_at,
         })
-        if balance is not None and account_type.casefold() not in {"liability", "debt"}:
-            total_liquid_idr += balance
+        if balance is None:
+            freshness = "partial"
+            accounts_complete = False
+            warnings.append(f"Account '{title}' has no current balance and is excluded from totals.")
     for name in _PORTFOLIO_ACCOUNT_NAMES:
         if name.casefold() not in seen_names:
             accounts.append({
@@ -183,12 +213,35 @@ async def _default_portfolio(db: Database, user_id: int) -> dict[str, Any]:
                 "as_of": fetched_at,
             })
             warnings.append(f"Configured account '{name}' was not returned by Notion.")
+            accounts_complete = False
+            freshness = "partial"
+
+    transfer_adjustments: dict[str, int] = {}
+    for leg in await db.list_confirmed_self_transfer_legs(user_id):
+        key = _portfolio_account_key(leg["account"])
+        delta = int(leg["amount_idr"]) if leg["kind"] == "income" else -int(leg["amount_idr"])
+        transfer_adjustments[key] = transfer_adjustments.get(key, 0) + delta
+    if transfer_adjustments:
+        warnings.append("Saldo akun mencakup penyesuaian transfer antar rekening dari ledger lokal.")
+    total_liquid_idr = 0
+    for account in accounts:
+        balance = account["balance_idr"]
+        if balance is None:
+            continue
+        key = _portfolio_account_key(account["name"])
+        adjustment = transfer_adjustments.get(key, 0)
+        account["balance_idr"] = balance + adjustment
+        account["source"] = "notion_accounts+local_transfer_adjustments" if adjustment else "notion_accounts"
+        if account["type"].casefold() not in {"liability", "debt"}:
+            total_liquid_idr += account["balance_idr"]
 
     assets: list[dict[str, Any]] = []
     total_assets_idr = 0
+    notion_asset_names: set[str] = set()
     for raw in notion_assets:
         value = _idr_number(raw.get("value_idr"))
         name = str(raw.get("name", "")).strip() or "Unnamed Notion asset"
+        notion_asset_names.add(name.casefold())
         assets.append({
             "id": None, "name": name,
             "type": str(raw.get("type", "")), "value_idr": value,
@@ -207,6 +260,12 @@ async def _default_portfolio(db: Database, user_id: int) -> dict[str, Any]:
     for row in local_entries:
         public = _public_local_asset(row)
         assets.append(public)
+        if public["name"].casefold() in notion_asset_names:
+            assets_complete = False
+            freshness = "partial"
+            warnings.append(
+                f"Asset '{public['name']}' exists in both Notion and local storage; totals are incomplete until it is linked."
+            )
         value = public["value_idr"]
         if value is None:
             warnings.append(f"Local {public['kind']} '{public['name']}' has no valuation and is excluded from totals.")
@@ -215,14 +274,23 @@ async def _default_portfolio(db: Database, user_id: int) -> dict[str, Any]:
         else:
             total_assets_idr += value
 
+    reported_liquid = total_liquid_idr if accounts_complete else None
+    reported_assets = total_assets_idr if assets_complete else None
+    reported_net_worth = (
+        reported_liquid + reported_assets - total_liabilities_idr
+        if reported_liquid is not None and reported_assets is not None
+        else None
+    )
     return {
         "as_of": fetched_at,
+        "source": "notion_accounts+notion_assets+local_assets",
+        "freshness": freshness,
         "accounts": accounts,
         "assets": assets,
-        "total_liquid_idr": total_liquid_idr,
-        "total_assets_idr": total_assets_idr,
+        "total_liquid_idr": reported_liquid,
+        "total_assets_idr": reported_assets,
         "total_liabilities_idr": total_liabilities_idr,
-        "net_worth_idr": total_liquid_idr + total_assets_idr - total_liabilities_idr,
+        "net_worth_idr": reported_net_worth,
         "warnings": warnings,
     }
 
@@ -439,7 +507,7 @@ def register_api_routes(
                     },
                     status=(
                         202
-                        if outcome.code == "awaiting_canonical_email"
+                        if outcome.code in {"awaiting_canonical_email", "ambiguous_candidates"}
                         else 409
                         if outcome.code == "evidence_conflict"
                         else 200
@@ -468,6 +536,8 @@ def register_api_routes(
                 {"error": "self_transfer_match_ambiguous", "detail": str(exc)},
                 status=409,
             )
+        except TransactionConflictError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
         except (KeyError, TypeError, ValueError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
         return web.json_response(

@@ -9,6 +9,7 @@ import com.afif.expensetracker.data.TransactionEntity
 import java.time.LocalDate
 import java.time.ZoneId
 import java.net.URLEncoder
+import java.io.IOException
 import okhttp3.HttpUrl.Companion.toHttpUrl
 
 class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
@@ -33,6 +34,10 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
         lastError = "HTTP ${response.code}: $detail"
     }
 
+    private fun rememberNetworkFailure() {
+        lastError = "Tidak dapat terhubung ke ledger. Periksa koneksi dan URL server."
+    }
+
     /** Lightweight authenticated probe used by Settings before a user starts syncing. */
     fun health(): Boolean {
         val request = Request.Builder()
@@ -40,14 +45,19 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
             .header("Authorization", "Bearer $deviceToken")
             .get()
             .build()
-        return client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                rememberHttpFailure(response)
-                false
-            } else {
-                lastError = null
-                true
+        return try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    rememberHttpFailure(response)
+                    false
+                } else {
+                    lastError = null
+                    true
+                }
             }
+        } catch (_: IOException) {
+            rememberNetworkFailure()
+            false
         }
     }
 
@@ -58,15 +68,20 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
             .header("Authorization", "Bearer $deviceToken")
             .get()
             .build()
-        return client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                rememberHttpFailure(response)
-                return@use null
+        return try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    rememberHttpFailure(response)
+                    return@use null
+                }
+                runCatching { parsePortfolioSnapshot(JSONObject(response.body?.string().orEmpty())) }
+                    .onFailure { lastError = "Could not read the portfolio response." }
+                    .getOrNull()
+                    ?.also { lastError = null }
             }
-            runCatching { parsePortfolioSnapshot(JSONObject(response.body?.string().orEmpty())) }
-                .onFailure { lastError = "Could not read the portfolio response." }
-                .getOrNull()
-                ?.also { lastError = null }
+        } catch (_: IOException) {
+            rememberNetworkFailure()
+            null
         }
     }
 
@@ -76,15 +91,20 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
             .header("Authorization", "Bearer $deviceToken")
             .get()
             .build()
-        return client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                rememberHttpFailure(response)
-                return@use null
+        return try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    rememberHttpFailure(response)
+                    return@use null
+                }
+                runCatching { parseAssetsResponse(JSONObject(response.body?.string().orEmpty())) }
+                    .onFailure { lastError = "Could not read the assets response." }
+                    .getOrNull()
+                    ?.also { lastError = null }
             }
-            runCatching { parseAssetsResponse(JSONObject(response.body?.string().orEmpty())) }
-                .onFailure { lastError = "Could not read the assets response." }
-                .getOrNull()
-                ?.also { lastError = null }
+        } catch (_: IOException) {
+            rememberNetworkFailure()
+            null
         }
     }
 
@@ -99,14 +119,19 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
             .header("Authorization", "Bearer $deviceToken")
             .delete()
             .build()
-        return client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                rememberHttpFailure(response)
-                false
-            } else {
-                lastError = null
-                true
+        return try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    rememberHttpFailure(response)
+                    false
+                } else {
+                    lastError = null
+                    true
+                }
             }
+        } catch (_: IOException) {
+            rememberNetworkFailure()
+            false
         }
     }
 
@@ -117,17 +142,22 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
             .header("Authorization", "Bearer $deviceToken")
             .method(method, requestBody)
             .build()
-        return client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                rememberHttpFailure(response)
-                return@use null
+        return try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    rememberHttpFailure(response)
+                    return@use null
+                }
+                runCatching {
+                    val root = JSONObject(response.body?.string().orEmpty())
+                    parseLedgerAsset(root.optJSONObject("asset") ?: root)
+                }.onFailure { lastError = "Could not read the saved asset." }
+                    .getOrNull()
+                    ?.also { lastError = null }
             }
-            runCatching {
-                val root = JSONObject(response.body?.string().orEmpty())
-                parseLedgerAsset(root.optJSONObject("asset") ?: root)
-            }.onFailure { lastError = "Could not read the saved asset." }
-                .getOrNull()
-                ?.also { lastError = null }
+        } catch (_: IOException) {
+            rememberNetworkFailure()
+            null
         }
     }
 

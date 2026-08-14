@@ -1245,7 +1245,7 @@ private fun SettingsScreen(
                 subtitle = "Choose a polished palette. Changes apply immediately and stay selected on this device.",
             )
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().selectableGroup(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 LedgerThemePalette.entries.forEach { palette ->

@@ -14,14 +14,16 @@ class PortfolioModelsTest {
               "as_of":"2026-08-14T08:00:00Z", "source":"sqlite", "freshness":"partial",
               "accounts":[{"name":"Mandiri","type":"bank","balance_idr":1250000,"initial_amount_idr":null,"total_income_idr":"1500000","total_expenses_idr":250000,"source":"ledger","as_of":"2026-08-14T08:00:00Z"}],
               "assets":[{"id":"gold-1","name":"Gold","type":"Gold","value_idr":null,"quantity":2,"unit":"gram","last_updated":null,"notes":"","source":"manual","is_liability":false}],
-              "total_liquid_idr":1250000,"total_assets_idr":0,"total_liabilities_idr":0,"net_worth_idr":1250000,"warnings":["Gold needs valuation"]
+              "total_liquid_idr":null,"total_assets_idr":null,"total_liabilities_idr":0,"net_worth_idr":null,"warnings":["Gold needs valuation"]
             }
         """))
 
         assertEquals(PortfolioFreshness.PARTIAL, snapshot.freshness)
         assertEquals(1_250_000L, snapshot.accounts.single().balanceIdr)
         assertEquals(1_500_000L, snapshot.accounts.single().totalIncomeIdr)
-        assertEquals(0L, snapshot.accounts.single().initialAmountIdr)
+        assertNull(snapshot.accounts.single().initialAmountIdr)
+        assertNull(snapshot.totalLiquidIdr)
+        assertNull(snapshot.netWorthIdr)
         assertNull(snapshot.assets.single().valueIdr)
         assertEquals("Gold needs valuation", snapshot.warnings.single())
     }

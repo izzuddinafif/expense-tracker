@@ -30,13 +30,14 @@ higher `versionCode` than the installed release. Do not generate a replacement
 keystore for an update path; Android will reject it as a different app.
 
 Use the release helper only from a trusted operator machine. It requires all
-four inputs explicitly, never prompts, and never prints either password:
+five inputs explicitly, never prompts, and never prints either password:
 
 ```bash
 export LEDGERLY_SIGNING_STORE_FILE=/absolute/path/to/existing-ledgerly-release.keystore
 read -r -s -p 'Keystore password: ' STORE_PASSWORD; printf '\n'; export STORE_PASSWORD
 read -r -p 'Key alias: ' KEY_ALIAS; export KEY_ALIAS
 read -r -s -p 'Key password: ' KEY_PASSWORD; printf '\n'; export KEY_PASSWORD
+export LEDGERLY_EXPECTED_CERT_SHA256='43c6773e0e30b1fad459301f934509a3fe1975888d884097ba8ba9271f1e631d'
 scripts/build_ledgerly_release.sh
 ```
 

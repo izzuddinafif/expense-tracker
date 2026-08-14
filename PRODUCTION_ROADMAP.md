@@ -303,14 +303,15 @@ the production API. Remaining roadmap work is non-blocking product evolution:
 
 1. continue extracting handlers/services from `main.py` and validate budget
    totals/categories against real usage data;
-2. keep Assets/net-worth synchronization Notion-backed until the in-progress
-   local portfolio/assets model and tests land;
-3. treat in-progress deduplication changes as incomplete until their code and
-   regression coverage land; retain the existing conservative review path in
-   the meantime.
+2. keep Notion-backed assets as the external source while local assets provide
+   explicit valuations and liabilities; duplicate names are qualified as
+   incomplete until the user links or removes one;
+3. keep extracting handlers/services from `main.py` and extend real-device
+   acceptance for additional bank/email combinations.
 
 The API 35 emulator suite is currently green at 23/23, the Android JVM suite
-at 62/62, and focused backend regressions at 217/217. The HTTPS-enforcing
+at 71/71, and focused portfolio/dedup/backend regressions at 39/39. The
+HTTPS-enforcing
 release variant has been assembled locally, but the artifact in this workspace
 is signed with the Android debug key. The external Ledgerly release-keystore
 password is not available here, so signing and stable-update distribution are
@@ -328,8 +329,9 @@ after deployment with `scripts/verify_ledgerly_production.sh`; historical
   and builds an APK that verifies with a non-debug certificate.
 - [ ] The signed APK's SHA-256 and versionCode are recorded before sideload
   distribution; no debug-signed APK is treated as a stable update.
-- [ ] In-progress portfolio/assets and deduplication implementation, including
-  regression coverage, lands in this branch before it is marked complete.
+- [x] Portfolio/assets and notification/email deduplication implementation,
+  including null/partial data, account aliases, self-transfer reclassification,
+  conflict quarantine, and regression coverage, is landed in this branch.
 - [ ] An SG post-deploy run of the production verification helper passes and
   is retained as operational evidence.
 

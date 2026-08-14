@@ -17,7 +17,7 @@ data class ValidatedAssetDraft(
     val name: String,
     val type: String,
     val valueIdr: Long?,
-    val quantity: Double,
+    val quantity: Double?,
     val unit: String,
     val lastUpdated: String,
     val notes: String,
@@ -40,7 +40,7 @@ fun validateAssetDraft(draft: AssetDraft): AssetValidationResult {
         name.isBlank() -> AssetValidationResult.Invalid("Nama aset wajib diisi")
         type.isBlank() -> AssetValidationResult.Invalid("Jenis aset wajib diisi")
         draft.valueIdr.isNotBlank() && (value == null || value < 0) -> AssetValidationResult.Invalid("Nilai harus berupa IDR nol atau lebih")
-        quantity == null || quantity <= 0 -> AssetValidationResult.Invalid("Jumlah harus lebih dari nol")
+        draft.quantity.isNotBlank() && (quantity == null || quantity <= 0) -> AssetValidationResult.Invalid("Jumlah harus lebih dari nol")
         unit.isBlank() -> AssetValidationResult.Invalid("Satuan wajib diisi")
         updated.isBlank() || runCatching { LocalDate.parse(updated) }.isFailure -> AssetValidationResult.Invalid("Tanggal pembaruan harus YYYY-MM-DD")
         else -> AssetValidationResult.Valid(ValidatedAssetDraft(

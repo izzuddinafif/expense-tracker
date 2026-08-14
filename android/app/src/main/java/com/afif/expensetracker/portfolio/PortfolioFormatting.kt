@@ -19,3 +19,13 @@ fun portfolioFreshnessPresentation(
     freshness == PortfolioFreshness.CACHED -> PortfolioFreshnessPresentation("Data cache server", true)
     else -> PortfolioFreshnessPresentation("Live", false)
 }
+
+fun portfolioCacheAgeLabel(cachedAt: Long?, now: Long = System.currentTimeMillis()): String? {
+    if (cachedAt == null || cachedAt <= 0L) return null
+    val ageMinutes = ((now - cachedAt).coerceAtLeast(0L)) / 60_000L
+    return when {
+        ageMinutes < 1L -> "Disimpan kurang dari semenit lalu"
+        ageMinutes < 60L -> "Disimpan ${ageMinutes} menit lalu"
+        else -> "Disimpan ${ageMinutes / 60L} jam lalu"
+    }
+}

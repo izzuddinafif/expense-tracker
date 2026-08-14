@@ -76,7 +76,12 @@ import org.json.JSONObject
 
 private sealed interface PortfolioLoadState {
     data object Loading : PortfolioLoadState
-    data class Loaded(val snapshot: PortfolioSnapshot, val fromCache: Boolean) : PortfolioLoadState
+    data class Loaded(
+        val snapshot: PortfolioSnapshot,
+        val fromCache: Boolean,
+        val cachedAt: Long? = null,
+        val refreshError: String? = null,
+    ) : PortfolioLoadState
     data class Unavailable(val message: String) : PortfolioLoadState
 }
 
@@ -96,19 +101,27 @@ fun PortfolioOverview(onOpenAssets: () -> Unit) {
             return
         }
         refreshing = true
-        val fresh = withContext(Dispatchers.IO) { LedgerApi(settings.baseUrl, settings.token).portfolio() }
-        if (fresh != null) {
-            withContext(Dispatchers.IO) { cache.save(settings.baseUrl, fresh) }
-            state = PortfolioLoadState.Loaded(fresh, fromCache = false)
-        } else if (state !is PortfolioLoadState.Loaded) {
-            state = PortfolioLoadState.Unavailable("Tidak dapat memperbarui posisi keuangan saat ini.")
+        val api = LedgerApi(settings.baseUrl, settings.token)
+        try {
+            val fresh = runCatching { withContext(Dispatchers.IO) { api.portfolio() } }.getOrNull()
+            if (fresh != null) {
+                withContext(Dispatchers.IO) { cache.save(settings.baseUrl, fresh) }
+                state = PortfolioLoadState.Loaded(fresh, fromCache = false)
+            } else if (state is PortfolioLoadState.Loaded) {
+                state = (state as PortfolioLoadState.Loaded).copy(
+                    refreshError = api.lastError ?: "Tidak dapat memperbarui posisi keuangan saat ini.",
+                )
+            } else {
+                state = PortfolioLoadState.Unavailable(api.lastError ?: "Tidak dapat memperbarui posisi keuangan saat ini.")
+            }
+        } finally {
+            refreshing = false
         }
-        refreshing = false
     }
 
     LaunchedEffect(settings.baseUrl, settings.token) {
         val cached = withContext(Dispatchers.IO) { cache.read(settings.baseUrl) }
-        if (cached != null) state = PortfolioLoadState.Loaded(cached.snapshot, fromCache = true)
+        if (cached != null) state = PortfolioLoadState.Loaded(cached.snapshot, fromCache = true, cachedAt = cached.cachedAt)
         refresh()
     }
 
@@ -128,6 +141,8 @@ fun PortfolioOverview(onOpenAssets: () -> Unit) {
         is PortfolioLoadState.Loaded -> PortfolioSnapshotContent(
             snapshot = current.snapshot,
             fromCache = current.fromCache,
+            cachedAt = current.cachedAt,
+            refreshError = current.refreshError,
             refreshing = refreshing,
             onRefresh = { scope.launch { refresh() } },
             onOpenAssets = onOpenAssets,
@@ -139,16 +154,19 @@ fun PortfolioOverview(onOpenAssets: () -> Unit) {
 private fun PortfolioSnapshotContent(
     snapshot: PortfolioSnapshot,
     fromCache: Boolean,
+    cachedAt: Long?,
+    refreshError: String?,
     refreshing: Boolean,
     onRefresh: () -> Unit,
     onOpenAssets: () -> Unit,
 ) {
     val freshness = portfolioFreshnessPresentation(snapshot.freshness, fromCache)
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
     LedgerHeroCard(modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("NET WORTH", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = .78f))
-                Text(formatIdr(snapshot.netWorthIdr), style = MaterialTheme.typography.displaySmall, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                Text(snapshot.netWorthIdr?.let(::formatIdr) ?: "Belum lengkap", style = MaterialTheme.typography.displaySmall, color = MaterialTheme.colorScheme.onPrimaryContainer)
                 Text("Kas dan aset setelah kewajiban", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = .76f))
             }
             ElevatedAssistChip(
@@ -162,22 +180,44 @@ private fun PortfolioSnapshotContent(
             )
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            LedgerMetricTile("Likuid", formatIdr(snapshot.totalLiquidIdr), Income, Modifier.weight(1f).widthIn(min = 132.dp))
+            LedgerMetricTile("Likuid", snapshot.totalLiquidIdr?.let(::formatIdr) ?: "Belum lengkap", Income, Modifier.weight(1f).widthIn(min = 132.dp))
             LedgerMetricTile("Kewajiban", formatIdr(snapshot.totalLiabilitiesIdr), Expense, Modifier.weight(1f).widthIn(min = 132.dp))
         }
         snapshot.asOf?.let { Text("Per $it", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = .7f)) }
+        portfolioCacheAgeLabel(cachedAt)?.let {
+            Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = .72f))
+        }
+    }
+    refreshError?.let {
+        Text("Pembaruan gagal: $it", color = Warning, style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
     }
     LedgerSectionHeader("Saldo akun", "Saldo berasal dari ledger lengkap, bukan transaksi bulan ini.")
     val preferred = listOf("Cash", "Mandiri", "Jago", "BSI")
+    val featured = preferred.map { it to dashboardAccountFor(snapshot.accounts, it) }
     FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        preferred.forEach { name ->
-            val account = dashboardAccountFor(snapshot.accounts, name)
+        featured.forEach { (name, account) ->
             LedgerMetricTile(
-                label = name,
-                value = account?.let { formatIdr(it.balanceIdr) } ?: "Belum ada data",
-                valueColor = account?.let { if (it.balanceIdr < 0) Expense else Income } ?: MaterialTheme.colorScheme.onSurfaceVariant,
+                label = account?.name ?: name,
+                value = account?.balanceIdr?.let(::formatIdr) ?: "Belum ada data",
+                valueColor = account?.balanceIdr?.let { if (it < 0) Expense else Income } ?: MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f).widthIn(min = 132.dp),
             )
+        }
+    }
+    val featuredNames = featured.mapNotNull { it.second?.name?.lowercase() }.toSet()
+    val otherAccounts = snapshot.accounts.filter { it.name.lowercase() !in featuredNames }
+    if (otherAccounts.isNotEmpty()) {
+        LedgerSectionHeader("Akun lainnya", "Akun tambahan dari sumber ledger.")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            otherAccounts.forEach { account ->
+                LedgerMetricTile(
+                    label = account.name,
+                    value = account.balanceIdr?.let(::formatIdr) ?: "Belum ada data",
+                    valueColor = account.balanceIdr?.let { if (it < 0) Expense else Income } ?: MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f).widthIn(min = 132.dp),
+                )
+            }
         }
     }
     LedgerCard {
@@ -206,6 +246,7 @@ private fun PortfolioSnapshotContent(
             Text(warning, color = Warning, style = MaterialTheme.typography.bodySmall)
         }
     }
+    }
 }
 
 @Composable
@@ -217,6 +258,7 @@ fun AssetsScreen(onBack: () -> Unit) {
     var assets by remember { mutableStateOf<List<LedgerAsset>?>(null) }
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
+    var editorError by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf<LedgerAsset?>(null) }
     var adding by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<LedgerAsset?>(null) }
@@ -224,10 +266,19 @@ fun AssetsScreen(onBack: () -> Unit) {
     fun refresh() = scope.launch {
         if (settings.baseUrl.isBlank() || settings.token.isBlank()) { message = "Sambungkan ledger terlebih dahulu."; assets = emptyList(); return@launch }
         busy = true
-        val result = withContext(Dispatchers.IO) { LedgerApi(settings.baseUrl, settings.token).assets() }
-        assets = result
-        if (result == null) message = "Tidak dapat memuat aset saat ini."
-        busy = false
+        val api = LedgerApi(settings.baseUrl, settings.token)
+        try {
+            val result = runCatching { withContext(Dispatchers.IO) { api.assets() } }.getOrNull()
+            if (result != null) {
+                assets = result
+                message = null
+            } else {
+                message = "Tidak dapat memuat aset saat ini. Data sebelumnya tetap ditampilkan."
+                if (assets == null) assets = emptyList()
+            }
+        } finally {
+            busy = false
+        }
     }
     LaunchedEffect(Unit) { refresh() }
 
@@ -240,7 +291,7 @@ fun AssetsScreen(onBack: () -> Unit) {
             }
             IconButton(onClick = ::refresh, enabled = !busy) { Icon(Icons.Rounded.Refresh, "Perbarui") }
         }
-        Button(onClick = { adding = true }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Rounded.Add, null); Spacer(Modifier.size(8.dp)); Text("Tambah aset atau kewajiban") }
+        Button(onClick = { editorError = null; adding = true }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Rounded.Add, null); Spacer(Modifier.size(8.dp)); Text("Tambah aset atau kewajiban") }
         message?.let { Text(it, color = Warning, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
         if (assets == null) Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) { CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp); Text("Memuat aset…") }
         else if (assets!!.isEmpty()) LedgerCard { Text("Belum ada aset atau kewajiban.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
@@ -249,13 +300,19 @@ fun AssetsScreen(onBack: () -> Unit) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                     Column(Modifier.weight(1f)) {
                         Text(asset.name, style = MaterialTheme.typography.titleMedium)
-                        Text("${if (asset.isLiability) "Kewajiban" else "Aset"} · ${asset.type} · ${asset.quantity} ${asset.unit}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            "${if (asset.isLiability) "Kewajiban" else "Aset"} · ${asset.type} · " +
+                                "${asset.quantity?.toString() ?: "jumlah tidak dicatat"}" +
+                                asset.unit.takeIf(String::isNotBlank)?.let { " $it" }.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                     Text(asset.valueIdr?.let(::formatIdr) ?: "Belum dinilai", color = if (asset.valueIdr == null) Warning else if (asset.isLiability) Expense else Income)
                 }
                 asset.notes.takeIf(String::isNotBlank)?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    TextButton(onClick = { editing = asset }) { Icon(Icons.Rounded.Edit, null, Modifier.size(18.dp)); Text("Edit") }
+                    TextButton(onClick = { editorError = null; editing = asset }) { Icon(Icons.Rounded.Edit, null, Modifier.size(18.dp)); Text("Edit") }
                     TextButton(onClick = { deleting = asset }) { Icon(Icons.Rounded.DeleteOutline, null, Modifier.size(18.dp)); Text("Hapus") }
                 }
             }
@@ -264,17 +321,19 @@ fun AssetsScreen(onBack: () -> Unit) {
     if (adding || editing != null) AssetEditorDialog(
         asset = editing,
         busy = busy,
-        onDismiss = { adding = false; editing = null },
+        error = editorError,
+        onDismiss = { adding = false; editing = null; editorError = null },
         onSave = { draft -> scope.launch {
             when (val validation = validateAssetDraft(draft)) {
-                is AssetValidationResult.Invalid -> message = validation.message
+                is AssetValidationResult.Invalid -> editorError = validation.message
                 is AssetValidationResult.Valid -> {
+                    editorError = null
                     busy = true
                     val payload = validation.asset.toAssetPayload()
                     val api = LedgerApi(settings.baseUrl, settings.token)
                     val saved = withContext(Dispatchers.IO) { if (editing == null) api.createAsset(payload) else api.updateAsset(editing!!.id, payload) }
-                    if (saved == null) message = api.lastError ?: "Aset tidak dapat disimpan."
-                    else { adding = false; editing = null; refresh(); withContext(Dispatchers.IO) { api.portfolio()?.let { cache.save(settings.baseUrl, it) } } }
+                    if (saved == null) editorError = api.lastError ?: "Aset tidak dapat disimpan."
+                    else { adding = false; editing = null; editorError = null; refresh(); withContext(Dispatchers.IO) { api.portfolio()?.let { cache.save(settings.baseUrl, it) } } }
                     busy = false
                 }
             }
@@ -291,22 +350,23 @@ fun AssetsScreen(onBack: () -> Unit) {
 internal fun dashboardAccountFor(
     accounts: List<com.afif.expensetracker.sync.PortfolioAccount>,
     displayLabel: String,
-) = accounts.firstOrNull { it.name.equals(displayLabel, ignoreCase = true) }
-    ?: accounts.firstOrNull {
-        it.name.trim().startsWith("$displayLabel ", ignoreCase = true) ||
-            it.name.contains(displayLabel, ignoreCase = true)
-    }
+): com.afif.expensetracker.sync.PortfolioAccount? {
+    val exact = accounts.filter { it.name.equals(displayLabel, ignoreCase = true) }
+    if (exact.size == 1) return exact.single()
+    val suffixed = accounts.filter { it.name.trim().startsWith("$displayLabel ", ignoreCase = true) }
+    return suffixed.singleOrNull()
+}
 
 internal fun ValidatedAssetDraft.toAssetPayload(): JSONObject = JSONObject()
-    .put("name", name).put("type", type).put("value_idr", valueIdr ?: JSONObject.NULL).put("quantity", quantity)
+    .put("name", name).put("type", type).put("value_idr", valueIdr ?: JSONObject.NULL).put("quantity", quantity ?: JSONObject.NULL)
     .put("unit", unit).put("last_updated", lastUpdated).put("notes", notes).put("is_liability", isLiability)
 
 @Composable
-private fun AssetEditorDialog(asset: LedgerAsset?, busy: Boolean, onDismiss: () -> Unit, onSave: (AssetDraft) -> Unit) {
+private fun AssetEditorDialog(asset: LedgerAsset?, busy: Boolean, error: String?, onDismiss: () -> Unit, onSave: (AssetDraft) -> Unit) {
     var name by remember(asset?.id) { mutableStateOf(asset?.name.orEmpty()) }
     var type by remember(asset?.id) { mutableStateOf(asset?.type ?: "Gold") }
     var value by remember(asset?.id) { mutableStateOf(asset?.valueIdr?.toString().orEmpty()) }
-    var quantity by remember(asset?.id) { mutableStateOf(asset?.quantity?.toString() ?: "1") }
+    var quantity by remember(asset?.id) { mutableStateOf(asset?.quantity?.toString().orEmpty()) }
     var unit by remember(asset?.id) { mutableStateOf(asset?.unit ?: "unit") }
     var updated by remember(asset?.id) { mutableStateOf(asset?.lastUpdated ?: java.time.LocalDate.now().toString()) }
     var notes by remember(asset?.id) { mutableStateOf(asset?.notes.orEmpty()) }
@@ -315,6 +375,7 @@ private fun AssetEditorDialog(asset: LedgerAsset?, busy: Boolean, onDismiss: () 
         onDismissRequest = { if (!busy) onDismiss() },
         title = { Text(if (asset == null) "Tambah posisi" else "Edit posisi") },
         text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            error?.let { Text(it, color = Warning, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Assertive }) }
             OutlinedTextField(name, { name = it }, label = { Text("Nama") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(type, { type = it }, label = { Text("Jenis, mis. Gold atau Kredit") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(value, { value = it.filter(Char::isDigit) }, label = { Text("Nilai IDR (boleh kosong bila belum dinilai)") }, singleLine = true, modifier = Modifier.fillMaxWidth())

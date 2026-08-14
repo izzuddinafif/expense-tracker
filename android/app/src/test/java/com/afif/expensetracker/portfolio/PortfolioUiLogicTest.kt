@@ -30,11 +30,18 @@ class PortfolioUiLogicTest {
     @Test
     fun preferredAccountLabelsMatchNotionAccountSuffixes() {
         val accounts = listOf(
-            PortfolioAccount("Mandiri 1854", "bank", 10L, 0L, 0L, 0L, "notion", null),
-            PortfolioAccount("BSI 9400", "bank", 20L, 0L, 0L, 0L, "notion", null),
+            PortfolioAccount("Mandiri 1854", "bank", 10L, null, null, null, "notion", null),
+            PortfolioAccount("BSI 9400", "bank", 20L, null, null, null, "notion", null),
         )
 
         assertEquals("Mandiri 1854", dashboardAccountFor(accounts, "Mandiri")?.name)
         assertEquals("BSI 9400", dashboardAccountFor(accounts, "BSI")?.name)
+    }
+
+    @Test
+    fun cacheAgeIsHumanReadableAndNeverNegative() {
+        assertEquals("Disimpan kurang dari semenit lalu", portfolioCacheAgeLabel(10_000L, 10_000L + 30_000L))
+        assertEquals("Disimpan 12 menit lalu", portfolioCacheAgeLabel(1L, 12 * 60_000L + 1L))
+        assertEquals("Disimpan 2 jam lalu", portfolioCacheAgeLabel(1L, 125 * 60_000L + 1L))
     }
 }

@@ -6,7 +6,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from api import register_api_routes
-from db import Database
+from db import Database, TransactionConflictError
 from email_watcher import _extract_self_transfer_evidence
 from local_budgets import BudgetStore
 from reporting import LedgerReporting
@@ -273,7 +273,8 @@ async def test_conflicting_evidence_keeps_capture_in_review_and_email_is_canonic
         assert bundle["incoming"]["id"] != capture.transaction["id"]
         assert retry.code == "evidence_conflict"
         assert retry.action == "keep_review"
-        assert retry.transaction["status"] == "confirmed"
+        assert bundle["incoming"]["status"] == "pending"
+        assert retry.transaction["status"] == "pending"
         incomes = await (
             await db._conn.execute(
                 "SELECT status,amount_idr FROM transactions WHERE kind='income' ORDER BY amount_idr"
@@ -281,8 +282,115 @@ async def test_conflicting_evidence_keeps_capture_in_review_and_email_is_canonic
         ).fetchall()
         assert [(row["status"], row["amount_idr"]) for row in incomes] == [
             ("pending", 499_000),
-            ("confirmed", 500_000),
+            ("pending", 500_000),
         ]
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_bank_reference_dedup_normalizes_configured_account_aliases(tmp_path):
+    db = await Database.connect(str(tmp_path / "account-alias.db"))
+    try:
+        canonical, _ = await db.create_confirmed_external_transaction(
+            7,
+            kind="expense",
+            amount_idr=48_500,
+            occurred_on="2026-08-14",
+            description="QRIS",
+            account="Mandiri 1854",
+            source="bank_email",
+            source_ref="gmail:alias:expense",
+            bank_reference="MANDIRI-ALIAS-123456",
+        )
+        captured, created = await db.create_ingested_transaction(
+            7,
+            kind="expense",
+            amount_idr=48_500,
+            occurred_on="2026-08-14",
+            description="Notification",
+            account="Mandiri",
+            source_ref="android:alias:expense",
+            bank_reference="mandiri alias 123456",
+        )
+        assert created is False
+        assert captured["id"] == canonical["id"]
+        count = await (await db._conn.execute(
+            "SELECT COUNT(*) FROM transactions"
+        )).fetchone()
+        assert count[0] == 1
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_conflicting_ordinary_reference_is_rejected_before_confirmation(tmp_path):
+    db = await Database.connect(str(tmp_path / "ordinary-conflict.db"))
+    try:
+        await db.create_confirmed_external_transaction(
+            7,
+            kind="expense",
+            amount_idr=10_000,
+            occurred_on="2026-08-14",
+            description="Lunch",
+            account="Cash",
+            source="bank_email",
+            source_ref="gmail:ordinary:expense",
+            bank_reference="ORDINARY-CONFLICT-123456",
+        )
+        with pytest.raises(TransactionConflictError, match="different financial fields"):
+            await db.create_ingested_transaction(
+                7,
+                kind="expense",
+                amount_idr=11_000,
+                occurred_on="2026-08-14",
+                description="Different lunch",
+                account="Cash",
+                source_ref="android:ordinary:expense",
+                bank_reference="ordinary conflict 123456",
+            )
+        count = await (await db._conn.execute(
+            "SELECT COUNT(*) FROM transactions"
+        )).fetchone()
+        assert count[0] == 1
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_self_transfer_capture_can_be_reclassified_as_normal_expense(tmp_path):
+    db = await Database.connect(str(tmp_path / "reclassification.db"))
+    try:
+        capture = await db.ingest_android_self_transfer(
+            7,
+            kind="expense",
+            amount_idr=20_000,
+            occurred_on="2026-08-14",
+            description="Transfer?",
+            account="Mandiri",
+            source_ref="android:reclassify",
+        )
+        corrected, created = await db.create_ingested_transaction(
+            7,
+            kind="expense",
+            amount_idr=20_000,
+            occurred_on="2026-08-14",
+            description="Nasgor",
+            account="Mandiri 1854",
+            source_ref="android:reclassify",
+        )
+        assert created is False
+        assert corrected["id"] == capture.transaction["id"]
+        assert corrected["ledger_role"] == "ordinary"
+        assert corrected["description"] == "Nasgor"
+        confirmed, changed = await db.confirm_transaction(7, corrected["id"])
+        assert changed is True
+        assert confirmed["status"] == "confirmed"
+        outbox = await (await db._conn.execute(
+            "SELECT COUNT(*) FROM sync_outbox WHERE transaction_id=?",
+            (corrected["id"],),
+        )).fetchone()
+        assert outbox[0] == 1
     finally:
         await db.close()
 
@@ -352,10 +460,10 @@ async def test_api_typed_outcomes_and_external_income_safety(api_client):
         headers={"Authorization": "Bearer token", "Idempotency-Key": "jago:2"},
         json=api_payload(transfer_evidence=None),
     )
-    assert no_evidence.status == 200
+    assert no_evidence.status == 202
     assert (await no_evidence.json())["ingestion_outcome"] == {
-        "code": "reused_canonical_transfer",
-        "action": "finalize",
+        "code": "awaiting_canonical_email",
+        "action": "keep_review",
     }
 
     external = await client.post(

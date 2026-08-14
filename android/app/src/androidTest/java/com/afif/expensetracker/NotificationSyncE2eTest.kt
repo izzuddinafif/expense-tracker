@@ -102,6 +102,23 @@ class NotificationSyncE2eTest {
             }
         }
 
+        val portfolioJson = """
+            {
+              "as_of":"2026-07-12T00:00:00Z",
+              "source":"test",
+              "freshness":"live",
+              "accounts":[],
+              "assets":[],
+              "total_liquid_idr":0,
+              "total_assets_idr":0,
+              "total_liabilities_idr":0,
+              "net_worth_idr":0,
+              "warnings":[]
+            }
+        """.trimIndent()
+        // Saving the server settings causes the dashboard portfolio projection
+        // to refresh before the inbox confirmation worker starts.
+        server.enqueue(MockResponse().setResponseCode(200).setBody(portfolioJson))
         val canonicalJson = """
             {
               "id":"server-bsi-1",
@@ -145,8 +162,10 @@ class NotificationSyncE2eTest {
                 assertEquals(0, database.syncDao().pendingCount())
             }
         }
+        val portfolioRequest = server.takeRequest()
         val pushRequest = server.takeRequest()
         val pullRequest = server.takeRequest()
+        assertEquals("/api/v1/portfolio", portfolioRequest.path)
         assertEquals("Bearer instrumentation-token", pushRequest.getHeader("Authorization"))
         assertEquals("/api/v1/transactions", pushRequest.path)
         assertEquals("/api/v1/transactions/changes?limit=200", pullRequest.path)

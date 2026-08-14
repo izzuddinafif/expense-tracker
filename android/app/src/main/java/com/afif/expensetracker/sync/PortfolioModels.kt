@@ -10,10 +10,10 @@ data class PortfolioSnapshot(
     val freshness: PortfolioFreshness,
     val accounts: List<PortfolioAccount>,
     val assets: List<LedgerAsset>,
-    val totalLiquidIdr: Long,
-    val totalAssetsIdr: Long,
+    val totalLiquidIdr: Long?,
+    val totalAssetsIdr: Long?,
     val totalLiabilitiesIdr: Long,
-    val netWorthIdr: Long,
+    val netWorthIdr: Long?,
     val warnings: List<String>,
 )
 
@@ -30,10 +30,10 @@ enum class PortfolioFreshness { LIVE, CACHED, PARTIAL;
 data class PortfolioAccount(
     val name: String,
     val type: String,
-    val balanceIdr: Long,
-    val initialAmountIdr: Long,
-    val totalIncomeIdr: Long,
-    val totalExpensesIdr: Long,
+    val balanceIdr: Long?,
+    val initialAmountIdr: Long?,
+    val totalIncomeIdr: Long?,
+    val totalExpensesIdr: Long?,
     val source: String,
     val asOf: String?,
 )
@@ -43,7 +43,7 @@ data class LedgerAsset(
     val name: String,
     val type: String,
     val valueIdr: Long?,
-    val quantity: Double,
+    val quantity: Double?,
     val unit: String,
     val lastUpdated: String?,
     val notes: String,
@@ -57,10 +57,10 @@ internal fun parsePortfolioSnapshot(root: JSONObject): PortfolioSnapshot = Portf
     freshness = PortfolioFreshness.fromApi(root.optionalString("freshness")),
     accounts = root.optJSONArray("accounts").toPortfolioAccounts(),
     assets = root.optJSONArray("assets").toAssets(),
-    totalLiquidIdr = root.idrLong("total_liquid_idr"),
-    totalAssetsIdr = root.idrLong("total_assets_idr"),
+    totalLiquidIdr = root.idrLongOrNull("total_liquid_idr"),
+    totalAssetsIdr = root.idrLongOrNull("total_assets_idr"),
     totalLiabilitiesIdr = root.idrLong("total_liabilities_idr"),
-    netWorthIdr = root.idrLong("net_worth_idr"),
+    netWorthIdr = root.idrLongOrNull("net_worth_idr"),
     warnings = root.optJSONArray("warnings").toStrings(),
 )
 
@@ -71,7 +71,7 @@ internal fun parseLedgerAsset(value: JSONObject): LedgerAsset = LedgerAsset(
     name = value.optString("name", "Untitled asset"),
     type = value.optString("type", "Other"),
     valueIdr = value.idrLongOrNull("value_idr"),
-    quantity = value.optDouble("quantity", 0.0),
+    quantity = value.idrDoubleOrNull("quantity"),
     unit = value.optString("unit"),
     lastUpdated = value.optionalString("last_updated"),
     notes = value.optString("notes"),
@@ -86,10 +86,10 @@ private fun JSONArray?.toPortfolioAccounts(): List<PortfolioAccount> = buildList
         add(PortfolioAccount(
             name = value.optString("name", "Account"),
             type = value.optString("type", "cash"),
-            balanceIdr = value.idrLong("balance_idr"),
-            initialAmountIdr = value.idrLong("initial_amount_idr"),
-            totalIncomeIdr = value.idrLong("total_income_idr"),
-            totalExpensesIdr = value.idrLong("total_expenses_idr"),
+            balanceIdr = value.idrLongOrNull("balance_idr"),
+            initialAmountIdr = value.idrLongOrNull("initial_amount_idr"),
+            totalIncomeIdr = value.idrLongOrNull("total_income_idr"),
+            totalExpensesIdr = value.idrLongOrNull("total_expenses_idr"),
             source = value.optString("source", "ledger"),
             asOf = value.optionalString("as_of"),
         ))
@@ -113,6 +113,15 @@ internal fun JSONObject.idrLongOrNull(key: String): Long? {
     return when (val raw = opt(key)) {
         is Number -> raw.toLong()
         is String -> raw.trim().toLongOrNull()
+        else -> null
+    }
+}
+
+internal fun JSONObject.idrDoubleOrNull(key: String): Double? {
+    if (!has(key) || isNull(key)) return null
+    return when (val raw = opt(key)) {
+        is Number -> raw.toDouble().takeIf { it.isFinite() }
+        is String -> raw.trim().toDoubleOrNull()?.takeIf { it.isFinite() }
         else -> null
     }
 }

@@ -64,10 +64,11 @@ async def test_portfolio_uses_live_notion_rows_and_valued_local_entries(monkeypa
     finally:
         await db.close()
 
-    assert portfolio["total_liquid_idr"] == 200_000
+    assert portfolio["total_liquid_idr"] is None
     assert portfolio["total_assets_idr"] == 19_500_000
+    assert portfolio["net_worth_idr"] is None
+    assert portfolio["freshness"] == "partial"
     assert portfolio["total_liabilities_idr"] == 300_000
-    assert portfolio["net_worth_idr"] == 19_400_000
     assert {row["name"] for row in portfolio["accounts"]} >= {"Mandiri 1854", "BSI 9400", "Jago", "Cash"}
     assert any("Unpriced shares" in warning for warning in portfolio["warnings"])
 
