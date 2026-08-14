@@ -97,7 +97,7 @@ else
     fail "Coolify container state=${state}, health=${health}"
 fi
 
-mapfile -t data_mounts < <(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Source}}|{{.RW}}{{"\n"}}{{end}}{{end}}' "${container}")
+mapfile -t data_mounts < <(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Source}}|{{.RW}}{{end}}{{end}}' "${container}")
 if ((${#data_mounts[@]} == 1)) && [[ "${data_mounts[0]}" == *'|true' ]]; then
     pass 'container has one writable /app/data mount'
 else
