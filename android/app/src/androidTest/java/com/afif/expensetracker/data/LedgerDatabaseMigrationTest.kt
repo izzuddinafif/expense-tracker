@@ -235,6 +235,55 @@ class LedgerDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migration12To13AddsOptionalTransferEvidenceToCaptures() {
+        openDatabase(version = 12) { database ->
+            database.execSQL(
+                """
+                CREATE TABLE ingestion_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    sourceRef TEXT NOT NULL,
+                    platformIdentityRef TEXT,
+                    packageName TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    amountIdr INTEGER,
+                    merchant TEXT,
+                    bank TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    occurredOn TEXT,
+                    reviewRequired INTEGER NOT NULL,
+                    receivedAt INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    suspectedDuplicateOf INTEGER
+                )
+                """.trimIndent(),
+            )
+            database.execSQL(
+                "INSERT INTO ingestion_queue (sourceRef, platformIdentityRef, packageName, title, body, amountIdr, merchant, bank, direction, occurredOn, reviewRequired, receivedAt, status, suspectedDuplicateOf) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                arrayOf("legacy-capture", null, "id.bmri.livin", "Transfer", "Transfer", null, null, "LIVIN_MANDIRI", "UNKNOWN", null, 1, 1, "pending", null),
+            )
+        }
+
+        openDatabase(
+            version = 13,
+            onUpgrade = { database, oldVersion, newVersion ->
+                assertEquals(12, oldVersion)
+                assertEquals(13, newVersion)
+                LedgerDatabase.MIGRATION_12_13.migrate(database)
+            },
+        ) { database ->
+            database.query(
+                "SELECT transferEvidenceScheme, transferEvidenceReference FROM ingestion_queue WHERE sourceRef = ?",
+                arrayOf("legacy-capture"),
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertNull(cursor.getString(0))
+                assertNull(cursor.getString(1))
+            }
+        }
+    }
+
     private fun insertLegacyCapture(database: SupportSQLiteDatabase, sourceRef: String) {
         database.execSQL(
             """

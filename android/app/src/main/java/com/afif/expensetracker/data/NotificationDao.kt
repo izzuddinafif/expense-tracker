@@ -28,9 +28,11 @@ interface NotificationDao {
             amountIdr = :amountIdr,
             merchant = :merchant,
             bank = :bank,
-            direction = :direction,
-            occurredOn = :occurredOn,
-            reviewRequired = :reviewRequired
+        direction = :direction,
+        occurredOn = :occurredOn,
+        reviewRequired = :reviewRequired,
+        transferEvidenceScheme = :transferEvidenceScheme,
+        transferEvidenceReference = :transferEvidenceReference
         WHERE id = :id AND status = 'pending'
         """,
     )
@@ -44,6 +46,10 @@ interface NotificationDao {
         direction: String,
         occurredOn: String?,
         reviewRequired: Boolean,
+        transferEvidenceScheme: String?,
+        transferEvidenceReference: String?,
     ): Int
+    @Query("UPDATE ingestion_queue SET status = 'pending', reviewRequired = 1 WHERE sourceRef = :sourceRef")
+    suspend fun restoreForReview(sourceRef: String): Int
     @Query("UPDATE ingestion_queue SET status = :status WHERE id = :id") suspend fun updateStatus(id: Long, status: String)
 }

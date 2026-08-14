@@ -108,6 +108,13 @@ class NotionSyncWorker:
             )
 
     async def process_job(self, job: dict) -> None:
+        if job.get("ledger_role") == "self_transfer_principal":
+            await self._fail(
+                job,
+                "self-transfer principal legs are excluded from Notion sync",
+                terminal=True,
+            )
+            return
         if job["kind"] not in {"expense", "income"}:
             await self._fail(
                 job,

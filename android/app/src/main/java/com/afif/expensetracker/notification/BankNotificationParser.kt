@@ -17,10 +17,17 @@ data class ParsedBankNotification(
     val bank: Bank,
     val direction: BankTransactionDirection,
     val reviewRequired: Boolean,
+    val transferEvidence: TransferEvidence? = null,
 ) {
     /** Alias useful to ingestion clients that call the value a transaction date. */
     val date: LocalDate? get() = transactionDate
 }
+
+/** An explicitly labelled, durable bank reference used to correlate transfers. */
+data class TransferEvidence(
+    val scheme: String,
+    val reference: String,
+)
 
 enum class Bank { BSI, LIVIN_MANDIRI, JAGO, UNKNOWN }
 
@@ -56,6 +63,11 @@ object BankNotificationParser {
     private val datePattern = Regex("\\b(\\d{1,2})[/-](\\d{1,2})[/-](\\d{2,4})\\b")
     private val longDatePattern = Regex("(?i)\\b(\\d{1,2})\\s+(jan(?:uari)?|feb(?:ruari)?|mar(?:et)?|apr(?:il)?|mei|jun(?:i)?|jul(?:i)?|agu(?:stus)?|sep(?:t(?:ember)?)?|okt(?:ober)?|nov(?:ember)?|des(?:ember)?)\\s+(\\d{4})\\b")
     private val merchantPattern = Regex("(?i)\\b(?:di|ke|kepada|at|from)\\s+([A-Za-z0-9][A-Za-z0-9 .&'_-]{1,80}?)(?=\\s+(?:pada|tanggal|tgl|\\d{1,2}[/-]\\d{1,2})|[,.]|$)")
+    private val transferReferencePattern = Regex(
+        "(?im)\\b(?:nomor\\s+referensi|no\\.?\\s*referensi|reference(?:\\s+number)?|" +
+            "transaction\\s+id|id\\s+transaksi)\\s*[:#-]\\s*" +
+            "([A-Z0-9][A-Z0-9._/-]{5,95})\\b",
+    )
 
     fun parse(packageName: String, title: String, body: String): ParsedBankNotification {
         val normalizedPackage = packageName.trim()
@@ -66,6 +78,7 @@ object BankNotificationParser {
         val amount = extractAmount(text)
         val merchant = extractMerchant(text)
         val direction = detectDirection(text)
+        val transferEvidence = extractTransferEvidence(text)
         val genericSuccess = Regex("(?i)\\btransaksi berhasil\\b").containsMatchIn(text)
         val explicitDebit = Regex(
             "(?i)\\b(?:pembayaran|payment|purchase|pembelian|debit|keluar|dibayar|kamu melakukan)\\b",
@@ -85,6 +98,7 @@ object BankNotificationParser {
             // the review inbox instead of being silently treated as parsed.
             reviewRequired = bank == Bank.UNKNOWN || amount == null || merchant == null ||
                 direction != BankTransactionDirection.DEBIT || (genericSuccess && !explicitDebit),
+            transferEvidence = transferEvidence,
         )
     }
 
@@ -157,6 +171,13 @@ object BankNotificationParser {
     }
 
     private fun extractMerchant(text: String): String? = merchantPattern.find(text)?.groupValues?.get(1)?.trim()?.trimEnd('.', ',')?.takeIf { it.isNotBlank() }
+
+    private fun extractTransferEvidence(text: String): TransferEvidence? {
+        val references = transferReferencePattern.findAll(text)
+            .map { it.groupValues[1].trim() }
+            .toSet()
+        return references.singleOrNull()?.let { TransferEvidence("bank_reference", it) }
+    }
 
     private fun detectDirection(text: String): BankTransactionDirection {
         val normalized = text.lowercase(Locale.ROOT)

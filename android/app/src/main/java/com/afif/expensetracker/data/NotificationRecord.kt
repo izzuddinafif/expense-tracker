@@ -29,4 +29,7 @@ data class NotificationRecord(
     val status: String = "pending",
     /** Links a same-content, different-key repost without suppressing either capture. */
     val suspectedDuplicateOf: Long? = null,
+    /** Parsed immutable bank reference, retained for self-transfer correlation. */
+    val transferEvidenceScheme: String? = null,
+    val transferEvidenceReference: String? = null,
 )

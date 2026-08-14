@@ -1574,7 +1574,8 @@ private fun TransactionDetail(transactionId: String, onBack: () -> Unit) {
 
     val isPendingManual = current?.syncState == "pending" &&
         current.id.startsWith("android-manual-")
-    val canMutate = current?.syncState == "synced" || isPendingManual
+    val isSelfTransferPrincipal = current?.ledgerRole == "self_transfer_principal"
+    val canMutate = !isSelfTransferPrincipal && (current?.syncState == "synced" || isPendingManual)
     Column(
         Modifier
             .fillMaxSize()
@@ -1606,13 +1607,28 @@ private fun TransactionDetail(transactionId: String, onBack: () -> Unit) {
                 Text("Transaction not found", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
-            OutlinedTextField(description, { description = it }, label = { Text("Description") }, modifier = Modifier.fillMaxWidth().testTag("transaction_description"))
-            OutlinedTextField(merchant, { merchant = it }, label = { Text("Merchant") }, singleLine = true, modifier = Modifier.fillMaxWidth().testTag("transaction_merchant"))
-            LedgerIdrAmountField(amount, { amount = it }, modifier = Modifier.fillMaxWidth(), testTag = "transaction_amount")
-            OutlinedTextField(category, { category = it }, label = { Text("Category") }, singleLine = true, modifier = Modifier.fillMaxWidth().testTag("transaction_category"))
-            OutlinedTextField(account, { account = it }, label = { Text("Account") }, singleLine = true, modifier = Modifier.fillMaxWidth().testTag("transaction_account"))
-            LedgerDateField(occurredOn, { occurredOn = it }, { showDatePicker = true }, modifier = Modifier.fillMaxWidth(), testTag = "transaction_date")
+            OutlinedTextField(description, { description = it }, label = { Text("Description") }, enabled = canMutate, modifier = Modifier.fillMaxWidth().testTag("transaction_description"))
+            OutlinedTextField(merchant, { merchant = it }, label = { Text("Merchant") }, singleLine = true, enabled = canMutate, modifier = Modifier.fillMaxWidth().testTag("transaction_merchant"))
+            LedgerIdrAmountField(amount, { amount = it }, modifier = Modifier.fillMaxWidth(), testTag = "transaction_amount", enabled = canMutate)
+            OutlinedTextField(category, { category = it }, label = { Text("Category") }, singleLine = true, enabled = canMutate, modifier = Modifier.fillMaxWidth().testTag("transaction_category"))
+            OutlinedTextField(account, { account = it }, label = { Text("Account") }, singleLine = true, enabled = canMutate, modifier = Modifier.fillMaxWidth().testTag("transaction_account"))
+            LedgerDateField(occurredOn, { occurredOn = it }, { showDatePicker = true }, modifier = Modifier.fillMaxWidth(), testTag = "transaction_date", enabled = canMutate)
             Text("${current.syncState} · ${Instant.ofEpochMilli(current.occurredAt).atZone(ZoneId.systemDefault()).toLocalDate()}", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("transaction_metadata"))
+            if (isSelfTransferPrincipal) {
+                LedgerCard(modifier = Modifier.fillMaxWidth()) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.Top) {
+                        Icon(Icons.Rounded.SwapHoriz, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("Self-transfer leg", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                "This account movement is kept out of spending totals. Edit the transfer from the original bank event so both account legs stay balanced.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                }
+            }
             if (remoteConflict != null || remotelyDeleted) {
                 OutlinedButton(
                     onClick = {

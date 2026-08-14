@@ -57,6 +57,22 @@ class NotificationIngestorTest {
         assertEquals(25_000L, dao.records.single { it.id == first }.amountIdr)
     }
 
+    @Test
+    fun parsedTransferEvidenceIsStoredOnCapture() = runBlocking {
+        val dao = FakeNotificationDao()
+        val ingestor = NotificationIngestor(dao) { 1_721_065_200_000L }
+
+        val id = requireNotNull(ingestor.ingest(
+            "id.bmri.livin",
+            "Livin' by Mandiri",
+            "Transfer Rp500.000. Nomor Referensi: TRX-JAGO-ABC12345",
+        ))
+
+        val record = dao.records.single { it.id == id }
+        assertEquals("bank_reference", record.transferEvidenceScheme)
+        assertEquals("TRX-JAGO-ABC12345", record.transferEvidenceReference)
+    }
+
     private class FakeNotificationDao : NotificationDao {
         val records = mutableListOf<NotificationRecord>()
         private var nextId = 1L
@@ -105,6 +121,8 @@ class NotificationIngestorTest {
             direction: String,
             occurredOn: String?,
             reviewRequired: Boolean,
+            transferEvidenceScheme: String?,
+            transferEvidenceReference: String?,
         ): Int {
             val index = records.indexOfFirst { it.id == id && it.status == "pending" }
             if (index == -1) return 0
@@ -117,7 +135,16 @@ class NotificationIngestorTest {
                 direction = direction,
                 occurredOn = occurredOn,
                 reviewRequired = reviewRequired,
+                transferEvidenceScheme = transferEvidenceScheme,
+                transferEvidenceReference = transferEvidenceReference,
             )
+            return 1
+        }
+
+        override suspend fun restoreForReview(sourceRef: String): Int {
+            val index = records.indexOfFirst { it.sourceRef == sourceRef }
+            if (index == -1) return 0
+            records[index] = records[index].copy(status = "pending", reviewRequired = true)
             return 1
         }
 

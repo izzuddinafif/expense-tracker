@@ -14,6 +14,7 @@ from aiohttp import web
 from db import (
     Database,
     SelfTransferMatchAmbiguousError,
+    SelfTransferMutationError,
     TransactionConflictError,
     TransactionPreconditionRequiredError,
 )
@@ -376,6 +377,11 @@ def register_api_routes(
             return web.json_response({"error": str(exc)}, status=428)
         except TransactionConflictError as exc:
             return web.json_response({"error": str(exc)}, status=409)
+        except SelfTransferMutationError as exc:
+            return web.json_response(
+                {"error": "self_transfer_bundle_mutation_rejected", "detail": str(exc)},
+                status=409,
+            )
         except (TypeError, ValueError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
         if row is None:
@@ -400,6 +406,11 @@ def register_api_routes(
             return web.json_response({"error": str(exc)}, status=428)
         except TransactionConflictError as exc:
             return web.json_response({"error": str(exc)}, status=409)
+        except SelfTransferMutationError as exc:
+            return web.json_response(
+                {"error": "self_transfer_bundle_mutation_rejected", "detail": str(exc)},
+                status=409,
+            )
         if row is None:
             return web.json_response({"error": "not_found"}, status=404)
         return web.json_response(

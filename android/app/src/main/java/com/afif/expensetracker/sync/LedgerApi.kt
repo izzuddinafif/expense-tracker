@@ -17,6 +17,9 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
         private set
     @Volatile var deferred: Boolean = false
         private set
+    /** The server accepted the capture but explicitly requires it to stay in review. */
+    @Volatile var keepReview: Boolean = false
+        private set
 
     private fun rememberHttpFailure(response: okhttp3.Response) {
         val detail = when (response.code) {
@@ -50,6 +53,7 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
 
     fun push(payload: String): TransactionEntity? {
         deferred = false
+        keepReview = false
         val url = baseUrl.trimEnd('/') + "/api/v1/transactions"
         val request = Request.Builder().url(url)
             .header("Authorization", "Bearer $deviceToken")
@@ -57,7 +61,9 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
         return client.newCall(request).execute().use {
             if (it.code == 202) {
                 deferred = true
-                lastError = "HTTP 202: Waiting for the bank email to confirm this self-transfer."
+                val disposition = parsePushDisposition(it.code, it.body?.string().orEmpty())
+                keepReview = disposition.keepReview
+                lastError = disposition.message
                 return@use null
             }
             if (!it.isSuccessful) {
@@ -396,6 +402,31 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
             transferLeg = value.optString("transfer_leg").takeIf { it.isNotBlank() && it != "null" },
         )
     }
+}
+
+internal data class PushDisposition(
+    val keepReview: Boolean,
+    val message: String,
+)
+
+/** Preserve the server's accepted-but-not-final `keep_review` outcome locally. */
+internal fun parsePushDisposition(statusCode: Int, body: String): PushDisposition {
+    if (statusCode != 202) return PushDisposition(false, "HTTP $statusCode")
+    val outcome = runCatching {
+        JSONObject(body).optJSONObject("ingestion_outcome")
+    }.getOrNull()
+    val action = outcome?.optString("action").orEmpty()
+    val code = outcome?.optString("code").orEmpty()
+    val detail = when {
+        action == "keep_review" && code == "awaiting_canonical_email" ->
+            "Waiting for the bank email; this capture remains in review."
+        action == "keep_review" -> "The server kept this capture in review."
+        else -> "The server accepted this capture for later review."
+    }
+    // A 202 is non-final by definition. Treat even a malformed response as a
+    // durable review hold so a transient contract change cannot cause an
+    // infinite WorkManager retry or hide the capture.
+    return PushDisposition(true, "HTTP 202: $detail")
 }
 
 data class SyncStatus(

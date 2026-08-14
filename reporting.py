@@ -95,7 +95,7 @@ class LedgerReporting:
         assert month is not None
         cursor = await self._conn.execute(
             "SELECT kind,amount_idr,occurred_on,description,category,"
-            "subcategory,account,ledger_role FROM transactions "
+            "subcategory,account,ledger_role,transfer_bundle_id FROM transactions "
             "WHERE user_id=? AND status='confirmed' AND substr(occurred_on,1,7)=?",
             (user_id, month),
         )
@@ -131,9 +131,12 @@ class LedgerReporting:
                     if biggest is not None
                     else None
                 )
-        result["transfer_count"] = sum(
-            1 for row in rows if row["ledger_role"] == "self_transfer_principal"
-        )
+        result["transfer_count"] = len({
+            row["transfer_bundle_id"]
+            for row in rows
+            if row["ledger_role"] == "self_transfer_principal"
+            and row["transfer_bundle_id"] is not None
+        })
         return result
 
     async def expense_context(

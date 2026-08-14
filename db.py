@@ -27,6 +27,10 @@ class TransactionPreconditionRequiredError(ValueError):
     """Raised when an API mutation omits the required server revision."""
 
 
+class SelfTransferMutationError(ValueError):
+    """Raised when a self-transfer principal is mutated outside its bundle."""
+
+
 class SelfTransferMatchAmbiguousError(ValueError):
     """Raised when an unreferenced capture has multiple canonical matches."""
 
@@ -1076,9 +1080,10 @@ class Database:
             "SELECT o.id AS outbox_id,o.operation,o.revision AS outbox_revision,o.attempt_count,"
             "t.id AS transaction_id,t.user_id,t.kind,t.status,t.amount_idr,"
             "t.occurred_on,t.description,t.merchant,t.subcategory,t.account,"
-            "t.notion_page_id,t.recurring_page_id "
+            "t.notion_page_id,t.recurring_page_id,t.ledger_role "
             "FROM sync_outbox o JOIN transactions t ON t.id=o.transaction_id "
             "WHERE o.completed_at IS NULL "
+            "AND t.ledger_role != 'self_transfer_principal' "
             "AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=?) "
             "ORDER BY COALESCE(o.next_attempt_at,o.created_at),o.id LIMIT ?",
             (now, limit),
@@ -1093,7 +1098,8 @@ class Database:
             "MIN(o.created_at) AS oldest_pending_at,"
             "MAX(o.attempt_count) AS max_attempt_count "
             "FROM sync_outbox o JOIN transactions t ON t.id=o.transaction_id "
-            "WHERE t.user_id=? AND o.completed_at IS NULL",
+            "WHERE t.user_id=? AND o.completed_at IS NULL "
+            "AND t.ledger_role != 'self_transfer_principal'",
             (user_id,),
         )
         summary = await cur.fetchone()
@@ -1102,6 +1108,7 @@ class Database:
             "o.last_error,o.next_attempt_at "
             "FROM sync_outbox o JOIN transactions t ON t.id=o.transaction_id "
             "WHERE t.user_id=? AND o.completed_at IS NULL "
+            "AND t.ledger_role != 'self_transfer_principal' "
             "AND o.last_error IS NOT NULL ORDER BY o.updated_at DESC LIMIT 5",
             (user_id,),
         )
@@ -1120,7 +1127,8 @@ class Database:
         cur = await self._conn.execute(
             "UPDATE sync_outbox SET next_attempt_at=NULL,updated_at=? "
             "WHERE completed_at IS NULL AND last_error IS NOT NULL "
-            "AND transaction_id IN (SELECT id FROM transactions WHERE user_id=?)",
+            "AND transaction_id IN (SELECT id FROM transactions "
+            "WHERE user_id=? AND ledger_role != 'self_transfer_principal')",
             (now, user_id),
         )
         await self._conn.commit()
@@ -2043,11 +2051,20 @@ class Database:
                     "VALUES (?, 'confirmed', '{}', ?)",
                     (transaction_id, now),
                 )
-            await self._conn.execute(
-                "INSERT OR IGNORE INTO sync_outbox "
-                "(transaction_id,operation,created_at,updated_at) VALUES (?, 'upsert', ?, ?)",
-                (transaction_id, now, now),
-            )
+            if row["ledger_role"] == "self_transfer_principal":
+                # Principal legs are authoritative ledger rows, not ordinary
+                # Notion expense/income rows. Clean up any legacy open job
+                # rather than allowing confirmation to publish one.
+                await self._conn.execute(
+                    "DELETE FROM sync_outbox WHERE transaction_id=? AND completed_at IS NULL",
+                    (transaction_id,),
+                )
+            else:
+                await self._conn.execute(
+                    "INSERT OR IGNORE INTO sync_outbox "
+                    "(transaction_id,operation,created_at,updated_at) VALUES (?, 'upsert', ?, ?)",
+                    (transaction_id, now, now),
+                )
             await self._conn.commit()
             cur = await self._conn.execute(
                 "SELECT * FROM transactions WHERE id=?", (transaction_id,)
@@ -2108,6 +2125,11 @@ class Database:
             if row is None:
                 await self._conn.rollback()
                 return None, False
+            if row["ledger_role"] == "self_transfer_principal":
+                raise SelfTransferMutationError(
+                    "Self-transfer principal legs cannot be edited independently; "
+                    "mutate the transfer bundle instead"
+                )
             if row["status"] != "confirmed":
                 raise ValueError("Only confirmed transactions can be updated")
             if require_expected_revision and expected_updated_at is None:
@@ -2193,6 +2215,11 @@ class Database:
             if row is None:
                 await self._conn.rollback()
                 return None, False
+            if row["ledger_role"] == "self_transfer_principal":
+                raise SelfTransferMutationError(
+                    "Self-transfer principal legs cannot be voided independently; "
+                    "mutate the transfer bundle instead"
+                )
             if row["status"] == "voided":
                 await self._conn.rollback()
                 return dict(row), False

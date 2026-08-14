@@ -201,4 +201,26 @@ class BankNotificationParserTest {
         assertEquals(BankTransactionDirection.UNKNOWN, parsed.direction)
         assertTrue(parsed.reviewRequired)
     }
+
+    @Test
+    fun extractsOneUnambiguousTransferReference() {
+        val parsed = BankNotificationParser.parse(
+            "id.bmri.livin",
+            "Livin' by Mandiri",
+            "Transfer berhasil Rp 500.000 ke rekening sendiri. Nomor Referensi: TRX-JAGO-ABC12345",
+        )
+
+        assertEquals(TransferEvidence("bank_reference", "TRX-JAGO-ABC12345"), parsed.transferEvidence)
+    }
+
+    @Test
+    fun ambiguousTransferReferencesAreNotUsedAsEvidence() {
+        val parsed = BankNotificationParser.parse(
+            "id.bmri.livin",
+            "Livin' by Mandiri",
+            "Transfer Rp 500.000. Reference: FIRST-123456. Transaction ID: SECOND-123456",
+        )
+
+        assertNull(parsed.transferEvidence)
+    }
 }

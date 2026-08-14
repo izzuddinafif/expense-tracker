@@ -55,6 +55,8 @@ class NotificationIngestor(
             reviewRequired = parsed.reviewRequired,
             receivedAt = receivedAt,
             suspectedDuplicateOf = suspectedDuplicateOf,
+            transferEvidenceScheme = parsed.transferEvidence?.scheme,
+            transferEvidenceReference = parsed.transferEvidence?.reference,
         )
         // Only sourceRef is an idempotency key. Equal payment text can represent
         // two legitimate purchases, so content/time-window matching must not drop it.
@@ -80,6 +82,8 @@ class NotificationIngestor(
             direction = parsed.direction.name,
             occurredOn = parsed.transactionDate?.toString(),
             reviewRequired = parsed.reviewRequired,
+            transferEvidenceScheme = parsed.transferEvidence?.scheme,
+            transferEvidenceReference = parsed.transferEvidence?.reference,
         )
     }
 

@@ -130,7 +130,7 @@ async def test_transfer_principal_is_not_spending_or_income(tmp_path):
         summary = await LedgerReporting(db).monthly_summary(7, "2026-08")
         assert summary["expense"]["total_idr"] == 2_500
         assert summary["income"]["total_idr"] == 0
-        assert summary["transfer_count"] == 2
+        assert summary["transfer_count"] == 1
         context = await LedgerReporting(db).expense_context(7)
         assert [row["amount"] for row in context] == [2_500]
 
@@ -141,6 +141,75 @@ async def test_transfer_principal_is_not_spending_or_income(tmp_path):
         assert bundle["outgoing"]["ledger_role"] == "self_transfer_principal"
         assert bundle["incoming"]["ledger_role"] == "self_transfer_principal"
         assert bundle["fee"]["ledger_role"] == "self_transfer_fee"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_transfer_principal_legs_reject_independent_mutations(tmp_path):
+    db = await Database.connect(str(tmp_path / "transfer-mutations.db"))
+    try:
+        bundle = await email_bundle(db)
+        outgoing = bundle["outgoing"]
+
+        with pytest.raises(ValueError, match="cannot be edited independently"):
+            await db.update_transaction(
+                7,
+                outgoing["id"],
+                {"description": "Tampered transfer"},
+                expected_updated_at=outgoing["updated_at"],
+            )
+        with pytest.raises(ValueError, match="cannot be voided independently"):
+            await db.void_transaction(
+                7,
+                outgoing["id"],
+                expected_updated_at=outgoing["updated_at"],
+            )
+
+        refreshed = await db.find_transaction_by_id(7, outgoing["id"])
+        assert refreshed["status"] == "confirmed"
+        assert refreshed["description"] == outgoing["description"]
+        events = await (
+            await db._conn.execute(
+                "SELECT event_type FROM transaction_events WHERE transaction_id=?",
+                (outgoing["id"],),
+            )
+        ).fetchall()
+        assert {event["event_type"] for event in events} == {"confirmed_external"}
+        principal_jobs = await (
+            await db._conn.execute(
+                "SELECT COUNT(*) FROM sync_outbox WHERE transaction_id IN (?, ?)",
+                (bundle["outgoing"]["id"], bundle["incoming"]["id"]),
+            )
+        ).fetchone()
+        assert principal_jobs[0] == 0
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_confirming_a_transfer_principal_never_queues_notion(tmp_path):
+    db = await Database.connect(str(tmp_path / "transfer-confirm.db"))
+    try:
+        capture = await db.ingest_android_self_transfer(
+            7,
+            kind="expense",
+            amount_idr=500_000,
+            occurred_on="2026-08-14",
+            description="Transfer keluar",
+            account="Mandiri",
+            source_ref="mandiri:unmatched-transfer",
+        )
+        row, changed = await db.confirm_transaction(7, capture.transaction["id"])
+        assert changed is True
+        assert row["status"] == "confirmed"
+        jobs = await (
+            await db._conn.execute(
+                "SELECT COUNT(*) FROM sync_outbox WHERE transaction_id=?",
+                (row["id"],),
+            )
+        ).fetchone()
+        assert jobs[0] == 0
     finally:
         await db.close()
 

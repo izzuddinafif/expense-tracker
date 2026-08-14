@@ -58,9 +58,10 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
                     val canonical = response.getOrNull()
                     if (canonical == null) {
                         val error = response.exceptionOrNull()?.message ?: api.lastError ?: "create failed"
-                        if (api.deferred) {
-                            db.syncDao().requeueClaimed(operation.id, claimToken, error)
-                            retryNeeded = true
+                        if (api.keepReview) {
+                            if (!holdCreateForReview(db, ownerToken, generation, operation, claimToken, error)) {
+                                return Result.retry()
+                            }
                             continue
                         }
                         if (failClaim(db, ownerToken, generation, operation, claimToken, error)) {
@@ -175,6 +176,23 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
     ): Boolean = db.withTransaction {
         if (!ownsLease(db, ownerToken, generation)) return@withTransaction false
         db.syncDao().markFailure(operation.id, claimToken, error, maxAttempts) == 1
+    }
+
+    private suspend fun holdCreateForReview(
+        db: LedgerDatabase,
+        ownerToken: String,
+        generation: Long,
+        operation: SyncOperation,
+        claimToken: String,
+        error: String,
+    ): Boolean = db.withTransaction {
+        if (!ownsLease(db, ownerToken, generation)) return@withTransaction false
+        if (db.syncDao().markKeepReview(operation.id, claimToken, error) != 1) return@withTransaction false
+        db.transactionDao().updateSyncState(operation.entityId, "keep_review")
+        val sourceRef = runCatching { JSONObject(operation.payload).optString("source_ref") }.getOrNull()
+            ?.takeIf { it.isNotBlank() }
+        sourceRef?.let { db.notificationDao().restoreForReview(it) }
+        true
     }
 
     private suspend fun consumeChangeFeed(

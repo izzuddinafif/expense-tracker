@@ -249,6 +249,61 @@ async def test_transaction_can_be_edited_and_voided(api_client):
 
 
 @pytest.mark.asyncio
+async def test_api_rejects_independent_self_transfer_mutations(api_client):
+    client, db = api_client
+    bundle = await db.create_confirmed_self_transfer(
+        7,
+        amount_idr=500_000,
+        admin_fee_idr=2_500,
+        occurred_on="2026-08-14",
+        outgoing_description="Transfer antar rekening — Mandiri → Jago (keluar)",
+        incoming_description="Transfer antar rekening — Mandiri → Jago (masuk)",
+        fee_description="Biaya admin transfer — Mandiri → Jago",
+        outgoing_subcategory="Transfer",
+        incoming_subcategory="Transfer",
+        source_account="Mandiri",
+        destination_account="Jago",
+        email_uid="api-transfer-mutation",
+        sender="noreply@bank.example",
+    )
+    outgoing = bundle["outgoing"]
+    headers = {"Authorization": "Bearer test-device-token"}
+
+    edited = await client.patch(
+        f"/api/v1/transactions/{outgoing['id']}",
+        headers=headers,
+        json={
+            "description": "Tampered transfer",
+            "expected_updated_at": outgoing["updated_at"],
+        },
+    )
+    assert edited.status == 409
+    assert await edited.json() == {
+        "error": "self_transfer_bundle_mutation_rejected",
+        "detail": (
+            "Self-transfer principal legs cannot be edited independently; "
+            "mutate the transfer bundle instead"
+        ),
+    }
+
+    voided = await client.delete(
+        f"/api/v1/transactions/{outgoing['id']}",
+        headers={**headers, "If-Match": outgoing["updated_at"]},
+    )
+    assert voided.status == 409
+    assert (await voided.json())["error"] == "self_transfer_bundle_mutation_rejected"
+    current = await db.find_transaction_by_id(7, outgoing["id"])
+    assert current["status"] == "confirmed"
+    principal_jobs = await (
+        await db._conn.execute(
+            "SELECT COUNT(*) FROM sync_outbox WHERE transaction_id IN (?, ?)",
+            (bundle["outgoing"]["id"], bundle["incoming"]["id"]),
+        )
+    ).fetchone()
+    assert principal_jobs[0] == 0
+
+
+@pytest.mark.asyncio
 async def test_operational_health_endpoint(api_client):
     client, db = api_client
     await db.record_operational_state(

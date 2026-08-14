@@ -304,8 +304,8 @@ Remaining milestones are:
 4. keep Assets/net-worth synchronization Notion-backed until a local asset
    model is introduced.
 
-The API 35 emulator suite is currently green at 22/22, the Android JVM suite
-at 54/54, and focused backend regressions at 213/213. The release artifact has
+The API 35 emulator suite is currently green at 23/23, the Android JVM suite
+at 62/62, and focused backend regressions at 216/216. The release artifact has
 been assembled locally and must remain signed with the configured Ledgerly
 release keystore before distribution. The Coolify Ledgerly application is
 healthy at `https://ledgerly.izzudd.in/livez`; the production deployment is

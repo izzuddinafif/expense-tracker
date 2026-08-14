@@ -10,6 +10,8 @@ interface SyncDao {
     @Insert suspend fun enqueue(operation: SyncOperation)
     @Query("SELECT * FROM sync_operations WHERE kind = :kind AND entityId = :entityId ORDER BY id DESC LIMIT 1")
     suspend fun findLatest(kind: String, entityId: String): SyncOperation?
+    @Query("UPDATE sync_operations SET payload = :payload, state = 'pending', claimToken = NULL, lastError = NULL, updatedAt = :now WHERE id = :id AND kind = 'transaction' AND state = 'keep_review'")
+    suspend fun requeueKeepReview(id: Long, payload: String, now: Long = System.currentTimeMillis()): Int
     @Query("SELECT * FROM sync_operations WHERE kind = 'transaction' AND entityId = :entityId AND state = 'pending' ORDER BY id DESC LIMIT 1")
     suspend fun findPendingCreate(entityId: String): SyncOperation?
     @Query("UPDATE sync_operations SET payload = :payload, updatedAt = :now WHERE id = :id AND kind = 'transaction' AND state = 'pending'")
@@ -26,15 +28,17 @@ interface SyncDao {
     suspend fun claimedOperation(id: Long, claimToken: String): SyncOperation?
     @Query("UPDATE sync_operations SET state = 'pending', claimToken = NULL, lastError = :error, updatedAt = :now WHERE id = :id AND state = 'sending' AND claimToken = :claimToken")
     suspend fun requeueClaimed(id: Long, claimToken: String, error: String, now: Long = System.currentTimeMillis()): Int
+    @Query("UPDATE sync_operations SET state = 'keep_review', attempts = attempts + 1, lastAttemptAt = :now, lastError = :error, claimToken = NULL, updatedAt = :now WHERE id = :id AND state = 'sending' AND claimToken = :claimToken")
+    suspend fun markKeepReview(id: Long, claimToken: String, error: String, now: Long = System.currentTimeMillis()): Int
     @Query("SELECT * FROM sync_operations WHERE id = :id LIMIT 1")
     suspend fun findById(id: Long): SyncOperation?
     @Query("UPDATE sync_operations SET state = 'pending', claimToken = NULL, updatedAt = :now WHERE state = 'sending' AND (lastAttemptAt IS NULL OR lastAttemptAt < :before)")
     suspend fun requeueExpiredClaims(before: Long, now: Long = System.currentTimeMillis()): Int
     @Query("SELECT COUNT(*) FROM sync_operations WHERE state = 'pending'") suspend fun pendingCount(): Int
     @Query("SELECT COUNT(*) FROM sync_operations WHERE state = 'failed'") suspend fun failedCount(): Int
-    @Query("SELECT DISTINCT entityId FROM sync_operations WHERE state IN ('pending', 'failed', 'sending')")
+    @Query("SELECT DISTINCT entityId FROM sync_operations WHERE state IN ('pending', 'failed', 'sending', 'keep_review')")
     suspend fun unsyncedEntityIds(): List<String>
-    @Query("SELECT EXISTS(SELECT 1 FROM sync_operations WHERE entityId = :entityId AND state IN ('pending', 'failed', 'sending'))")
+    @Query("SELECT EXISTS(SELECT 1 FROM sync_operations WHERE entityId = :entityId AND state IN ('pending', 'failed', 'sending', 'keep_review'))")
     suspend fun hasUnfinished(entityId: String): Boolean
     @Query("SELECT MIN(updatedAt) FROM sync_operations WHERE state = 'pending'") suspend fun oldestPendingAt(): Long?
     @Query("UPDATE sync_operations SET state = 'sent', attempts = attempts + 1, lastAttemptAt = :now, lastError = NULL, claimToken = NULL, updatedAt = :now WHERE id = :id AND state = 'sending' AND claimToken = :claimToken")

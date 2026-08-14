@@ -68,33 +68,54 @@ class NotificationConfirmationStore(private val database: LedgerDatabase) {
                 category = values.category.trim(),
                 account = values.account.trim(),
                 occurredAt = occurredAt,
+                syncState = "pending",
                 kind = values.kind,
                 ledgerRole = if (values.selfTransfer) "self_transfer_principal" else "ordinary",
             )
         )
         // The notification status gate above makes this insert idempotent while
         // Room's transaction serialization also protects concurrent taps.
-        database.syncDao().enqueue(
-            SyncOperation(
-                kind = "transaction",
-                entityId = transactionId,
-                payload = JSONObject()
-                    .put("kind", values.kind)
-                    .put("amount_idr", values.amountIdr)
-                    .put("occurred_on", values.occurredOn.trim())
-                    .put("description", values.description.trim())
-                    .put("merchant", values.merchant.trim())
-                    .put("category", values.category.trim())
-                    .put("account", values.account.trim())
-                    .put("self_transfer", values.selfTransfer)
-                    .put("source_ref", record.sourceRef)
-                    .put("package_name", record.packageName)
-                    .put("received_at", record.receivedAt)
-                    .put("confirm", true)
-                    .toString(),
+        val payload = notificationConfirmationPayload(record, values)
+        val latest = database.syncDao().findLatest("transaction", transactionId)
+        if (latest?.state == "keep_review") {
+            if (database.syncDao().requeueKeepReview(latest.id, payload) != 1) {
+                database.syncDao().enqueue(
+                    SyncOperation(kind = "transaction", entityId = transactionId, payload = payload),
+                )
+            }
+        } else {
+            database.syncDao().enqueue(
+                SyncOperation(kind = "transaction", entityId = transactionId, payload = payload),
             )
-        )
+        }
         database.notificationDao().updateStatus(record.id, "confirmed")
         true
     }
 }
+
+internal fun notificationConfirmationPayload(
+    record: NotificationRecord,
+    values: NotificationConfirmationDraft,
+): String = JSONObject()
+    .put("kind", values.kind)
+    .put("amount_idr", values.amountIdr)
+    .put("occurred_on", values.occurredOn.trim())
+    .put("description", values.description.trim())
+    .put("merchant", values.merchant.trim())
+    .put("category", values.category.trim())
+    .put("account", values.account.trim())
+    .put("self_transfer", values.selfTransfer)
+    .put("source_ref", record.sourceRef)
+    .put("package_name", record.packageName)
+    .put("received_at", record.receivedAt)
+    .apply {
+        val scheme = record.transferEvidenceScheme
+        val reference = record.transferEvidenceReference
+        if (!scheme.isNullOrBlank() && !reference.isNullOrBlank()) {
+            put("transfer_evidence", JSONObject()
+                .put("scheme", scheme)
+                .put("reference", reference))
+        }
+    }
+    .put("confirm", true)
+    .toString()

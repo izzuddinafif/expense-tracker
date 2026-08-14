@@ -236,6 +236,12 @@ class ManualTransactionStoreTest {
             override suspend fun enqueue(operation: SyncOperation) { operations += operation }
             override suspend fun findLatest(kind: String, entityId: String): SyncOperation? =
                 operations.lastOrNull { it.kind == kind && it.entityId == entityId }
+            override suspend fun requeueKeepReview(id: Long, payload: String, now: Long): Int {
+                val index = operations.indexOfFirst { it.id == id && it.state == "keep_review" }
+                if (index < 0) return 0
+                operations[index] = operations[index].copy(payload = payload, state = "pending", updatedAt = now)
+                return 1
+            }
             override suspend fun findPendingCreate(entityId: String): SyncOperation? =
                 operations.lastOrNull { it.kind == "transaction" && it.entityId == entityId && it.state == "pending" }
             override suspend fun replacePendingCreatePayload(id: Long, payload: String, now: Long): Int {
@@ -253,6 +259,7 @@ class ManualTransactionStoreTest {
             override suspend fun claimPending(id: Long, claimToken: String, now: Long): Int = 0
             override suspend fun claimedOperation(id: Long, claimToken: String): SyncOperation? = null
             override suspend fun requeueClaimed(id: Long, claimToken: String, error: String, now: Long): Int = 0
+            override suspend fun markKeepReview(id: Long, claimToken: String, error: String, now: Long): Int = 0
             override suspend fun findById(id: Long): SyncOperation? = operations.find { it.id == id }
             override suspend fun requeueExpiredClaims(before: Long, now: Long): Int = 0
             override suspend fun pendingCount(): Int = operations.size
