@@ -16,4 +16,9 @@ data class TransactionEntity(
     val syncState: String = "pending",
     /** Server revision used to fence edits against a newer remote change. */
     val serverUpdatedAt: String? = null,
+    /** Directional server kind; transfer principals are excluded from spend totals. */
+    val kind: String = "expense",
+    val ledgerRole: String = "ordinary",
+    val transferBundleId: String? = null,
+    val transferLeg: String? = null,
 )

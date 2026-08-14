@@ -35,6 +35,14 @@ class TransactionFilterTest {
     }
 
     @Test
+    fun transferPrincipalDoesNotAppearInExpenseOrIncomeFilters() {
+        val transfer = tx("transfer", amount = -500_000).copy(ledgerRole = "self_transfer_principal")
+        val ordinaryExpense = tx("expense", amount = -10)
+        assertEquals(listOf("expense"), filterTransactions(listOf(transfer, ordinaryExpense), kind = TransactionKind.EXPENSE).map { it.id })
+        assertEquals(listOf("transfer", "expense"), filterTransactions(listOf(transfer, ordinaryExpense)).map { it.id })
+    }
+
+    @Test
     fun monthFilterUsesRequestedTimezoneAtBoundaries() {
         val rows = listOf(
             tx("july-last", occurred = "2026-07-31T16:59:59Z"), // July 31 23:59:59 in Jakarta

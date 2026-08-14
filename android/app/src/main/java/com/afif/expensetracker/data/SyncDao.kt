@@ -24,6 +24,8 @@ interface SyncDao {
         claimPending(id, "legacy-$id-$now", now)
     @Query("SELECT * FROM sync_operations WHERE id = :id AND state = 'sending' AND claimToken = :claimToken LIMIT 1")
     suspend fun claimedOperation(id: Long, claimToken: String): SyncOperation?
+    @Query("UPDATE sync_operations SET state = 'pending', claimToken = NULL, lastError = :error, updatedAt = :now WHERE id = :id AND state = 'sending' AND claimToken = :claimToken")
+    suspend fun requeueClaimed(id: Long, claimToken: String, error: String, now: Long = System.currentTimeMillis()): Int
     @Query("SELECT * FROM sync_operations WHERE id = :id LIMIT 1")
     suspend fun findById(id: Long): SyncOperation?
     @Query("UPDATE sync_operations SET state = 'pending', claimToken = NULL, updatedAt = :now WHERE state = 'sending' AND (lastAttemptAt IS NULL OR lastAttemptAt < :before)")

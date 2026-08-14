@@ -36,6 +36,24 @@ class DashboardSummaryTest {
     }
 
     @Test
+    fun transferPrincipalIsVisibleButExcludedFromCashflowTotals() {
+        val summary = DashboardSummaryCalculator.summarize(
+            listOf(
+                tx("outgoing", -5_000_000, ledgerRole = "self_transfer_principal"),
+                tx("incoming", 5_000_000, ledgerRole = "self_transfer_principal"),
+                tx("fee", -2_500),
+            ),
+            month,
+            zone,
+        )
+
+        assertEquals(2_500L, summary.totalExpenseMinor)
+        assertEquals(0L, summary.totalIncomeMinor)
+        assertEquals(-2_500L, summary.netMinor)
+        assertEquals(3, summary.transactionCount)
+    }
+
+    @Test
     fun aggregatesCategoriesAndKeepsStableOrderForTies() {
         val summary = DashboardSummaryCalculator.summarize(
             listOf(tx("food-1", -100, category = "Food"), tx("travel", -200, category = "Travel"), tx("food-2", -100, category = "Food"), tx("other", -200, category = "Other")),
@@ -96,5 +114,6 @@ class DashboardSummaryTest {
         occurred: String = "2026-07-10T12:00:00+07:00",
         occurredAt: Long? = null,
         category: String = "Food",
-    ) = TransactionEntity(id, "Merchant", amount, category = category, occurredAt = occurredAt ?: Instant.parse(occurred).toEpochMilli())
+        ledgerRole: String = "ordinary",
+    ) = TransactionEntity(id, "Merchant", amount, category = category, occurredAt = occurredAt ?: Instant.parse(occurred).toEpochMilli(), ledgerRole = ledgerRole)
 }

@@ -98,6 +98,8 @@ async def test_security_rejection_is_processed_but_remains_auditable(tmp_path):
         await db.mark_rejected("uid-spoof", "spoof@example.test", "authentication rejected")
         assert await db.is_processed("uid-spoof")
         assert "uid-spoof" in await db.get_email_excluded_uids()
+        assert not await db.clear_email_processing_failure("uid-spoof")
+        assert "uid-spoof" in await db.get_email_excluded_uids()
         failure = (await db.list_email_processing_failures())[0]
         assert failure["uid"] == "uid-spoof"
         assert failure["status"] == "terminal"

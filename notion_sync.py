@@ -2,7 +2,8 @@
 
 Retries look up the stable local UUID before creating a page. Both target
 databases must have a ``Transaction ID`` rich-text property; an incompatible
-schema leaves the job pending instead of silently degrading idempotency.
+schema is parked as a visible terminal failure instead of silently degrading
+idempotency or retrying forever.
 """
 
 import asyncio
@@ -11,11 +12,19 @@ import random
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
 
+import httpx
+
 from db import Database
 from models import ExpenseEntry, IncomeEntry
-from notion import NotionClient, _url_to_id
+from notion import NotionClient, NotionTerminalError, _url_to_id
 
 log = logging.getLogger(__name__)
+
+# There is intentionally no second terminal-job store: parking the incomplete
+# row preserves sync status and transaction-event audit history. The existing
+# explicit retry action clears next_attempt_at and makes the job due again.
+TERMINAL_RETRY_AT = "9999-12-31T23:59:59.999999+00:00"
+_RETRYABLE_NOTION_4XX = {408, 409, 429}
 
 
 class NotionSyncWorker:
@@ -30,8 +39,11 @@ class NotionSyncWorker:
         poll_interval: float = 15.0,
         base_delay: float = 30.0,
         max_delay: float = 3600.0,
+        max_attempts: int = 8,
         batch_size: int = 20,
     ) -> None:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least one")
         self.db = db
         self.client_factory = client_factory
         self.clock = clock
@@ -40,6 +52,7 @@ class NotionSyncWorker:
         self.poll_interval = poll_interval
         self.base_delay = base_delay
         self.max_delay = max_delay
+        self.max_attempts = max_attempts
         self.batch_size = batch_size
 
     def _next_attempt(self, attempt_count: int) -> str:
@@ -47,11 +60,29 @@ class NotionSyncWorker:
         delay = min(self.max_delay, delay + self.jitter(0.0, delay * 0.2))
         return (self.clock() + timedelta(seconds=delay)).isoformat()
 
-    async def _fail(self, job: dict, error: str) -> None:
-        await self.db.mark_notion_sync_failure(
-            job["outbox_id"], error[:1000], self._next_attempt(job["attempt_count"])
+    @staticmethod
+    def _is_terminal_error(exc: Exception) -> bool:
+        if isinstance(exc, NotionTerminalError):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = exc.response.status_code
+            return 400 <= status < 500 and status not in _RETRYABLE_NOTION_4XX
+        return False
+
+    async def _fail(
+        self, job: dict, error: str, *, terminal: bool = False
+    ) -> None:
+        terminal = terminal or job["attempt_count"] + 1 >= self.max_attempts
+        recorded_error = f"[terminal] {error}" if terminal else error
+        next_attempt_at = (
+            TERMINAL_RETRY_AT
+            if terminal
+            else self._next_attempt(job["attempt_count"])
         )
-        await self._record_health(success=False, error=error)
+        await self.db.mark_notion_sync_failure(
+            job["outbox_id"], recorded_error[:1000], next_attempt_at
+        )
+        await self._record_health(success=False, error=recorded_error)
 
     async def _record_health(
         self, *, success: bool, error: str | None = None, processed: int = 0
@@ -78,22 +109,38 @@ class NotionSyncWorker:
 
     async def process_job(self, job: dict) -> None:
         if job["kind"] not in {"expense", "income"}:
-            await self._fail(job, f"unsupported Notion transaction kind: {job['kind']}")
+            await self._fail(
+                job,
+                f"unsupported Notion transaction kind: {job['kind']}",
+                terminal=True,
+            )
             return
         operation = job["operation"]
         if operation not in {"upsert", "archive"}:
-            await self._fail(job, f"unsupported Notion outbox operation: {operation}")
+            await self._fail(
+                job,
+                f"unsupported Notion outbox operation: {operation}",
+                terminal=True,
+            )
             return
         if operation == "archive" and job["status"] != "voided":
-            await self._fail(job, f"transaction is not voided: {job['status']}")
+            await self._fail(
+                job, f"transaction is not voided: {job['status']}", terminal=True
+            )
             return
         if operation == "upsert" and job["status"] != "confirmed":
-            await self._fail(job, f"transaction is not confirmed: {job['status']}")
+            await self._fail(
+                job,
+                f"transaction is not confirmed: {job['status']}",
+                terminal=True,
+            )
             return
 
         user = await self.db.get_user(job["user_id"])
         if user is None or not user.notion_token:
-            await self._fail(job, "Notion user configuration is missing")
+            await self._fail(
+                job, "Notion user configuration is missing", terminal=True
+            )
             return
 
         client = self.client_factory(user)
@@ -127,6 +174,9 @@ class NotionSyncWorker:
                 await self.db.mark_notion_sync_success(job["outbox_id"], page_id)
                 await self._record_health(success=True, processed=1)
                 return
+            preflight = getattr(client, "preflight_transaction", None)
+            if preflight is not None:
+                await preflight(job["kind"], job["transaction_id"])
             cache = await client.load_cache()
             common = {
                 "description": job["description"],
@@ -189,7 +239,11 @@ class NotionSyncWorker:
             except Exception as exc:
                 log.exception("Notion outbox job %s failed", job["outbox_id"])
                 try:
-                    await self._fail(job, f"{type(exc).__name__}: {exc}")
+                    await self._fail(
+                        job,
+                        f"{type(exc).__name__}: {exc}",
+                        terminal=self._is_terminal_error(exc),
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception:

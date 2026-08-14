@@ -132,6 +132,7 @@ class BudgetStore:
         cur = await self._conn.execute(
             "SELECT category,subcategory,amount_idr FROM transactions "
             "WHERE user_id=? AND status='confirmed' AND kind='expense' "
+            "AND ledger_role != 'self_transfer_principal' "
             "AND substr(occurred_on,1,7)=?",
             (user_id, month),
         )

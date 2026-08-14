@@ -6,11 +6,16 @@ import androidx.room.PrimaryKey
 
 @Entity(
     tableName = "ingestion_queue",
-    indices = [Index(value = ["sourceRef"], unique = true)],
+    indices = [
+        Index(value = ["sourceRef"], unique = true),
+        Index(value = ["platformIdentityRef"], unique = true),
+    ],
 )
 data class NotificationRecord(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val sourceRef: String,
+    /** Hash of Android's opaque notification key; null for legacy/content-only captures. */
+    val platformIdentityRef: String? = null,
     val packageName: String,
     val title: String,
     val body: String,

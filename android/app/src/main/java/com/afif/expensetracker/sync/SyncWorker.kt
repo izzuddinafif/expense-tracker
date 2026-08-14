@@ -58,6 +58,11 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
                     val canonical = response.getOrNull()
                     if (canonical == null) {
                         val error = response.exceptionOrNull()?.message ?: api.lastError ?: "create failed"
+                        if (api.deferred) {
+                            db.syncDao().requeueClaimed(operation.id, claimToken, error)
+                            retryNeeded = true
+                            continue
+                        }
                         if (failClaim(db, ownerToken, generation, operation, claimToken, error)) {
                             retryNeeded = retryNeeded || operation.attempts + 1 < MAX_ATTEMPTS
                         }

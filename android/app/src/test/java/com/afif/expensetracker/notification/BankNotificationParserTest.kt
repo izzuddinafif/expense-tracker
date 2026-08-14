@@ -2,6 +2,8 @@ package com.afif.expensetracker.notification
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -141,6 +143,39 @@ class BankNotificationParserTest {
         assertEquals(Bank.UNKNOWN, unknown.bank)
         assertTrue(unknown.reviewRequired)
         assertNotNull(unknown.amountIdr)
+    }
+
+    @Test
+    fun notificationIdentitySeparatesReusedKeyWhenContentChanges() {
+        val first = BankNotificationParser.notificationIdentityRef(
+            BankNotificationSources.BSI_BYOND_PACKAGE,
+            "0|co.id.bankbsi.superapp|42|null|10001",
+        )
+        val sameNotificationAfterContentUpdate = BankNotificationParser.notificationIdentityRef(
+            BankNotificationSources.BSI_BYOND_PACKAGE,
+            "0|co.id.bankbsi.superapp|42|null|10001",
+            "content-a",
+        )
+        val reusedKeyWithNewContent = BankNotificationParser.notificationIdentityRef(
+            BankNotificationSources.BSI_BYOND_PACKAGE,
+            "0|co.id.bankbsi.superapp|42|null|10001",
+            "content-b",
+        )
+        val distinctNotification = BankNotificationParser.notificationIdentityRef(
+            BankNotificationSources.BSI_BYOND_PACKAGE,
+            "0|co.id.bankbsi.superapp|43|null|10001",
+        )
+
+        assertNotEquals(first, sameNotificationAfterContentUpdate)
+        assertNotEquals(sameNotificationAfterContentUpdate, reusedKeyWithNewContent)
+        assertNotEquals(first, distinctNotification)
+        assertEquals(64, first.length)
+        assertFailsWith<IllegalArgumentException> {
+            BankNotificationParser.notificationIdentityRef(
+                BankNotificationSources.BSI_BYOND_PACKAGE,
+                "   ",
+            )
+        }
     }
 
     @Test

@@ -74,6 +74,8 @@ class LedgerReporting:
         if kind is not None:
             where += " AND kind = ?"
             params.append(kind)
+            if kind in {"expense", "income"}:
+                where += " AND ledger_role != 'self_transfer_principal'"
         if query:
             pattern = f"%{_escape_like(query)}%"
             where += " AND (" + " OR ".join(
@@ -93,14 +95,18 @@ class LedgerReporting:
         assert month is not None
         cursor = await self._conn.execute(
             "SELECT kind,amount_idr,occurred_on,description,category,"
-            "subcategory,account FROM transactions "
+            "subcategory,account,ledger_role FROM transactions "
             "WHERE user_id=? AND status='confirmed' AND substr(occurred_on,1,7)=?",
             (user_id, month),
         )
         rows = await cursor.fetchall()
         result: dict[str, Any] = {"month": month}
         for kind in ("expense", "income"):
-            selected = [row for row in rows if row["kind"] == kind]
+            selected = [
+                row for row in rows
+                if row["kind"] == kind
+                and row["ledger_role"] != "self_transfer_principal"
+            ]
             by_category: dict[str, int] = {}
             by_account: dict[str, int] = {}
             for row in selected:
@@ -125,7 +131,9 @@ class LedgerReporting:
                     if biggest is not None
                     else None
                 )
-        result["transfer_count"] = sum(1 for row in rows if row["kind"] == "transfer")
+        result["transfer_count"] = sum(
+            1 for row in rows if row["ledger_role"] == "self_transfer_principal"
+        )
         return result
 
     async def expense_context(
@@ -138,6 +146,7 @@ class LedgerReporting:
             "SELECT description,amount_idr,occurred_on,subcategory,category,"
             "merchant,account FROM transactions "
             "WHERE user_id=? AND status='confirmed' AND kind='expense' "
+            "AND ledger_role != 'self_transfer_principal' "
             "ORDER BY occurred_on DESC,created_at DESC,id DESC LIMIT ?",
             (user_id, limit),
         )
@@ -170,7 +179,8 @@ class LedgerReporting:
         pattern = f"%{_escape_like(str(query or '').strip())}%"
         cursor = await self._conn.execute(
             "SELECT * FROM transactions WHERE user_id=? AND status='confirmed' "
-            "AND kind='expense' AND lower(description) LIKE lower(?) ESCAPE '\\' "
+            "AND kind='expense' AND ledger_role != 'self_transfer_principal' "
+            "AND lower(description) LIKE lower(?) ESCAPE '\\' "
             "ORDER BY occurred_on DESC,created_at DESC,id DESC LIMIT ?",
             (user_id, pattern, limit),
         )
@@ -227,6 +237,7 @@ class LedgerReporting:
             "SELECT description,merchant,amount_idr,occurred_on,subcategory,"
             "category,account FROM transactions WHERE user_id=? "
             "AND status='confirmed' AND kind='expense' "
+            "AND ledger_role != 'self_transfer_principal' "
             "AND occurred_on BETWEEN ? AND ? "
             "ORDER BY occurred_on DESC,created_at DESC,id DESC",
             (user_id, since, occurred_on),

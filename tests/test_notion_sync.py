@@ -1,12 +1,15 @@
 import asyncio
+import json
 from datetime import datetime, timezone
 
+import httpx
 import pytest
 from cryptography.fernet import Fernet
 
 from db import Database
 from models import ExpenseEntry, IncomeEntry
-from notion_sync import NotionSyncWorker
+from notion import NotionClient
+from notion_sync import NotionSyncWorker, TERMINAL_RETRY_AT
 
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -114,10 +117,123 @@ async def test_unsupported_transfer_and_archive_are_recorded(tmp_path):
 
     await worker.run_once()
     row = await (await db._conn.execute(
-        "SELECT attempt_count,last_error FROM sync_outbox WHERE transaction_id=?", (tx_id,)
+        "SELECT attempt_count,last_error,next_attempt_at FROM sync_outbox "
+        "WHERE transaction_id=?", (tx_id,)
     )).fetchone()
     assert row["attempt_count"] == 1
+    assert row["last_error"].startswith("[terminal]")
     assert "unsupported" in row["last_error"]
+    assert row["next_attempt_at"] == TERMINAL_RETRY_AT
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_schema_failure_is_terminal_audited_and_skips_taxonomy_load(tmp_path):
+    db = await make_db(tmp_path)
+    transaction_id = await queue(db, "expense")
+    client = NotionClient("token", {"expenses_ds": "expenses-db"})
+    request_paths = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        request_paths.append(request.url.path)
+        return httpx.Response(
+            400,
+            json={"message": "Transaction ID property is missing"},
+        )
+
+    await client._http.aclose()
+    client._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    worker = NotionSyncWorker(
+        db, client_factory=lambda _user: client, clock=lambda: NOW
+    )
+
+    assert await worker.run_once() == 1
+    assert await worker.run_once() == 0
+
+    row = await (await db._conn.execute(
+        "SELECT attempt_count,last_error,next_attempt_at,completed_at "
+        "FROM sync_outbox WHERE transaction_id=?", (transaction_id,)
+    )).fetchone()
+    assert row["attempt_count"] == 1
+    assert row["last_error"].startswith("[terminal] NotionTerminalError:")
+    assert "Transaction ID" in row["last_error"]
+    assert row["next_attempt_at"] == TERMINAL_RETRY_AT
+    assert row["completed_at"] is None
+
+    event = await (await db._conn.execute(
+        "SELECT metadata_json FROM transaction_events "
+        "WHERE transaction_id=? AND event_type='sync_failed' "
+        "ORDER BY id DESC LIMIT 1", (transaction_id,)
+    )).fetchone()
+    assert json.loads(event["metadata_json"])["error"] == row["last_error"]
+    assert request_paths == ["/v1/databases/expenses-db/query"]
+    await db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "expected_next_attempt", "terminal"),
+    [
+        (403, TERMINAL_RETRY_AT, True),
+        (429, "2026-01-01T00:00:30+00:00", False),
+    ],
+)
+async def test_notion_4xx_terminal_classification(
+    tmp_path, status_code, expected_next_attempt, terminal
+):
+    db = await make_db(tmp_path)
+    transaction_id = await queue(db, "expense")
+
+    class HttpFailureNotion(FakeNotion):
+        async def load_cache(self):
+            request = httpx.Request("POST", "https://api.notion.com/v1/query")
+            response = httpx.Response(status_code, request=request)
+            raise httpx.HTTPStatusError(
+                "Notion request failed", request=request, response=response
+            )
+
+    worker = NotionSyncWorker(
+        db,
+        client_factory=lambda _user: HttpFailureNotion(),
+        clock=lambda: NOW,
+        jitter=lambda _a, _b: 0,
+    )
+    await worker.run_once()
+
+    row = await (await db._conn.execute(
+        "SELECT last_error,next_attempt_at FROM sync_outbox "
+        "WHERE transaction_id=?", (transaction_id,)
+    )).fetchone()
+    assert row["next_attempt_at"] == expected_next_attempt
+    assert row["last_error"].startswith("[terminal]") is terminal
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_transient_failures_stop_after_max_attempts(tmp_path):
+    db = await make_db(tmp_path)
+    transaction_id = await queue(db, "expense")
+    await db._conn.execute(
+        "UPDATE sync_outbox SET attempt_count=7 WHERE transaction_id=?",
+        (transaction_id,),
+    )
+    await db._conn.commit()
+    worker = NotionSyncWorker(
+        db,
+        client_factory=lambda _user: FakeNotion(fail=True),
+        clock=lambda: NOW,
+        max_attempts=8,
+    )
+
+    await worker.run_once()
+    row = await (await db._conn.execute(
+        "SELECT attempt_count,last_error,next_attempt_at FROM sync_outbox "
+        "WHERE transaction_id=?", (transaction_id,)
+    )).fetchone()
+    assert row["attempt_count"] == 8
+    assert row["last_error"] == "[terminal] RuntimeError: offline"
+    assert row["next_attempt_at"] == TERMINAL_RETRY_AT
+    assert await worker.run_once() == 0
     await db.close()
 
 

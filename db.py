@@ -1,9 +1,12 @@
 import asyncio
+import hashlib
 from functools import wraps
 import json
 import logging
 import os
+import re
 import uuid
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -18,6 +21,37 @@ log = logging.getLogger(__name__)
 
 class TransactionConflictError(ValueError):
     """Raised when a client edits a transaction from an obsolete revision."""
+
+
+class TransactionPreconditionRequiredError(ValueError):
+    """Raised when an API mutation omits the required server revision."""
+
+
+class SelfTransferMatchAmbiguousError(ValueError):
+    """Raised when an unreferenced capture has multiple canonical matches."""
+
+
+@dataclass(frozen=True)
+class AndroidSelfTransferOutcome:
+    transaction: dict[str, Any]
+    created: bool
+    code: str
+    action: str
+
+
+def _transfer_evidence_key(scheme: str, reference: str) -> tuple[str, str]:
+    """Return a non-reversible key for an explicitly labelled bank reference."""
+    if not isinstance(scheme, str) or scheme.strip().lower() != "bank_reference":
+        raise ValueError("Unsupported self-transfer evidence scheme")
+    if not isinstance(reference, str):
+        raise ValueError("Self-transfer reference must be a string")
+    normalized = re.sub(r"[^A-Z0-9]", "", reference.upper())
+    if not 6 <= len(normalized) <= 96:
+        raise ValueError("Self-transfer reference must contain 6-96 letters or digits")
+    digest = hashlib.sha256(
+        f"self-transfer-v1\0bank_reference\0{normalized}".encode()
+    ).hexdigest()
+    return "bank_reference", f"self-transfer-v1:{digest}"
 
 
 def _serialize_write(method):
@@ -513,6 +547,65 @@ class Database:
             )
             await self._conn.commit()
 
+        cur = await self._conn.execute("SELECT 1 FROM schema_migrations WHERE version = 9")
+        if await cur.fetchone() is None:
+            await self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS self_transfer_correlations (
+                    user_id INTEGER NOT NULL,
+                    evidence_key TEXT NOT NULL,
+                    evidence_scheme TEXT NOT NULL,
+                    capture_transaction_id TEXT REFERENCES transactions(id),
+                    canonical_transaction_id TEXT REFERENCES transactions(id),
+                    conflict_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, evidence_key)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_self_transfer_capture
+                    ON self_transfer_correlations(capture_transaction_id)
+                    WHERE capture_transaction_id IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_self_transfer_canonical
+                    ON self_transfer_correlations(canonical_transaction_id)
+                    WHERE canonical_transaction_id IS NOT NULL;
+                """
+            )
+            await self._conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (9, ?)",
+                (datetime.now(timezone.utc).isoformat(),),
+            )
+            await self._conn.commit()
+
+        cur = await self._conn.execute("SELECT 1 FROM schema_migrations WHERE version = 10")
+        if await cur.fetchone() is None:
+            # Earlier self-transfer releases used expense/income for principal
+            # legs without a role marker. Reclassify them as non-spending
+            # principal rows and park unsupported Notion jobs.
+            await self._conn.execute(
+                "ALTER TABLE transactions ADD COLUMN ledger_role TEXT NOT NULL DEFAULT 'ordinary'"
+            )
+            await self._conn.execute(
+                "ALTER TABLE transactions ADD COLUMN transfer_bundle_id TEXT"
+            )
+            await self._conn.execute(
+                "ALTER TABLE transactions ADD COLUMN transfer_leg TEXT"
+            )
+            await self._conn.execute(
+                "UPDATE transactions SET ledger_role='self_transfer_principal',"
+                "transfer_leg=CASE WHEN description LIKE '%(keluar)' THEN 'outgoing' "
+                "WHEN description LIKE '%(masuk)' THEN 'incoming' ELSE transfer_leg END "
+                "WHERE description LIKE 'Transfer antar rekening — %'"
+            )
+            await self._conn.execute(
+                "DELETE FROM sync_outbox WHERE completed_at IS NULL "
+                "AND transaction_id IN (SELECT id FROM transactions WHERE ledger_role='self_transfer_principal')"
+            )
+            await self._conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (10, ?)",
+                (datetime.now(timezone.utc).isoformat(),),
+            )
+            await self._conn.commit()
+
         # Add merchant column to user_undo if missing
         try:
             await self._conn.execute("SELECT merchant FROM user_undo LIMIT 1")
@@ -721,9 +814,17 @@ class Database:
 
     @_serialize_write
     async def clear_email_processing_failure(self, uid: str) -> bool:
-        """Allow an operator to retry a degraded or terminal email UID."""
+        """Allow retry only when the UID was not deterministically rejected.
+
+        Rejected messages intentionally exist in both processed_emails (to
+        exclude them from polling) and email_processing_failures (for audit).
+        Clearing only their failure row would claim to enable a retry while
+        leaving the UID excluded and erasing the rejection evidence.
+        """
         cur = await self._conn.execute(
-            "DELETE FROM email_processing_failures WHERE uid=?", (uid,)
+            "DELETE FROM email_processing_failures WHERE uid=? "
+            "AND NOT EXISTS (SELECT 1 FROM processed_emails WHERE uid=?)",
+            (uid, uid),
         )
         await self._conn.commit()
         return cur.rowcount > 0
@@ -1166,12 +1267,17 @@ class Database:
             where += " AND (updated_at > ? OR (updated_at = ? AND id > ?))"
             params.extend([after_updated_at, after_updated_at, after_id])
         params.append(limit + 1)
-        cur = await self._conn.execute(
-            f"SELECT * FROM transactions WHERE {where} "
-            "ORDER BY updated_at ASC, id ASC LIMIT ?",
-            params,
-        )
-        return [dict(row) for row in await cur.fetchall()]
+        # The change feed and its cursor must never observe this shared
+        # connection between a writer's BEGIN and commit/rollback. SQLite
+        # connections see their own uncommitted writes, so an unlocked read
+        # could otherwise publish a revision that is subsequently rolled back.
+        async with self._write_lock:
+            cur = await self._conn.execute(
+                f"SELECT * FROM transactions WHERE {where} "
+                "ORDER BY updated_at ASC, id ASC LIMIT ?",
+                params,
+            )
+            return [dict(row) for row in await cur.fetchall()]
 
     async def find_transaction_by_notion_page_id(
         self, user_id: int, notion_page_id: str
@@ -1273,6 +1379,537 @@ class Database:
             raise
 
     @_serialize_write
+    async def ingest_android_self_transfer(
+        self,
+        user_id: int,
+        *,
+        kind: str = "income",
+        amount_idr: int,
+        occurred_on: str,
+        description: str,
+        source_ref: str,
+        evidence_scheme: str | None = None,
+        evidence_reference: str | None = None,
+        merchant: str = "",
+        category: str = "",
+        subcategory: str = "",
+        account: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> AndroidSelfTransferOutcome:
+        """Stage one transfer leg until the matching bank email proves it.
+
+        Transfer principal keeps its directional ``kind`` for compatibility;
+        ``ledger_role`` marks it as a non-spending principal leg.
+        """
+        if kind not in {"expense", "income"}:
+            raise ValueError("Self-transfer kind must be expense or income")
+        if isinstance(amount_idr, bool) or not isinstance(amount_idr, int) or amount_idr <= 0:
+            raise ValueError("amount_idr must be a positive integer")
+        occurred_on = _canonical_occurred_on(occurred_on)
+        source_ref = source_ref.strip()
+        if not source_ref:
+            raise ValueError("source_ref is required")
+        if (evidence_scheme is None) != (evidence_reference is None):
+            raise ValueError("Self-transfer evidence is incomplete")
+        evidence_key = None
+        if evidence_scheme is not None and evidence_reference is not None:
+            evidence_scheme, evidence_key = _transfer_evidence_key(
+                evidence_scheme, evidence_reference
+            )
+        now = datetime.now(timezone.utc).isoformat()
+
+        def compatible(row: Any) -> bool:
+            return (
+                row["kind"] == kind
+                and row["ledger_role"] == "self_transfer_principal"
+                and row["amount_idr"] == amount_idr
+                and row["account"].strip().casefold() == account.strip().casefold()
+            )
+
+        async def canonical_matches() -> list[Any]:
+            direction = "(masuk)" if kind == "income" else "(keluar)"
+            return await (
+                await self._conn.execute(
+                    "SELECT * FROM transactions WHERE user_id=? AND kind=? "
+                    "AND ledger_role='self_transfer_principal' "
+                    "AND status='confirmed' AND amount_idr=? AND occurred_on=? "
+                    "AND account=? AND description LIKE ? "
+                    "AND (source='bank_email' OR EXISTS ("
+                    "SELECT 1 FROM transaction_events e WHERE e.transaction_id=transactions.id "
+                    "AND e.event_type IN ('self_transfer_capture','self_transfer_canonicalized'))) "
+                    "ORDER BY created_at ASC",
+                    (
+                        user_id,
+                        kind,
+                        amount_idr,
+                        occurred_on,
+                        account.strip(),
+                        f"Transfer antar rekening — % {direction}",
+                    ),
+                )
+            ).fetchall()
+
+        await self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            correlation = await (
+                await self._conn.execute(
+                    "SELECT * FROM self_transfer_correlations "
+                    "WHERE user_id=? AND evidence_key=?",
+                    (user_id, evidence_key),
+                )
+            ).fetchone()
+            if correlation is not None:
+                transaction_id = (
+                    correlation["canonical_transaction_id"]
+                    or correlation["capture_transaction_id"]
+                )
+                row = await (
+                    await self._conn.execute(
+                        "SELECT * FROM transactions WHERE id=? AND user_id=?",
+                        (transaction_id, user_id),
+                    )
+                ).fetchone()
+                if row is None:
+                    raise RuntimeError("Self-transfer correlation points to a missing transaction")
+                if correlation["conflict_reason"] or not compatible(row):
+                    if not correlation["conflict_reason"]:
+                        await self._conn.execute(
+                            "UPDATE self_transfer_correlations SET conflict_reason=?,updated_at=? "
+                            "WHERE user_id=? AND evidence_key=?",
+                            ("evidence_payload_conflict", now, user_id, evidence_key),
+                        )
+                        await self._conn.commit()
+                    else:
+                        await self._conn.rollback()
+                    return AndroidSelfTransferOutcome(
+                        dict(row), False, "evidence_conflict", "keep_review"
+                    )
+                await self._conn.rollback()
+                if correlation["canonical_transaction_id"]:
+                    return AndroidSelfTransferOutcome(
+                        dict(row), False, "reused_canonical_transfer", "finalize"
+                    )
+                return AndroidSelfTransferOutcome(
+                    dict(row), False, "awaiting_canonical_email", "keep_review"
+                )
+
+            existing = await (
+                await self._conn.execute(
+                    "SELECT * FROM transactions WHERE user_id=? "
+                    "AND source='android_notification' AND source_ref=?",
+                    (user_id, source_ref),
+                )
+            ).fetchone()
+            if existing is not None:
+                if existing["status"] == "confirmed":
+                    await self._conn.rollback()
+                    return AndroidSelfTransferOutcome(
+                        dict(existing), False, "reused_canonical_transfer", "finalize"
+                    )
+                if evidence_key is None:
+                    matches = await canonical_matches()
+                    if len(matches) > 1:
+                        await self._conn.rollback()
+                        raise SelfTransferMatchAmbiguousError(
+                            "Multiple canonical self-transfer records match this capture"
+                        )
+                    if matches:
+                        await self._conn.rollback()
+                        return AndroidSelfTransferOutcome(
+                            dict(matches[0]), False, "reused_canonical_transfer", "finalize"
+                        )
+                await self._conn.rollback()
+                return AndroidSelfTransferOutcome(
+                    dict(existing), False, "awaiting_canonical_email", "keep_review"
+                )
+
+            if evidence_key is None:
+                matches = await canonical_matches()
+                if len(matches) > 1:
+                    await self._conn.rollback()
+                    raise SelfTransferMatchAmbiguousError(
+                        "Multiple canonical self-transfer records match this capture"
+                    )
+                if matches:
+                    await self._conn.rollback()
+                    return AndroidSelfTransferOutcome(
+                        dict(matches[0]), False, "reused_canonical_transfer", "finalize"
+                    )
+
+            tx_id = str(uuid.uuid4())
+            await self._conn.execute(
+                "INSERT INTO transactions "
+                "(id,user_id,kind,ledger_role,status,amount_idr,occurred_on,description,merchant,"
+                "category,subcategory,account,source,source_ref,created_at,updated_at) "
+                "VALUES (?,?,?,'self_transfer_principal','pending',?,?,?,?,?,?,?,'android_notification',?,?,?)",
+                (
+                    tx_id, user_id, kind, amount_idr, occurred_on, description.strip(),
+                    merchant.strip(), category.strip(), subcategory.strip(), account.strip(),
+                    source_ref, now, now,
+                ),
+            )
+            event_metadata = dict(metadata or {})
+            event_metadata.update(
+                {
+                    "self_transfer": True,
+                    "capture_kind": kind,
+                    "transfer_evidence_key": evidence_key,
+                }
+            )
+            await self._conn.execute(
+                "INSERT INTO transaction_events "
+                "(transaction_id,event_type,metadata_json,created_at) "
+                "VALUES (?,'self_transfer_capture',?,?)",
+                (tx_id, json.dumps(event_metadata, ensure_ascii=False), now),
+            )
+            if evidence_key:
+                await self._conn.execute(
+                    "INSERT INTO self_transfer_correlations "
+                    "(user_id,evidence_key,evidence_scheme,capture_transaction_id,"
+                    "created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                    (user_id, evidence_key, evidence_scheme, tx_id, now, now),
+                )
+            await self._conn.commit()
+            row = await (
+                await self._conn.execute("SELECT * FROM transactions WHERE id=?", (tx_id,))
+            ).fetchone()
+            return AndroidSelfTransferOutcome(
+                dict(row), True, "awaiting_canonical_email", "keep_review"
+            )
+        except Exception:
+            await self._conn.rollback()
+            raise
+
+    @_serialize_write
+    async def create_confirmed_self_transfer(
+        self,
+        user_id: int,
+        *,
+        amount_idr: int,
+        admin_fee_idr: int,
+        occurred_on: str,
+        outgoing_description: str,
+        incoming_description: str,
+        fee_description: str,
+        outgoing_subcategory: str,
+        incoming_subcategory: str,
+        source_account: str,
+        destination_account: str,
+        email_uid: str,
+        sender: str,
+        evidence_scheme: str | None = None,
+        evidence_reference: str | None = None,
+    ) -> dict[str, dict[str, Any] | None]:
+        """Atomically create a self-transfer bundle and correlate its incoming leg."""
+        if isinstance(amount_idr, bool) or not isinstance(amount_idr, int) or amount_idr <= 0:
+            raise ValueError("amount_idr must be a positive integer")
+        if isinstance(admin_fee_idr, bool) or not isinstance(admin_fee_idr, int) or admin_fee_idr < 0:
+            raise ValueError("admin_fee_idr must be a nonnegative integer")
+        occurred_on = _canonical_occurred_on(occurred_on)
+        email_uid = email_uid.strip()
+        if not email_uid:
+            raise ValueError("email_uid is required")
+        evidence_key = None
+        if evidence_scheme is not None or evidence_reference is not None:
+            if evidence_scheme is None or evidence_reference is None:
+                raise ValueError("Self-transfer evidence is incomplete")
+            evidence_scheme, evidence_key = _transfer_evidence_key(
+                evidence_scheme, evidence_reference
+            )
+        now = datetime.now(timezone.utc).isoformat()
+        transfer_bundle_id = "self-transfer-" + hashlib.sha256(
+            f"{user_id}:{email_uid}".encode()
+        ).hexdigest()[:32]
+
+        await self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            async def existing_source(source_ref: str) -> Any:
+                return await (
+                    await self._conn.execute(
+                        "SELECT * FROM transactions WHERE user_id=? "
+                        "AND source='bank_email' AND source_ref=?",
+                        (user_id, source_ref),
+                    )
+                ).fetchone()
+
+            async def insert_confirmed(
+                *, kind: str, amount: int, description: str,
+                subcategory: str, account: str, source_ref: str, component: str,
+                ledger_role: str = "ordinary", transfer_bundle_id: str | None = None,
+                transfer_leg: str | None = None,
+            ) -> Any:
+                existing = await existing_source(source_ref)
+                if existing is not None:
+                    return existing
+                tx_id = str(uuid.uuid4())
+                await self._conn.execute(
+                    "INSERT INTO transactions "
+                    "(id,user_id,kind,ledger_role,transfer_bundle_id,transfer_leg,status,"
+                    "amount_idr,occurred_on,description,merchant,"
+                    "category,subcategory,account,source,source_ref,created_at,updated_at,confirmed_at) "
+                    "VALUES (?,?,?,?,?,?,'confirmed',?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        tx_id, user_id, kind, ledger_role, transfer_bundle_id, transfer_leg,
+                        amount, occurred_on, description, "", "", subcategory, account,
+                        "bank_email", source_ref, now, now, now,
+                    ),
+                )
+                event_metadata = {
+                    "email_uid": email_uid,
+                    "sender": sender,
+                    "component": component,
+                }
+                if transfer_bundle_id:
+                    event_metadata["transfer_bundle_id"] = transfer_bundle_id
+                if evidence_key:
+                    event_metadata["transfer_evidence_key"] = evidence_key
+                await self._conn.execute(
+                    "INSERT INTO transaction_events "
+                    "(transaction_id,event_type,metadata_json,created_at) "
+                    "VALUES (?,'confirmed_external',?,?)",
+                    (tx_id, json.dumps(event_metadata, ensure_ascii=False), now),
+                )
+                if ledger_role != "self_transfer_principal":
+                    await self._conn.execute(
+                        "INSERT INTO sync_outbox "
+                        "(transaction_id,operation,created_at,updated_at) "
+                        "VALUES (?,'upsert',?,?)",
+                        (tx_id, now, now),
+                    )
+                return await (
+                    await self._conn.execute("SELECT * FROM transactions WHERE id=?", (tx_id,))
+                ).fetchone()
+
+            correlation = None
+            if evidence_key:
+                correlation = await (
+                    await self._conn.execute(
+                        "SELECT * FROM self_transfer_correlations "
+                        "WHERE user_id=? AND evidence_key=?",
+                        (user_id, evidence_key),
+                    )
+                ).fetchone()
+
+            async def capture_direction(capture: Any) -> str | None:
+                event = await (
+                    await self._conn.execute(
+                        "SELECT metadata_json FROM transaction_events "
+                        "WHERE transaction_id=? AND event_type='self_transfer_capture' "
+                        "ORDER BY created_at DESC, id DESC LIMIT 1",
+                        (capture["id"],),
+                    )
+                ).fetchone()
+                metadata = json.loads(event["metadata_json"] or "{}") if event else {}
+                return metadata.get("capture_kind") or {
+                    "income": "income",
+                    "expense": "expense",
+                }.get(capture["kind"])
+
+            async def pending_capture(capture_kind: str, account_name: str) -> list[Any]:
+                rows = await (
+                    await self._conn.execute(
+                        "SELECT t.* FROM transactions t "
+                        "WHERE t.user_id=? AND t.source='android_notification' "
+                        "AND t.status='pending' AND t.kind=? "
+                        "AND t.ledger_role='self_transfer_principal' "
+                        "AND t.amount_idr=? AND t.occurred_on=? "
+                        "AND lower(t.account)=lower(?) "
+                        "AND EXISTS (SELECT 1 FROM transaction_events e "
+                        "WHERE e.transaction_id=t.id AND e.event_type='self_transfer_capture') "
+                        "ORDER BY t.created_at ASC, t.id ASC",
+                        (user_id, capture_kind, amount_idr, occurred_on, account_name.strip()),
+                    )
+                ).fetchall()
+                return [
+                    row for row in rows
+                    if await capture_direction(row) == capture_kind
+                ]
+
+            async def canonicalize_capture(
+                capture: Any,
+                *,
+                description: str,
+                subcategory: str,
+                account: str,
+                kind: str,
+                leg: str,
+                component: str,
+            ) -> Any:
+                await self._conn.execute(
+                    "UPDATE transactions SET kind=?,ledger_role='self_transfer_principal',"
+                    "transfer_bundle_id=?,transfer_leg=?,status='confirmed',amount_idr=?,occurred_on=?,"
+                    "description=?,merchant='',category='',subcategory=?,account=?,"
+                    "confirmed_at=COALESCE(confirmed_at,?),updated_at=? WHERE id=?",
+                    (
+                        kind, transfer_bundle_id, leg, amount_idr, occurred_on,
+                        description, subcategory, account, now, now,
+                        capture["id"],
+                    ),
+                )
+                await self._conn.execute(
+                    "INSERT INTO transaction_events "
+                    "(transaction_id,event_type,metadata_json,created_at) "
+                    "VALUES (?,'self_transfer_canonicalized',?,?)",
+                    (
+                        capture["id"],
+                        json.dumps(
+                            {
+                                "email_uid": email_uid,
+                                "sender": sender,
+                                "component": component,
+                                "transfer_evidence_key": evidence_key,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        now,
+                    ),
+                )
+                # Transfer principal is authoritative in SQLite/API but has no
+                # matching Notion database. Only the admin fee is synced there.
+                return await (
+                    await self._conn.execute(
+                        "SELECT * FROM transactions WHERE id=?", (capture["id"],)
+                    )
+                ).fetchone()
+
+            correlation_capture = None
+            if correlation and correlation["capture_transaction_id"]:
+                correlation_capture = await (
+                    await self._conn.execute(
+                        "SELECT * FROM transactions WHERE id=? AND user_id=?",
+                        (correlation["capture_transaction_id"], user_id),
+                    )
+                ).fetchone()
+
+            outgoing_capture = None
+            incoming_capture = None
+            conflict_reason = None
+            if correlation_capture is not None:
+                direction = await capture_direction(correlation_capture)
+                compatible = (
+                    correlation_capture["kind"] in {"expense", "income"}
+                    and correlation_capture["ledger_role"] == "self_transfer_principal"
+                    and correlation_capture["amount_idr"] == amount_idr
+                )
+                if compatible and direction == "expense" and correlation_capture["account"].strip().casefold() == source_account.strip().casefold():
+                    outgoing_capture = correlation_capture
+                elif compatible and direction == "income" and correlation_capture["account"].strip().casefold() == destination_account.strip().casefold():
+                    incoming_capture = correlation_capture
+                else:
+                    conflict_reason = "evidence_payload_conflict"
+            elif evidence_key is None:
+                outgoing_candidates = await pending_capture("expense", source_account)
+                incoming_candidates = await pending_capture("income", destination_account)
+                if len(outgoing_candidates) > 1:
+                    conflict_reason = "ambiguous_android_outgoing_capture"
+                elif outgoing_candidates:
+                    outgoing_capture = outgoing_candidates[0]
+                if len(incoming_candidates) > 1:
+                    conflict_reason = conflict_reason or "ambiguous_android_incoming_capture"
+                elif incoming_candidates:
+                    incoming_capture = incoming_candidates[0]
+
+            if outgoing_capture is not None:
+                outgoing = await canonicalize_capture(
+                    outgoing_capture,
+                    description=outgoing_description,
+                    subcategory=outgoing_subcategory,
+                    account=source_account,
+                    kind="expense",
+                    leg="outgoing",
+                    component="transfer-out",
+                )
+            else:
+                outgoing = await insert_confirmed(
+                    kind="expense", amount=amount_idr,
+                    description=outgoing_description, subcategory=outgoing_subcategory,
+                    account=source_account, source_ref=f"gmail:{email_uid}:transfer-out",
+                    ledger_role="self_transfer_principal",
+                    transfer_bundle_id=transfer_bundle_id,
+                    transfer_leg="outgoing",
+                    component="transfer-out",
+                )
+
+            incoming = None
+            if incoming_capture is not None:
+                incoming = await canonicalize_capture(
+                    incoming_capture,
+                    description=incoming_description,
+                    subcategory=incoming_subcategory,
+                    account=destination_account,
+                    kind="income",
+                    leg="incoming",
+                    component="transfer-in",
+                )
+            elif correlation and correlation["canonical_transaction_id"]:
+                incoming = await (
+                    await self._conn.execute(
+                        "SELECT * FROM transactions WHERE id=? AND user_id=?",
+                        (correlation["canonical_transaction_id"], user_id),
+                    )
+                ).fetchone()
+
+            if incoming is None:
+                incoming = await insert_confirmed(
+                    kind="income", amount=amount_idr,
+                    description=incoming_description,
+                    subcategory=incoming_subcategory,
+                    account=destination_account,
+                    source_ref=f"gmail:{email_uid}:transfer-in",
+                    ledger_role="self_transfer_principal",
+                    transfer_bundle_id=transfer_bundle_id,
+                    transfer_leg="incoming",
+                    component="transfer-in",
+                )
+
+            if evidence_key:
+                canonical_id = (
+                    correlation["canonical_transaction_id"]
+                    if correlation and correlation["canonical_transaction_id"]
+                    else outgoing["id"] if outgoing_capture is not None
+                    else incoming["id"] if incoming_capture is not None
+                    else incoming["id"]
+                )
+                capture_id = (
+                    correlation["capture_transaction_id"] if correlation else None
+                )
+                await self._conn.execute(
+                    "INSERT INTO self_transfer_correlations "
+                    "(user_id,evidence_key,evidence_scheme,capture_transaction_id,"
+                    "canonical_transaction_id,conflict_reason,created_at,updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(user_id,evidence_key) DO UPDATE SET "
+                    "canonical_transaction_id=excluded.canonical_transaction_id,"
+                    "conflict_reason=COALESCE(self_transfer_correlations.conflict_reason,excluded.conflict_reason),"
+                    "updated_at=excluded.updated_at",
+                    (
+                        user_id, evidence_key, evidence_scheme, capture_id,
+                        canonical_id, conflict_reason, now, now,
+                    ),
+                )
+
+            fee = None
+            if admin_fee_idr:
+                fee = await insert_confirmed(
+                    kind="expense", amount=admin_fee_idr,
+                    description=fee_description, subcategory=outgoing_subcategory,
+                    account=source_account, source_ref=f"gmail:{email_uid}:fee",
+                    ledger_role="self_transfer_fee",
+                    transfer_bundle_id=transfer_bundle_id,
+                    transfer_leg="fee",
+                    component="fee",
+                )
+            await self._conn.commit()
+            return {
+                "outgoing": dict(outgoing),
+                "incoming": dict(incoming),
+                "fee": dict(fee) if fee is not None else None,
+            }
+        except Exception:
+            await self._conn.rollback()
+            raise
+
+    @_serialize_write
     async def create_confirmed_external_transaction(
         self,
         user_id: int,
@@ -1289,6 +1926,9 @@ class Database:
         account: str = "",
         recurring_page_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        ledger_role: str = "ordinary",
+        transfer_bundle_id: str | None = None,
+        transfer_leg: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Atomically store an already-confirmed external record and queue sync."""
         if kind not in {"expense", "income"}:
@@ -1315,14 +1955,17 @@ class Database:
             tx_id = str(uuid.uuid4())
             await self._conn.execute(
                 "INSERT INTO transactions "
-                "(id,user_id,kind,status,amount_idr,occurred_on,description,"
+                "(id,user_id,kind,ledger_role,transfer_bundle_id,transfer_leg,status,amount_idr,occurred_on,description,"
                 "merchant,category,subcategory,account,source,source_ref,"
                 "recurring_page_id,created_at,updated_at,confirmed_at) "
-                "VALUES (?,?,?,'confirmed',?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?, 'confirmed',?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     tx_id,
                     user_id,
                     kind,
+                    ledger_role,
+                    transfer_bundle_id,
+                    transfer_leg,
                     amount_idr,
                     occurred_on,
                     description,
@@ -1348,12 +1991,13 @@ class Database:
                     now,
                 ),
             )
-            await self._conn.execute(
-                "INSERT INTO sync_outbox "
-                "(transaction_id,operation,created_at,updated_at) "
-                "VALUES (?,'upsert',?,?)",
-                (tx_id, now, now),
-            )
+            if ledger_role != "self_transfer_principal":
+                await self._conn.execute(
+                    "INSERT INTO sync_outbox "
+                    "(transaction_id,operation,created_at,updated_at) "
+                    "VALUES (?,'upsert',?,?)",
+                    (tx_id, now, now),
+                )
             await self._conn.commit()
             cur = await self._conn.execute(
                 "SELECT * FROM transactions WHERE id=?", (tx_id,)
@@ -1421,6 +2065,7 @@ class Database:
         changes: dict[str, Any],
         *,
         expected_updated_at: str | None = None,
+        require_expected_revision: bool = False,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Atomically edit a ledger row and queue a Notion upsert.
 
@@ -1465,6 +2110,11 @@ class Database:
                 return None, False
             if row["status"] != "confirmed":
                 raise ValueError("Only confirmed transactions can be updated")
+            if require_expected_revision and expected_updated_at is None:
+                await self._conn.rollback()
+                raise TransactionPreconditionRequiredError(
+                    "Transaction revision is required"
+                )
             if expected_updated_at is not None and expected_updated_at != row["updated_at"]:
                 await self._conn.rollback()
                 raise TransactionConflictError(
@@ -1524,6 +2174,7 @@ class Database:
         transaction_id: str,
         *,
         expected_updated_at: str | None = None,
+        require_expected_revision: bool = False,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Atomically void a transaction and enqueue a Notion archive.
 
@@ -1545,6 +2196,15 @@ class Database:
             if row["status"] == "voided":
                 await self._conn.rollback()
                 return dict(row), False
+            if (
+                require_expected_revision
+                and row["status"] == "confirmed"
+                and expected_updated_at is None
+            ):
+                await self._conn.rollback()
+                raise TransactionPreconditionRequiredError(
+                    "Transaction revision is required"
+                )
             if expected_updated_at is not None and expected_updated_at != row["updated_at"]:
                 await self._conn.rollback()
                 raise TransactionConflictError(

@@ -123,6 +123,7 @@ async def reconcile_transactions(
     cursor = await database._conn.execute(
         "SELECT id, kind, status, notion_page_id FROM transactions "
         "WHERE user_id=? AND kind IN ('expense', 'income') "
+        "AND ledger_role != 'self_transfer_principal' "
         "AND status IN ('confirmed', 'voided')",
         (user_id,),
     )

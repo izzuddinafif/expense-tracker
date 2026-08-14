@@ -1,6 +1,7 @@
 package com.afif.expensetracker
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
@@ -78,13 +79,17 @@ class NotificationReviewUiTest {
         compose.onNodeWithTag("inbox_item_$sourceRef").assertIsDisplayed()
         compose.onNodeWithTag("confirm_$sourceRef").performClick()
         compose.onNodeWithTag("review_merchant").assertIsDisplayed()
+        compose.onNodeWithTag("review_sticky_footer").assertIsDisplayed()
+        compose.onNodeWithTag("review_bottom_scroll_cue").assertIsDisplayed()
 
         replace("review_merchant", "Corrected merchant")
         replace("review_amount", "98765")
         replace("review_date", "2026-07-29")
         replace("review_description", "Corrected purchase description")
         replace("review_category", "Groceries")
-        replace("review_account", "Jago")
+        compose.onNodeWithTag("review_account").performScrollTo().assertIsDisplayed().performClick()
+        compose.onNodeWithTag("review_account_jago").assertIsDisplayed().performClick()
+        compose.onNodeWithTag("review_sticky_footer").assertIsDisplayed()
         compose.onNodeWithTag("review_save").performClick()
 
         val transactionId = "android-$sourceRef"
@@ -123,6 +128,53 @@ class NotificationReviewUiTest {
             assertEquals("Jago", payload.getString("account"))
             assertEquals(sourceRef, payload.getString("source_ref"))
             assertEquals(true, payload.getBoolean("confirm"))
+        }
+    }
+
+    @Test
+    fun creditNotificationDefaultsToIncomeAndQueuesPositiveAmount() {
+        val sourceRef = "review-ui-credit-1"
+        runBlocking(Dispatchers.IO) {
+            database.notificationDao().enqueue(
+                NotificationRecord(
+                    sourceRef = sourceRef,
+                    packageName = "id.bmri.livin",
+                    title = "Incoming transfer",
+                    body = "Dana masuk Rp2.000.000 dari EMPLOYER",
+                    amountIdr = 2_000_000L,
+                    merchant = "EMPLOYER",
+                    bank = "LIVIN_MANDIRI",
+                    direction = "CREDIT",
+                    occurredOn = "2026-08-14",
+                    reviewRequired = true,
+                ),
+            )
+        }
+
+        compose.onNodeWithTag("nav_inbox").performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag("inbox_item_$sourceRef")
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag("confirm_$sourceRef").performClick()
+        compose.onNodeWithTag("review_kind_income").assertIsSelected()
+        compose.onNodeWithTag("review_self_transfer").performScrollTo().performClick()
+        compose.onNodeWithTag("review_save").performClick()
+
+        val transactionId = "android-$sourceRef"
+        compose.waitUntil(timeoutMillis = 10_000) {
+            runBlocking(Dispatchers.IO) {
+                database.transactionDao().findById(transactionId) != null &&
+                    database.notificationDao().findBySourceRef(sourceRef)?.status == "confirmed"
+            }
+        }
+        runBlocking(Dispatchers.IO) {
+            assertEquals(2_000_000L, database.transactionDao().findById(transactionId)?.amountMinor)
+            val operation = database.syncDao().findLatest("transaction", transactionId)
+            assertNotNull(operation)
+            val payload = JSONObject(operation?.payload.orEmpty())
+            assertEquals("income", payload.getString("kind"))
+            assertEquals(true, payload.getBoolean("self_transfer"))
         }
     }
 

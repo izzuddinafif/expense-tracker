@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 import pytest_asyncio
 from aiohttp import web
@@ -154,6 +156,17 @@ async def test_transaction_can_be_edited_and_voided(api_client):
     )
     await db.mark_notion_sync_success(row["id"], "notion-page-edit")
     headers = {"Authorization": "Bearer test-device-token"}
+    current = await db.find_transaction_by_id(7, row["id"])
+
+    missing_edit_revision = await client.patch(
+        f"/api/v1/transactions/{row['id']}",
+        headers=headers,
+        json={"merchant": "Unfenced edit"},
+    )
+    assert missing_edit_revision.status == 428
+    assert (await missing_edit_revision.json())["error"] == (
+        "Transaction revision is required"
+    )
 
     edited = await client.patch(
         f"/api/v1/transactions/{row['id']}",
@@ -162,6 +175,7 @@ async def test_transaction_can_be_edited_and_voided(api_client):
             "amount_idr": 30_000,
             "merchant": "Warung Baru",
             "occurred_on": "2026-07-28",
+            "expected_updated_at": current["updated_at"],
         },
     )
     assert edited.status == 200
@@ -177,6 +191,27 @@ async def test_transaction_can_be_edited_and_voided(api_client):
         "transaction"
     ]["updated_at"]
 
+    stale_edit = await client.patch(
+        f"/api/v1/transactions/{row['id']}",
+        headers=headers,
+        json={
+            "merchant": "Stale edit",
+            "expected_updated_at": current["updated_at"],
+        },
+    )
+    assert stale_edit.status == 409
+    assert (await stale_edit.json())["error"] == (
+        "Transaction changed on the server; reload it before editing"
+    )
+
+    missing_void_revision = await client.delete(
+        f"/api/v1/transactions/{row['id']}", headers=headers
+    )
+    assert missing_void_revision.status == 428
+    assert (await missing_void_revision.json())["error"] == (
+        "Transaction revision is required"
+    )
+
     stale_void = await client.delete(
         f"/api/v1/transactions/{row['id']}",
         headers={**headers, "If-Match": "2000-01-01T00:00:00+00:00"},
@@ -189,12 +224,19 @@ async def test_transaction_can_be_edited_and_voided(api_client):
     invalid = await client.patch(
         f"/api/v1/transactions/{row['id']}",
         headers=headers,
-        json={"kind": "income"},
+        json={
+            "kind": "income",
+            "expected_updated_at": edited_body["transaction"]["updated_at"],
+        },
     )
     assert invalid.status == 400
 
     voided = await client.delete(
-        f"/api/v1/transactions/{row['id']}", headers=headers
+        f"/api/v1/transactions/{row['id']}",
+        headers={
+            **headers,
+            "If-Match": edited_body["transaction"]["updated_at"],
+        },
     )
     assert voided.status == 200
     body = await voided.json()
@@ -329,6 +371,63 @@ async def test_transaction_change_feed_rejects_invalid_cursor_and_requires_auth(
 
 
 @pytest.mark.asyncio
+async def test_transaction_change_feed_waits_for_rollback_before_checkpoint(api_client):
+    client, db = api_client
+    row, _ = await db.create_confirmed_external_transaction(
+        7,
+        kind="expense",
+        amount_idr=42_000,
+        occurred_on="2026-07-29",
+        description="Committed description",
+        source="manual",
+        source_ref="change:rollback",
+    )
+    committed_revision = row["updated_at"]
+    write_started = asyncio.Event()
+    allow_rollback = asyncio.Event()
+
+    async def rollback_writer() -> None:
+        async with db._write_lock:
+            await db._conn.execute("BEGIN IMMEDIATE")
+            await db._conn.execute(
+                "UPDATE transactions SET description=?,updated_at=? WHERE id=?",
+                ("Phantom description", "2099-01-01T00:00:00+00:00", row["id"]),
+            )
+            write_started.set()
+            await allow_rollback.wait()
+            await db._conn.rollback()
+
+    writer = asyncio.create_task(rollback_writer())
+    await write_started.wait()
+    response_task = asyncio.create_task(
+        client.get(
+            "/api/v1/transactions/changes",
+            headers={"Authorization": "Bearer test-device-token"},
+        )
+    )
+    await asyncio.sleep(0.05)
+    read_waited_for_writer = not response_task.done()
+    allow_rollback.set()
+    await writer
+    response = await response_task
+
+    assert read_waited_for_writer
+    assert response.status == 200
+    body = await response.json()
+    assert len(body["transactions"]) == 1
+    assert body["transactions"][0]["description"] == "Committed description"
+    assert body["transactions"][0]["updated_at"] == committed_revision
+    assert body["checkpoint_cursor"]
+
+    after_checkpoint = await client.get(
+        "/api/v1/transactions/changes?cursor=" + body["checkpoint_cursor"],
+        headers={"Authorization": "Bearer test-device-token"},
+    )
+    assert after_checkpoint.status == 200
+    assert (await after_checkpoint.json())["transactions"] == []
+
+
+@pytest.mark.asyncio
 async def test_email_failures_are_visible_and_retryable(api_client):
     client, db = api_client
     for _ in range(3):
@@ -354,6 +453,136 @@ async def test_email_failures_are_visible_and_retryable(api_client):
     assert (
         await client.post("/api/v1/email-failures/99123/retry", headers=headers)
     ).status == 404
+
+
+@pytest.mark.asyncio
+async def test_android_self_transfer_reuses_email_canonical_record(api_client):
+    client, db = api_client
+    canonical, _ = await db.create_confirmed_external_transaction(
+        7,
+        kind="income",
+        amount_idr=2_000_000,
+        occurred_on="2026-08-14",
+        description="Transfer antar rekening — Mandiri → Jago (masuk)",
+        account="Jago",
+        source="bank_email",
+        source_ref="gmail:transfer-1:transfer-in",
+        ledger_role="self_transfer_principal",
+        transfer_bundle_id="self-transfer-test-1",
+        transfer_leg="incoming",
+    )
+
+    response = await client.post(
+        "/api/v1/transactions",
+        headers={
+            "Authorization": "Bearer test-device-token",
+            "Idempotency-Key": "android:jago:transfer-1",
+        },
+        json={
+            "kind": "income",
+            "amount_idr": 2_000_000,
+            "occurred_on": "2026-08-14",
+            "description": "Jago notification",
+            "account": "JAGO",
+            "self_transfer": True,
+            "confirm": True,
+        },
+    )
+
+    assert response.status == 200
+    body = await response.json()
+    assert body["created"] is False
+    assert body["transaction"]["id"] == canonical["id"]
+    count = await (
+        await db._conn.execute("SELECT COUNT(*) FROM transactions")
+    ).fetchone()
+    assert count[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_android_self_transfer_waits_then_retries_after_email(api_client):
+    client, db = api_client
+    headers = {
+        "Authorization": "Bearer test-device-token",
+        "Idempotency-Key": "android:jago:transfer-2",
+    }
+    payload = {
+        "kind": "income",
+        "amount_idr": 2_000_000,
+        "occurred_on": "2026-08-14",
+        "description": "Jago notification",
+        "account": "Jago",
+        "self_transfer": True,
+        "confirm": True,
+    }
+
+    waiting = await client.post("/api/v1/transactions", headers=headers, json=payload)
+    assert waiting.status == 202
+    assert (await waiting.json())["ingestion_outcome"] == {
+        "code": "awaiting_canonical_email",
+        "action": "keep_review",
+    }
+    count = await (
+        await db._conn.execute("SELECT COUNT(*) FROM transactions")
+    ).fetchone()
+    assert count[0] == 1
+
+    canonical, _ = await db.create_confirmed_external_transaction(
+        7,
+        kind="income",
+        amount_idr=2_000_000,
+        occurred_on="2026-08-14",
+        description="Transfer antar rekening — Mandiri → Jago (masuk)",
+        account="Jago",
+        source="bank_email",
+        source_ref="gmail:transfer-2:transfer-in",
+        ledger_role="self_transfer_principal",
+        transfer_bundle_id="self-transfer-test-2",
+        transfer_leg="incoming",
+    )
+    retried = await client.post("/api/v1/transactions", headers=headers, json=payload)
+    assert retried.status == 200
+    body = await retried.json()
+    assert body["created"] is False
+    assert body["transaction"]["id"] == canonical["id"]
+
+
+@pytest.mark.asyncio
+async def test_android_self_transfer_rejects_ambiguous_email_matches(api_client):
+    client, db = api_client
+    for suffix in ("a", "b"):
+        await db.create_confirmed_external_transaction(
+            7,
+            kind="expense",
+            amount_idr=500_000,
+            occurred_on="2026-08-14",
+            description="Transfer antar rekening — Mandiri → BSI (keluar)",
+            account="Mandiri",
+            source="bank_email",
+            source_ref=f"gmail:transfer-3-{suffix}:transfer-out",
+            ledger_role="self_transfer_principal",
+            transfer_bundle_id="self-transfer-test-3",
+            transfer_leg="outgoing",
+        )
+
+    response = await client.post(
+        "/api/v1/transactions",
+        headers={
+            "Authorization": "Bearer test-device-token",
+            "Idempotency-Key": "android:mandiri:transfer-3",
+        },
+        json={
+            "kind": "expense",
+            "amount_idr": 500_000,
+            "occurred_on": "2026-08-14",
+            "description": "Mandiri notification",
+            "account": "Mandiri",
+            "self_transfer": True,
+        },
+    )
+
+    assert response.status == 409
+    assert (await response.json())["error"] == "self_transfer_match_ambiguous"
 
 
 @pytest.mark.asyncio

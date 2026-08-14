@@ -49,8 +49,8 @@ fun filterTransactions(
             ).any { it.lowercase(Locale.ROOT).contains(needle) }
             val matchesKind = when (kind) {
                 TransactionKind.ALL -> true
-                TransactionKind.EXPENSE -> transaction.amountMinor < 0
-                TransactionKind.INCOME -> transaction.amountMinor > 0
+                TransactionKind.EXPENSE -> transaction.ledgerRole != "self_transfer_principal" && transaction.amountMinor < 0
+                TransactionKind.INCOME -> transaction.ledgerRole != "self_transfer_principal" && transaction.amountMinor > 0
             }
             val matchesMonth = month == null ||
                 YearMonth.from(Instant.ofEpochMilli(transaction.occurredAt).atZone(zoneId)) == month

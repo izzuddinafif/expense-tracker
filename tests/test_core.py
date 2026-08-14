@@ -772,8 +772,9 @@ class TestEmailWatcher:
         assert events[:3] == [
             ("ledger", 981749333, "gmail:66114:expense"),
             ("mark_processed", "66114", "nonereply.byondbybsi@bankbsi.co.id"),
-            ("notify",),
+            ("on_save",),
         ]
+        assert ("notify",) in events
 
     @pytest.mark.asyncio
     async def test_self_transfer_queues_deterministic_ledger_components(self):
@@ -784,9 +785,17 @@ class TestEmailWatcher:
             async def get_email_owner_for_account(self, _account_name):
                 return 981749333
 
-            async def create_confirmed_external_transaction(self, _user_id, **kwargs):
-                refs.append((kwargs["kind"], kwargs["source_ref"], kwargs["amount_idr"]))
-                return {"id": kwargs["source_ref"]}, True
+            async def create_confirmed_self_transfer(self, _user_id, **kwargs):
+                refs.extend([
+                    ("expense", "gmail:66115:transfer-out", kwargs["amount_idr"]),
+                    ("income", "gmail:66115:transfer-in", kwargs["amount_idr"]),
+                    ("expense", "gmail:66115:fee", kwargs["admin_fee_idr"]),
+                ])
+                return {
+                    "outgoing": {"id": "gmail:66115:transfer-out"},
+                    "incoming": {"id": "gmail:66115:transfer-in"},
+                    "fee": {"id": "gmail:66115:fee"},
+                }
 
             async def mark_processed(self, uid, sender):
                 events.append(("processed", uid, sender))

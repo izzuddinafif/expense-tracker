@@ -88,11 +88,35 @@ object BankNotificationParser {
         )
     }
 
-    fun fingerprint(packageName: String, title: String, body: String): String {
-        val canonical = listOf(packageName, title, body).joinToString("\u001f") { it.trim().replace(Regex("\\s+"), " ") }
+    fun fingerprint(packageName: String, title: String, body: String, vararg extra: String): String {
+        val canonical = (listOf(packageName, title, body) + extra.toList())
+            .joinToString("\u001f") { it.trim().replace(Regex("\\s+"), " ") }
         return MessageDigest.getInstance("SHA-256")
             .digest(canonical.toByteArray(StandardCharsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * Hash Android's opaque notification-record key without mixing in mutable text.
+     *
+     * A single notification can be posted again with updated extras. Its platform
+     * key remains the identity, while title/body changes are payload updates.
+     */
+    fun notificationIdentityRef(
+        packageName: String,
+        sourceIdentity: String,
+        contentFingerprint: String? = null,
+    ): String {
+        require(sourceIdentity.isNotBlank()) { "Notification source identity is required" }
+        // The platform key is only an update hint. Including the normalized
+        // content fingerprint prevents a bank that reuses the same key for a
+        // later transaction from overwriting or suppressing the old capture.
+        return fingerprint(
+            "android-notification-v2",
+            packageName,
+            sourceIdentity,
+            contentFingerprint.orEmpty(),
+        )
     }
 
     private fun identifyBank(packageName: String, title: String): Bank {

@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
+import warnings
 from datetime import datetime, timezone
-import re
 from pathlib import Path
 
 
@@ -24,6 +26,7 @@ class BackupError(RuntimeError):
 
 
 _BACKUP_TIMESTAMP = re.compile(r"^(?P<stem>.+)-(?P<stamp>\d{8}T\d{12}Z)(?P<suffix>\.[^.]+)$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _backup_candidates(source: Path, destination_dir: Path) -> list[tuple[datetime, Path]]:
@@ -144,6 +147,74 @@ def _metadata_path(backup: Path) -> Path:
     return backup.with_suffix(backup.suffix + ".json")
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_backup_metadata(
+    backup: Path,
+    *,
+    allow_legacy_without_metadata: bool = False,
+) -> dict[str, object] | None:
+    """Validate a backup's identity, byte size, and SHA-256 sidecar fields.
+
+    The legacy override applies only when the sidecar is absent. A present but
+    malformed or mismatched sidecar always fails closed.
+    """
+
+    backup = Path(backup)
+    metadata_path = _metadata_path(backup)
+    if metadata_path.is_symlink():
+        raise BackupError(f"refusing symlinked backup metadata: {metadata_path}")
+    if not metadata_path.is_file():
+        if allow_legacy_without_metadata:
+            warnings.warn(
+                f"restoring legacy backup without metadata validation: {backup}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return None
+        raise BackupError(
+            f"backup metadata does not exist: {metadata_path}; "
+            "use the explicit legacy override only for a trusted pre-metadata backup"
+        )
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise BackupError(f"invalid backup metadata {metadata_path}: {exc}") from exc
+    if not isinstance(metadata, dict):
+        raise BackupError(f"invalid backup metadata {metadata_path}: expected an object")
+    if metadata.get("backup") != backup.name:
+        raise BackupError(f"backup metadata filename mismatch for {backup}")
+
+    expected_size = metadata.get("size_bytes")
+    if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 0:
+        raise BackupError(f"invalid backup metadata size_bytes for {backup}")
+    try:
+        actual_size = backup.stat().st_size
+    except OSError as exc:
+        raise BackupError(f"cannot stat backup {backup}: {exc}") from exc
+    if actual_size != expected_size:
+        raise BackupError(
+            f"backup size mismatch for {backup}: expected {expected_size}, got {actual_size}"
+        )
+
+    expected_digest = metadata.get("sha256")
+    if not isinstance(expected_digest, str) or not _SHA256.fullmatch(expected_digest):
+        raise BackupError(f"invalid backup metadata sha256 for {backup}")
+    try:
+        actual_digest = _sha256(backup)
+    except OSError as exc:
+        raise BackupError(f"cannot hash backup {backup}: {exc}") from exc
+    if not hmac.compare_digest(actual_digest, expected_digest):
+        raise BackupError(f"backup SHA-256 mismatch for {backup}")
+    return metadata
+
+
 def _remove_sqlite_sidecars(path: Path) -> None:
     for suffix in ("-wal", "-shm", "-journal"):
         Path(f"{path}{suffix}").unlink(missing_ok=True)
@@ -156,7 +227,7 @@ def _record_backup_heartbeat(
     success: bool,
     error: str | None = None,
     metadata: dict[str, object] | None = None,
-) -> None:
+) -> bool:
     """Best-effort health update when the source uses the app schema."""
     now = datetime.now(timezone.utc).isoformat()
     try:
@@ -166,7 +237,7 @@ def _record_backup_heartbeat(
                 "AND name='operational_state'"
             ).fetchone()
             if table is None:
-                return
+                return False
             payload = {"path": str(destination), **(metadata or {})}
             columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(operational_state)")
@@ -220,10 +291,11 @@ def _record_backup_heartbeat(
                     "metadata_json=excluded.metadata_json,updated_at=excluded.updated_at",
                     (now, error or "backup failed", json.dumps(payload), now),
                 )
+        return True
     except sqlite3.Error:
         # Backup validity is authoritative; missing health metadata must not
         # turn a valid recovery artifact into a failed backup command.
-        return
+        return False
 
 
 def record_backup_status(
@@ -241,13 +313,15 @@ def record_backup_status(
     required off-site copy is missing or corrupt.
     """
 
-    _record_backup_heartbeat(
+    recorded = _record_backup_heartbeat(
         Path(source),
         Path(destination),
         success=success,
         error=error,
         metadata=metadata,
     )
+    if not recorded:
+        raise BackupError("could not persist authoritative off-site backup status")
 
 
 def backup_database(source: Path, destination_dir: Path, *, overwrite: bool = False) -> Path:
@@ -272,18 +346,16 @@ def backup_database(source: Path, destination_dir: Path, *, overwrite: bool = Fa
         with sqlite3.connect(source) as src, sqlite3.connect(temp_path) as dst:
             src.backup(dst)
         integrity_check(temp_path)
-        digest = hashlib.sha256()
         with temp_path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
             stream.flush()
             os.fsync(stream.fileno())
+        digest = _sha256(temp_path)
         _remove_sqlite_sidecars(temp_path)
         metadata = {
             "backup": destination.name,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "size_bytes": temp_path.stat().st_size,
-            "sha256": digest.hexdigest(),
+            "sha256": digest,
             "source": str(source),
         }
         metadata_path = _metadata_path(destination)
@@ -314,7 +386,7 @@ def backup_database(source: Path, destination_dir: Path, *, overwrite: bool = Fa
             source,
             destination,
             success=True,
-            metadata={"size_bytes": destination.stat().st_size, "sha256": digest.hexdigest()},
+            metadata={"size_bytes": destination.stat().st_size, "sha256": digest},
         )
         return destination
     except (sqlite3.Error, OSError, BackupError) as exc:
@@ -328,7 +400,13 @@ def backup_database(source: Path, destination_dir: Path, *, overwrite: bool = Fa
             temp_metadata_path.unlink(missing_ok=True)
 
 
-def restore_database(backup: Path, target: Path, *, allow_existing: bool = False) -> Path:
+def restore_database(
+    backup: Path,
+    target: Path,
+    *,
+    allow_existing: bool = False,
+    allow_legacy_without_metadata: bool = False,
+) -> Path:
     """Restore ``backup`` into ``target`` after validating the backup.
 
     Existing targets (including databases with SQLite WAL/journal sidecars)
@@ -344,6 +422,10 @@ def restore_database(backup: Path, target: Path, *, allow_existing: bool = False
         raise BackupError(f"refusing to restore into existing target: {target}")
     if not target.parent.exists():
         target.parent.mkdir(parents=True, exist_ok=True)
+    validate_backup_metadata(
+        backup,
+        allow_legacy_without_metadata=allow_legacy_without_metadata,
+    )
     integrity_check(backup)
 
     try:
@@ -368,6 +450,14 @@ def _parser() -> argparse.ArgumentParser:
     restore.add_argument("--source", type=Path, required=True, help="backup SQLite database")
     restore.add_argument("--destination", type=Path, required=True, help="target SQLite database")
     restore.add_argument("--allow-existing", action="store_true", help="allow replacing an existing/running target")
+    restore.add_argument(
+        "--allow-legacy-without-metadata",
+        action="store_true",
+        help="restore a trusted legacy backup only when its metadata sidecar is absent",
+    )
+
+    verify = commands.add_parser("verify", help="validate backup metadata and SQLite integrity")
+    verify.add_argument("--source", type=Path, required=True, help="backup SQLite database")
 
     maintain = commands.add_parser(
         "maintain", help="create a verified backup and prune old generations"
@@ -388,6 +478,8 @@ def _parser() -> argparse.ArgumentParser:
     offsite.add_argument("--error", default=None, help="failure reason")
     offsite.add_argument("--offsite-host", required=True, help="off-site SSH host")
     offsite.add_argument("--offsite-path", required=True, help="off-site backup directory")
+    offsite.add_argument("--backup-sha256", default=None, help="verified plaintext backup digest")
+    offsite.add_argument("--backup-size-bytes", type=int, default=None, help="verified plaintext backup size")
     return parser
 
 
@@ -402,7 +494,21 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "backup":
             result = backup_database(args.source, args.destination, overwrite=args.overwrite)
         elif args.command == "restore":
-            result = restore_database(args.source, args.destination, allow_existing=args.allow_existing)
+            result = restore_database(
+                args.source,
+                args.destination,
+                allow_existing=args.allow_existing,
+                allow_legacy_without_metadata=args.allow_legacy_without_metadata,
+            )
+        elif args.command == "verify":
+            metadata = validate_backup_metadata(args.source)
+            integrity_check(args.source)
+            result = {
+                "backup": str(args.source),
+                "sha256": metadata["sha256"],
+                "size_bytes": metadata["size_bytes"],
+                "verified": True,
+            }
         elif args.command == "maintain":
             result = maintain_backups(
                 args.source,
@@ -422,9 +528,15 @@ def main(argv: list[str] | None = None) -> int:
                 metadata={
                     "offsite_host": args.offsite_host,
                     "offsite_path": args.offsite_path,
+                    "sha256": args.backup_sha256,
+                    "size_bytes": args.backup_size_bytes,
                 },
             )
-            result = None
+            result = {
+                "destination": str(args.destination),
+                "offsite_host": args.offsite_host,
+                "status": "success" if args.success else "failure",
+            }
     except BackupError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

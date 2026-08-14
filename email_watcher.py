@@ -85,6 +85,31 @@ def _is_jago_pocket_transfer(sender: str, subject: str, body: str) -> bool:
     return any(phrase in text for phrase in pocket_phrases)
 
 
+_TRANSFER_REFERENCE_PATTERN = re.compile(
+    r"(?im)\b(?:nomor\s+referensi|no\.?\s*referensi|reference(?:\s+number)?|"
+    r"transaction\s+id|id\s+transaksi)\s*[:#-]\s*"
+    r"([A-Z0-9][A-Z0-9._/-]{5,95})\b"
+)
+
+
+def _extract_self_transfer_evidence(
+    subject: str, body: str
+) -> tuple[str, str] | None:
+    """Extract one explicitly labelled immutable bank reference.
+
+    Multiple distinct labels are ambiguous and deliberately produce no
+    correlation evidence. Amounts, dates, names, and account labels are never
+    used as identity.
+    """
+    references = {
+        match.group(1).strip()
+        for match in _TRANSFER_REFERENCE_PATTERN.finditer(f"{subject}\n{body}")
+    }
+    if len(references) != 1:
+        return None
+    return "bank_reference", references.pop()
+
+
 # ── HTML → plain text ──────────────────────────────────────────────────────────
 
 class _Stripper(HTMLParser):
@@ -954,7 +979,6 @@ class EmailWatcher:
                 dest = tx.destination_account or tx.recipient_bank or "rekening tujuan"
                 log.info(f"[email] Self-transfer Rp {tx.amount:,.0f} {source} → {dest}")
 
-                # Record the outgoing transfer from the source account.
                 transfer_out = ExpenseEntry(
                     description=format_self_transfer_label(source, dest, "out"),
                     amount=tx.amount,
@@ -964,28 +988,6 @@ class EmailWatcher:
                     confidence=0.95,
                     merchant="",
                 )
-                out_url = None
-                try:
-                    out_row, _ = await self._db.create_confirmed_external_transaction(
-                        target_id,
-                        kind="expense",
-                        amount_idr=int(transfer_out.amount),
-                        occurred_on=transfer_out.date,
-                        description=transfer_out.description,
-                        subcategory=transfer_out.subcategory,
-                        account=transfer_out.account,
-                        source="bank_email",
-                        source_ref=f"gmail:{uid}:transfer-out",
-                        metadata={"email_uid": uid, "sender": sender, "component": "transfer-out"},
-                    )
-                    out_url = out_row["id"]
-                except Exception as e:
-                    log.warning(f"[email] Transfer-out logging failed: {e}")
-                    raise
-                if out_url:
-                    log.info(f"[email→ledger] Transfer-out Rp {tx.amount:,.0f} queued")
-
-                # Record the incoming transfer to the destination account.
                 income_subcategory = tx.income_subcategory or tx.subcategory or "Transfer"
                 transfer_in = IncomeEntry(
                     description=format_self_transfer_label(source, dest, "in"),
@@ -995,32 +997,10 @@ class EmailWatcher:
                     account=dest,
                     confidence=0.95,
                 )
-                in_url = None
-                try:
-                    in_row, _ = await self._db.create_confirmed_external_transaction(
-                        target_id,
-                        kind="income",
-                        amount_idr=int(transfer_in.amount),
-                        occurred_on=transfer_in.date,
-                        description=transfer_in.description,
-                        subcategory=transfer_in.subcategory,
-                        account=transfer_in.account,
-                        source="bank_email",
-                        source_ref=f"gmail:{uid}:transfer-in",
-                        metadata={"email_uid": uid, "sender": sender, "component": "transfer-in"},
-                    )
-                    in_url = in_row["id"]
-                except Exception as e:
-                    log.warning(f"[email] Transfer-in logging failed: {e}")
-                    raise
-                if in_url:
-                    log.info(f"[email→ledger] Transfer-in Rp {tx.amount:,.0f} queued")
-
-                # Record the admin fee separately, if any.
-                fee_url = None
+                fee_description = format_self_transfer_label(source, dest, "fee")
                 if tx.admin_fee > 0:
                     fee_entry = ExpenseEntry(
-                        description=format_self_transfer_label(source, dest, "fee"),
+                        description=fee_description,
                         amount=tx.admin_fee,
                         date=tx.date,
                         subcategory=tx.subcategory,
@@ -1028,25 +1008,38 @@ class EmailWatcher:
                         confidence=0.9,
                         merchant="",
                     )
-                    try:
-                        fee_row, _ = await self._db.create_confirmed_external_transaction(
-                            target_id,
-                            kind="expense",
-                            amount_idr=int(fee_entry.amount),
-                            occurred_on=fee_entry.date,
-                            description=fee_entry.description,
-                            subcategory=fee_entry.subcategory,
-                            account=fee_entry.account,
-                            source="bank_email",
-                            source_ref=f"gmail:{uid}:fee",
-                            metadata={"email_uid": uid, "sender": sender, "component": "fee"},
-                        )
-                        fee_url = fee_row["id"]
-                    except Exception as e:
-                        log.warning(f"[email] Admin fee logging failed: {e}")
-                        raise
-                    if fee_url:
-                        log.info(f"[email→ledger] Admin fee Rp {tx.admin_fee:,.0f} queued")
+                    fee_description = fee_entry.description
+
+                evidence = _extract_self_transfer_evidence(subject, body)
+                try:
+                    bundle = await self._db.create_confirmed_self_transfer(
+                        target_id,
+                        amount_idr=int(transfer_out.amount),
+                        admin_fee_idr=int(tx.admin_fee),
+                        occurred_on=transfer_out.date,
+                        outgoing_description=transfer_out.description,
+                        incoming_description=transfer_in.description,
+                        fee_description=fee_description,
+                        outgoing_subcategory=transfer_out.subcategory,
+                        incoming_subcategory=transfer_in.subcategory,
+                        source_account=transfer_out.account,
+                        destination_account=transfer_in.account,
+                        email_uid=uid,
+                        sender=sender,
+                        evidence_scheme=evidence[0] if evidence else None,
+                        evidence_reference=evidence[1] if evidence else None,
+                    )
+                except Exception as e:
+                    log.warning(f"[email] Atomic self-transfer logging failed: {e}")
+                    raise
+
+                out_url = bundle["outgoing"]["id"] if bundle["outgoing"] else None
+                in_url = bundle["incoming"]["id"] if bundle["incoming"] else None
+                fee_url = bundle["fee"]["id"] if bundle["fee"] else None
+                log.info(
+                    "[email→ledger] Self-transfer bundle queued; correlation=%s",
+                    "explicit" if evidence else "unavailable",
+                )
 
                 # All self-transfer ledger writes above are durable.
                 # Mark the email processed before Telegram summary side effects so a

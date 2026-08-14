@@ -7,7 +7,7 @@
 
 set -eu
 
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 backup_dir="${repo_root}/data/backups"
 gpg_home="${LEDGERLY_BACKUP_GPG_HOME:-/etc/ledgerly-backup/gnupg}"
 recipient_file="${LEDGERLY_BACKUP_RECIPIENT_FILE:-/etc/ledgerly-backup/recipient.asc}"
@@ -37,6 +37,8 @@ status_recorded=0
 container=""
 latest_db="pending"
 db_name="unknown.db"
+backup_sha256=""
+backup_size_bytes=""
 
 cleanup() { rm -rf "$staging_dir"; }
 
@@ -44,14 +46,19 @@ record_status() {
     success="$1"
     error_message="${2:-}"
     [ -n "$container" ] || return 0
-    args="offsite-status --source /app/data/expense_tracker.db --destination /app/data/backups/${db_name:-unknown}"
+    set -- python -m scripts.sqlite_backup offsite-status \
+        --source /app/data/expense_tracker.db \
+        --destination "/app/data/backups/${db_name:-unknown}" \
+        --offsite-host "$offsite_host" \
+        --offsite-path "$offsite_path"
+    if [ -n "$backup_sha256" ] && [ -n "$backup_size_bytes" ]; then
+        set -- "$@" --backup-sha256 "$backup_sha256" --backup-size-bytes "$backup_size_bytes"
+    fi
     if [ "$success" = "true" ]; then
-        docker exec --user appuser "$container" python -m scripts.sqlite_backup $args \
-            --success --offsite-host "$offsite_host" --offsite-path "$offsite_path" >/dev/null
+        docker exec --user appuser "$container" "$@" --success
     else
-        docker exec --user appuser "$container" python -m scripts.sqlite_backup $args \
-            --failure --error "$error_message" --offsite-host "$offsite_host" \
-            --offsite-path "$offsite_path" >/dev/null || true
+        docker exec --user appuser "$container" "$@" \
+            --failure --error "$error_message" || true
     fi
 }
 
@@ -91,6 +98,10 @@ case "$db_name" in
     *) echo "Unexpected backup name: $db_name" >&2; exit 2 ;;
 esac
 [ -f "$metadata_path" ] || { echo "Missing backup metadata: $metadata_path" >&2; exit 1; }
+docker exec --user appuser "$container" python -m scripts.sqlite_backup verify \
+    --source "/app/data/backups/$db_name" >/dev/null
+backup_sha256=$(sha256sum "$latest_db" | awk '{print $1}')
+backup_size_bytes=$(wc -c < "$latest_db" | tr -d ' ')
 
 mkdir -p "$gpg_home"
 chmod 700 "$gpg_home"

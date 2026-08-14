@@ -304,11 +304,15 @@ Remaining milestones are:
 4. keep Assets/net-worth synchronization Notion-backed until a local asset
    model is introduced.
 
-The API 35 emulator suite is currently green at 15/15, the Android JVM suite
-at 47/47, and focused backend regressions at 70/70. The signed release APK was
-built and verified locally. The SG deployment now runs commit `5278994`, the
-encrypted off-host backup timer has completed a verified backup and a local
-decrypt/SQLite-integrity restore drill, and the resource-limit timer is active.
+The API 35 emulator suite is currently green at 22/22, the Android JVM suite
+at 54/54, and focused backend regressions at 213/213. The release artifact has
+been assembled locally and must remain signed with the configured Ledgerly
+release keystore before distribution. The Coolify Ledgerly application is
+healthy at `https://ledgerly.izzudd.in/livez`; the production deployment is
+updated only after the current commit is pushed and the post-deploy health,
+webhook, email-watcher, outbox, and backup checks pass.
+
 Physical BSI/Mandiri/Jago notification delivery remains a real-device gate;
 the parser and notification-queue paths are covered by sanitized fixtures and
-emulator tests but cannot prove banking-template delivery without the device.
+emulator tests, while the connected S23 is used for final notification-access
+and live-template validation when bank events are available.

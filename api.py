@@ -11,7 +11,12 @@ from typing import Any, Awaitable, Callable
 
 from aiohttp import web
 
-from db import Database, TransactionConflictError
+from db import (
+    Database,
+    SelfTransferMatchAmbiguousError,
+    TransactionConflictError,
+    TransactionPreconditionRequiredError,
+)
 from local_budgets import BudgetStore
 
 log = logging.getLogger(__name__)
@@ -81,6 +86,9 @@ def _public_transaction(row: dict[str, Any]) -> dict[str, Any]:
         "account": row["account"],
         "source": row["source"],
         "source_ref": row["source_ref"],
+        "ledger_role": row["ledger_role"],
+        "transfer_bundle_id": row["transfer_bundle_id"],
+        "transfer_leg": row["transfer_leg"],
         "updated_at": row["updated_at"],
     }
 
@@ -251,6 +259,49 @@ def register_api_routes(
                 "manual",
             }:
                 raise ValueError("Invalid transaction source")
+            self_transfer = payload.get("self_transfer", False)
+            if not isinstance(self_transfer, bool):
+                raise ValueError("self_transfer must be a boolean")
+            metadata = {
+                "package_name": payload.get("package_name"),
+                "notification_received_at": payload.get("received_at"),
+            }
+            if self_transfer:
+                evidence = payload.get("transfer_evidence")
+                if evidence is not None and not isinstance(evidence, dict):
+                    raise ValueError("transfer_evidence must be an object")
+                outcome = await db.ingest_android_self_transfer(
+                    user_id,
+                    kind=kind,
+                    amount_idr=amount,
+                    occurred_on=occurred_on,
+                    description=str(payload.get("description", "")),
+                    merchant=str(payload.get("merchant", "")),
+                    category=str(payload.get("category", "")),
+                    subcategory=str(payload.get("subcategory", "")),
+                    account=account,
+                    source_ref=source_ref,
+                    evidence_scheme=evidence.get("scheme") if evidence else None,
+                    evidence_reference=evidence.get("reference") if evidence else None,
+                    metadata=metadata,
+                )
+                return web.json_response(
+                    {
+                        "transaction": _public_transaction(outcome.transaction),
+                        "created": outcome.created,
+                        "ingestion_outcome": {
+                            "code": outcome.code,
+                            "action": outcome.action,
+                        },
+                    },
+                    status=(
+                        202
+                        if outcome.code == "awaiting_canonical_email"
+                        else 409
+                        if outcome.code == "evidence_conflict"
+                        else 200
+                    ),
+                )
             row, created = await db.create_ingested_transaction(
                 user_id,
                 kind=kind,
@@ -263,17 +314,27 @@ def register_api_routes(
                 account=account,
                 source_ref=source_ref,
                 source=source,
-                metadata={
-                    "package_name": payload.get("package_name"),
-                    "notification_received_at": payload.get("received_at"),
-                },
+                metadata=metadata,
             )
-            if payload.get("confirm") is True:
+            confirmed = payload.get("confirm") is True
+            if confirmed:
                 row, _ = await db.confirm_transaction(user_id, row["id"])
+        except SelfTransferMatchAmbiguousError as exc:
+            return web.json_response(
+                {"error": "self_transfer_match_ambiguous", "detail": str(exc)},
+                status=409,
+            )
         except (KeyError, TypeError, ValueError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
         return web.json_response(
-            {"transaction": _public_transaction(row), "created": created},
+            {
+                "transaction": _public_transaction(row),
+                "created": created,
+                "ingestion_outcome": {
+                    "code": "created" if created else "replayed",
+                    "action": "finalize" if confirmed else "keep_review",
+                },
+            },
             status=201 if created else 200,
         )
 
@@ -309,7 +370,10 @@ def register_api_routes(
                 request.match_info["transaction_id"],
                 changes,
                 expected_updated_at=expected_updated_at,
+                require_expected_revision=True,
             )
+        except TransactionPreconditionRequiredError as exc:
+            return web.json_response({"error": str(exc)}, status=428)
         except TransactionConflictError as exc:
             return web.json_response({"error": str(exc)}, status=409)
         except (TypeError, ValueError) as exc:
@@ -330,7 +394,10 @@ def register_api_routes(
                 user_id,
                 request.match_info["transaction_id"],
                 expected_updated_at=expected_updated_at,
+                require_expected_revision=True,
             )
+        except TransactionPreconditionRequiredError as exc:
+            return web.json_response({"error": str(exc)}, status=428)
         except TransactionConflictError as exc:
             return web.json_response({"error": str(exc)}, status=409)
         if row is None:

@@ -16,13 +16,23 @@ class NotificationIngestor(
     ): Long? {
         if (!BankNotificationSources.isAllowlisted(packageName)) return null
         val parsed = BankNotificationParser.parse(packageName, title, body)
-        val sourceRef = sourceIdentity?.let {
-            BankNotificationParser.fingerprint(packageName, parsed.sourceRef, it)
-        } ?: parsed.sourceRef
-        val receivedAt = now()
+        val normalizedSourceIdentity = sourceIdentity?.takeIf(String::isNotBlank)
         val contentFingerprint = BankNotificationParser.fingerprint(
             parsed.packageName, parsed.title, parsed.body,
         )
+        val platformIdentityRef = normalizedSourceIdentity?.let {
+            BankNotificationParser.notificationIdentityRef(packageName, it, contentFingerprint)
+        }
+        platformIdentityRef?.let { identity ->
+            notificationDao.findByPlatformIdentityRef(identity)?.let { existing ->
+                refreshPending(existing.id, parsed)
+                return existing.id
+            }
+        }
+        val sourceRef = normalizedSourceIdentity?.let {
+            BankNotificationParser.fingerprint(packageName, parsed.sourceRef, it)
+        } ?: parsed.sourceRef
+        val receivedAt = now()
         val suspectedDuplicateOf = notificationDao.findRecentForPackage(
             packageName = parsed.packageName,
             receivedAfter = receivedAt - SUSPECTED_REPOST_WINDOW_MILLIS,
@@ -33,6 +43,7 @@ class NotificationIngestor(
         }?.id
         val record = NotificationRecord(
             sourceRef = sourceRef,
+            platformIdentityRef = platformIdentityRef,
             packageName = parsed.packageName,
             title = parsed.title,
             body = parsed.body,
@@ -48,9 +59,28 @@ class NotificationIngestor(
         // Only sourceRef is an idempotency key. Equal payment text can represent
         // two legitimate purchases, so content/time-window matching must not drop it.
         val insertedId = notificationDao.enqueue(record)
-        return if (insertedId != -1L) insertedId
-        else notificationDao.findBySourceRef(sourceRef)?.id
+        if (insertedId != -1L) return insertedId
+        val existing = platformIdentityRef?.let { identity ->
+            notificationDao.findByPlatformIdentityRef(identity)
+        }
+            ?: notificationDao.findBySourceRef(sourceRef)
             ?: error("Notification conflict could not be resolved")
+        refreshPending(existing.id, parsed)
+        return existing.id
+    }
+
+    private suspend fun refreshPending(id: Long, parsed: ParsedBankNotification) {
+        notificationDao.refreshPendingCapture(
+            id = id,
+            title = parsed.title,
+            body = parsed.body,
+            amountIdr = parsed.amountIdr,
+            merchant = parsed.merchant,
+            bank = parsed.bank.name,
+            direction = parsed.direction.name,
+            occurredOn = parsed.transactionDate?.toString(),
+            reviewRequired = parsed.reviewRequired,
+        )
     }
 
     private companion object {

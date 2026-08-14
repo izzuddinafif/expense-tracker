@@ -1,30 +1,50 @@
 package com.afif.expensetracker
 
+import androidx.activity.compose.setContent
+import androidx.compose.material3.Text
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertContentDescriptionEquals
+import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.isHeading
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.afif.expensetracker.data.LedgerDatabase
 import com.afif.expensetracker.data.LedgerSettingsStore
 import com.afif.expensetracker.data.NotificationRecord
 import com.afif.expensetracker.data.TransactionEntity
 import com.afif.expensetracker.data.SyncOperation
+import com.afif.expensetracker.ui.theme.LedgerTheme
+import com.afif.expensetracker.ui.theme.LedgerThemePalette
+import com.afif.expensetracker.ui.theme.LedgerThemePreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.junit.Before
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.time.YearMonth
 
 @RunWith(AndroidJUnit4::class)
 class LedgerAppTest {
@@ -34,17 +54,25 @@ class LedgerAppTest {
     @Before
     fun clearSettings() {
         LedgerSettingsStore.clearForTests(compose.activity)
+        LedgerThemePreferences.clearForTests(compose.activity)
         runBlocking(Dispatchers.IO) {
             LedgerDatabase.get(compose.activity).clearAllTables()
         }
     }
 
+    @After
+    fun clearUiPreferences() {
+        // Activity launch happens before @Before; cleanup guarantees the next
+        // instrumentation method always starts with the canonical palette.
+        LedgerThemePreferences.clearForTests(compose.activity)
+    }
+
     @Test
     fun primaryNavigationShowsEveryOperationalScreen() {
-        compose.onNodeWithText("Overview").assertIsDisplayed()
+        compose.onNodeWithText("Overview").assertIsDisplayed().assert(isHeading())
 
         compose.onNodeWithTag("nav_inbox").performClick()
-        compose.onNodeWithText("Review inbox").assertIsDisplayed()
+        compose.onNodeWithText("Review inbox").assertIsDisplayed().assert(isHeading())
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithText("Inbox is clear.").fetchSemanticsNodes().isNotEmpty()
         }
@@ -65,6 +93,76 @@ class LedgerAppTest {
     }
 
     @Test
+    fun iconActionsExposeContextualAccessibilityLabels() {
+        compose.onNodeWithTag("nav_settings").performClick()
+        compose.onNodeWithTag("device_token_visibility")
+            .assertContentDescriptionEquals("Show device token")
+            .performClick()
+            .assertContentDescriptionEquals("Hide device token")
+    }
+
+    @Test
+    fun themeSelectorIsAccessibleAndPersistsAcrossRecreation() {
+        compose.onNodeWithTag("nav_settings").performClick()
+
+        compose.onNodeWithTag("theme_dark_green")
+            .assertContentDescriptionEquals("Dark green theme")
+            .performClick()
+            .assertIsSelected()
+        compose.onNodeWithTag("theme_blue")
+            .assertContentDescriptionEquals("Blue theme")
+            .assertIsNotSelected()
+            .performClick()
+            .assertIsSelected()
+        assertEquals(LedgerThemePalette.BLUE, LedgerThemePreferences.read(compose.activity))
+
+        compose.activityRule.scenario.recreate()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag("nav_settings").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag("nav_settings").performClick()
+        compose.onNodeWithTag("theme_blue").assertIsSelected()
+        compose.onNodeWithTag("theme_dark_blue")
+            .assertContentDescriptionEquals("Dark blue theme")
+            .performScrollTo()
+            .performClick()
+            .assertIsSelected()
+        assertEquals(LedgerThemePalette.DARK_BLUE, LedgerThemePreferences.read(compose.activity))
+
+        // Keep the shared instrumentation application deterministic for later tests.
+        compose.onNodeWithTag("theme_dark_green").performClick().assertIsSelected()
+    }
+
+    @Test
+    fun dashboardMonthRefreshesWhenLifecycleResumes() {
+        var currentMonth = YearMonth.of(2026, 8)
+        val lifecycleOwner = MutableLifecycleOwner()
+        compose.runOnUiThread {
+            lifecycleOwner.handle(Lifecycle.Event.ON_CREATE)
+            lifecycleOwner.handle(Lifecycle.Event.ON_START)
+            lifecycleOwner.handle(Lifecycle.Event.ON_RESUME)
+            compose.activity.setContent {
+                CompositionLocalProvider(LocalLifecycleOwner provides lifecycleOwner) {
+                    LedgerTheme {
+                        Text(
+                            rememberDashboardMonth { currentMonth }.toString(),
+                            modifier = Modifier.testTag("dashboard_test_month"),
+                        )
+                    }
+                }
+            }
+        }
+        compose.onNodeWithTag("dashboard_test_month").assertTextEquals("2026-08")
+
+        currentMonth = YearMonth.of(2026, 9)
+        compose.runOnUiThread {
+            lifecycleOwner.handle(Lifecycle.Event.ON_PAUSE)
+            lifecycleOwner.handle(Lifecycle.Event.ON_RESUME)
+        }
+        compose.onNodeWithTag("dashboard_test_month").assertTextEquals("2026-09")
+    }
+
+    @Test
     fun settingsPersistBackendConfiguration() {
         compose.onNodeWithTag("nav_settings").performClick()
         compose.waitForIdle()
@@ -72,8 +170,8 @@ class LedgerAppTest {
             .performTextInput("http://10.0.2.2:8080/")
         compose.onNodeWithTag("device_token", useUnmergedTree = true)
             .performTextInput("test-token-012345678901234567890123")
-        compose.onNodeWithText("Save and sync").performClick()
-        compose.onNodeWithTag("settings_message").assertIsDisplayed()
+        compose.onNodeWithTag("settings_save").performScrollTo().assertIsDisplayed().performClick()
+        compose.onNodeWithTag("settings_message").performScrollTo().assertIsDisplayed()
 
         val settings = LedgerSettingsStore.read(compose.activity)
         assertEquals("http://10.0.2.2:8080", settings.baseUrl)
@@ -89,12 +187,13 @@ class LedgerAppTest {
             db.syncDao().enqueue(operation)
             db.syncDao().failed().single().id
         }
-        compose.onNodeWithTag("nav_settings").performClick()
-        compose.onNodeWithTag("open_diagnostics").performClick()
+        openDiagnostics()
+        compose.onNodeWithTag("diagnostics_list")
+            .performScrollToNode(hasTestTag("operational_health"))
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithTag("local_sync_retry_$retryId").fetchSemanticsNodes().isNotEmpty()
         }
-        compose.onNodeWithTag("local_sync_retry_$retryId").performClick()
+        compose.onNodeWithTag("local_sync_retry_$retryId").performScrollTo().assertIsDisplayed().performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             runBlocking(Dispatchers.IO) { db.syncDao().findById(retryId)?.state != "failed" }
         }
@@ -105,11 +204,11 @@ class LedgerAppTest {
             db.syncDao().enqueue(SyncOperation(kind = "transaction", entityId = discardEntityId, payload = "{}", state = "failed", attempts = 5))
             db.syncDao().failed().first { it.entityId == discardEntityId }.id
         }
-        compose.onNodeWithTag("operational_health_refresh").performClick()
+        compose.onNodeWithTag("operational_health_refresh").performScrollTo().assertIsDisplayed().performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithTag("local_sync_discard_$discardId").fetchSemanticsNodes().isNotEmpty()
         }
-        compose.onNodeWithTag("local_sync_discard_$discardId").performClick()
+        compose.onNodeWithTag("local_sync_discard_$discardId").performScrollTo().assertIsDisplayed().performClick()
         compose.onNodeWithTag("local_sync_discard_confirm_$discardId").performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             runBlocking(Dispatchers.IO) {
@@ -157,8 +256,7 @@ class LedgerAppTest {
                 LedgerDatabase.get(compose.activity).notificationDao().findBySourceRef(sourceRef)?.status == "dismissed"
             }
         }
-        compose.onNodeWithTag("nav_settings").performClick()
-        compose.onNodeWithTag("open_diagnostics").performClick()
+        openDiagnostics()
         compose.onNodeWithTag("diagnostics_list")
             .performScrollToNode(hasTestTag("diagnostic_capture_$dismissedId"))
         compose.waitUntil(timeoutMillis = 5_000) {
@@ -307,5 +405,25 @@ class LedgerAppTest {
                 .fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithTag("transaction_item_instrumented-detail").assertIsDisplayed()
+    }
+
+    private class MutableLifecycleOwner : LifecycleOwner {
+        private val registry = LifecycleRegistry(this)
+        override val lifecycle: Lifecycle = registry
+
+        fun handle(event: Lifecycle.Event) {
+            registry.handleLifecycleEvent(event)
+        }
+    }
+
+    private fun openDiagnostics() {
+        compose.onNodeWithTag("nav_settings").performClick()
+        compose.onNodeWithTag("open_diagnostics")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag("diagnostics_list").fetchSemanticsNodes().isNotEmpty()
+        }
     }
 }

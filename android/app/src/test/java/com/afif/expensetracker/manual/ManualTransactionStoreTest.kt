@@ -252,6 +252,7 @@ class ManualTransactionStoreTest {
             }
             override suspend fun claimPending(id: Long, claimToken: String, now: Long): Int = 0
             override suspend fun claimedOperation(id: Long, claimToken: String): SyncOperation? = null
+            override suspend fun requeueClaimed(id: Long, claimToken: String, error: String, now: Long): Int = 0
             override suspend fun findById(id: Long): SyncOperation? = operations.find { it.id == id }
             override suspend fun requeueExpiredClaims(before: Long, now: Long): Int = 0
             override suspend fun pendingCount(): Int = operations.size

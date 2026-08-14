@@ -15,7 +15,16 @@ data class NotificationConfirmationDraft(
     val category: String,
     val account: String,
     val kind: String = "expense",
+    val selfTransfer: Boolean = false,
 )
+
+internal fun NotificationConfirmationDraft.isValidForConfirmation(): Boolean {
+    if (kind !in setOf("expense", "income")) return false
+    if (amountIdr <= 0) return false
+    if (merchant.isBlank() || description.isBlank()) return false
+    if (category.isBlank() || account.isBlank()) return false
+    return runCatching { LocalDate.parse(occurredOn) }.isSuccess
+}
 
 /**
  * Converts one reviewed notification into its local transaction and outbox
@@ -44,7 +53,7 @@ class NotificationConfirmationStore(private val database: LedgerDatabase) {
             account = record.bank,
             kind = if (record.direction == "CREDIT") "income" else "expense",
         )
-        if (!isValid(values)) return@withTransaction false
+        if (!values.isValidForConfirmation()) return@withTransaction false
         val occurredAt = LocalDate.parse(values.occurredOn.trim())
             .atStartOfDay(ZoneId.systemDefault())
             .toInstant()
@@ -59,6 +68,8 @@ class NotificationConfirmationStore(private val database: LedgerDatabase) {
                 category = values.category.trim(),
                 account = values.account.trim(),
                 occurredAt = occurredAt,
+                kind = values.kind,
+                ledgerRole = if (values.selfTransfer) "self_transfer_principal" else "ordinary",
             )
         )
         // The notification status gate above makes this insert idempotent while
@@ -75,6 +86,7 @@ class NotificationConfirmationStore(private val database: LedgerDatabase) {
                     .put("merchant", values.merchant.trim())
                     .put("category", values.category.trim())
                     .put("account", values.account.trim())
+                    .put("self_transfer", values.selfTransfer)
                     .put("source_ref", record.sourceRef)
                     .put("package_name", record.packageName)
                     .put("received_at", record.receivedAt)
@@ -84,13 +96,5 @@ class NotificationConfirmationStore(private val database: LedgerDatabase) {
         )
         database.notificationDao().updateStatus(record.id, "confirmed")
         true
-    }
-
-    private fun isValid(draft: NotificationConfirmationDraft): Boolean {
-        if (draft.amountIdr <= 0) return false
-        if (draft.merchant.isBlank() || draft.description.isBlank()) return false
-        if (draft.category.isBlank() || draft.account.isBlank()) return false
-        val parsedDate = runCatching { LocalDate.parse(draft.occurredOn) }.getOrNull()
-        return parsedDate != null
     }
 }

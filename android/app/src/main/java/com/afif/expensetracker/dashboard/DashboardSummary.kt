@@ -53,8 +53,9 @@ object DashboardSummaryCalculator {
             val occurred = Instant.ofEpochMilli(tx.occurredAt)
             occurred >= startInclusive && occurred < endExclusive
         }
-        val expenses = selected.filter { it.amountMinor < 0L }
-        val incomes = selected.filter { it.amountMinor > 0L }
+        val cashflow = selected.filter { it.ledgerRole != "self_transfer_principal" }
+        val expenses = cashflow.filter { it.amountMinor < 0L }
+        val incomes = cashflow.filter { it.amountMinor > 0L }
         val totalExpense = expenses.fold(0L) { total, tx -> safeAdd(total, safeAbs(tx.amountMinor)) }
         val totalIncome = incomes.fold(0L) { total, tx -> safeAdd(total, tx.amountMinor) }
         val categories = expenses

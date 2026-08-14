@@ -1,3 +1,8 @@
+@file:OptIn(
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+    androidx.compose.material3.ExperimentalMaterial3Api::class,
+)
+
 package com.afif.expensetracker
 
 import android.content.Intent
@@ -7,12 +12,19 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -24,12 +36,15 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -38,9 +53,14 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.navigation.compose.*
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.room.withTransaction
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.afif.expensetracker.data.*
 import com.afif.expensetracker.budget.BudgetScreen
 import com.afif.expensetracker.dashboard.DashboardSummaryCalculator
@@ -58,6 +78,8 @@ import com.afif.expensetracker.transactions.TransactionKind
 import com.afif.expensetracker.transactions.filterTransactions
 import com.afif.expensetracker.transactions.groupTransactions
 import com.afif.expensetracker.ui.components.LedgerCard
+import com.afif.expensetracker.ui.components.LedgerHeroCard
+import com.afif.expensetracker.ui.components.LedgerMetricTile
 import com.afif.expensetracker.ui.components.LedgerSectionHeader
 import com.afif.expensetracker.ui.components.LedgerSpacing
 import com.afif.expensetracker.ui.components.LedgerDateField
@@ -81,11 +103,39 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         SyncScheduler.schedulePeriodic(this)
-        setContent { LedgerTheme { LedgerApp() } }
+        setContent {
+            var palette by remember { mutableStateOf(LedgerThemePreferences.read(this)) }
+            LedgerTheme(palette) {
+                LedgerApp(
+                    selectedPalette = palette,
+                    onPaletteSelected = { selected ->
+                        LedgerThemePreferences.save(this, selected)
+                        palette = selected
+                    },
+                )
+            }
+        }
     }
 }
 
 private fun money(minor: Long): String = NumberFormat.getCurrencyInstance(Locale("id", "ID")).apply { maximumFractionDigits = 0 }.format(minor)
+
+@Composable
+internal fun rememberDashboardMonth(
+    currentMonth: () -> YearMonth = { YearMonth.now() },
+): YearMonth {
+    var month by remember { mutableStateOf(currentMonth()) }
+    val currentMonthProvider by rememberUpdatedState(currentMonth)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) month = currentMonthProvider()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    return month
+}
 
 private data class TopLevelDestination(
     val route: String,
@@ -93,7 +143,11 @@ private data class TopLevelDestination(
     val icon: ImageVector,
 )
 
-@Composable private fun LedgerApp() {
+@Composable
+private fun LedgerApp(
+    selectedPalette: LedgerThemePalette,
+    onPaletteSelected: (LedgerThemePalette) -> Unit,
+) {
     val nav = rememberNavController()
     val topLevelRoutes = listOf(
         TopLevelDestination("dashboard", "Dashboard", Icons.Rounded.Home),
@@ -109,30 +163,17 @@ private data class TopLevelDestination(
     Scaffold(
         bottomBar = {
             if (showNavigationBar) {
-                NavigationBar(containerColor = Surface) {
-                    topLevelRoutes.forEach { destination ->
-                        NavigationBarItem(
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("nav_${destination.route}"),
-                            selected = currentRoute == destination.route,
-                            onClick = {
-                                nav.navigate(destination.route) {
-                                    popUpTo(nav.graph.findStartDestination().id) {
-                                        saveState = true
-                                    }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
-                            },
-                            // The visible label already names this destination;
-                            // avoid making TalkBack announce it twice.
-                            icon = { Icon(destination.icon, contentDescription = null) },
-                            label = { Text(destination.label) },
-                            alwaysShowLabel = true,
-                        )
-                    }
-                }
+                LedgerBottomNavigation(
+                    destinations = topLevelRoutes,
+                    selectedRoute = currentRoute,
+                    onSelect = { destination ->
+                        nav.navigate(destination.route) {
+                            popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    },
+                )
             }
         },
     ) { padding ->
@@ -159,7 +200,11 @@ private data class TopLevelDestination(
                 BudgetScreen(onOpenSettings = { nav.navigate("settings") })
             }
             composable("settings") {
-                SettingsScreen { nav.navigate("diagnostics") }
+                SettingsScreen(
+                    selectedPalette = selectedPalette,
+                    onPaletteSelected = onPaletteSelected,
+                    openDiagnostics = { nav.navigate("diagnostics") },
+                )
             }
             composable("diagnostics") {
                 DiagnosticsScreen(onBack = { nav.popBackStack() })
@@ -169,9 +214,72 @@ private data class TopLevelDestination(
 }
 
 @Composable
+private fun LedgerBottomNavigation(
+    destinations: List<TopLevelDestination>,
+    selectedRoute: String?,
+    onSelect: (TopLevelDestination) -> Unit,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        tonalElevation = 8.dp,
+        shadowElevation = 18.dp,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 8.dp, vertical = 7.dp)
+                .selectableGroup(),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            destinations.forEach { destination ->
+                val selected = destination.route == selectedRoute
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 58.dp)
+                        .selectable(
+                            selected = selected,
+                            onClick = { onSelect(destination) },
+                            role = Role.Tab,
+                        )
+                        .testTag("nav_${destination.route}")
+                        .semantics(mergeDescendants = true) {
+                            contentDescription = destination.label
+                        }
+                        .padding(vertical = 4.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically),
+                ) {
+                    Surface(
+                        color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                        shape = RoundedCornerShape(14.dp),
+                    ) {
+                        Icon(
+                            destination.icon,
+                            contentDescription = null,
+                            tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp).size(22.dp),
+                        )
+                    }
+                    Text(
+                        destination.label,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun Dashboard(openInbox: () -> Unit) {
     val db = LedgerDatabase.get(LocalContext.current)
-    val month = remember { YearMonth.now() }
+    val month = rememberDashboardMonth()
     val monthStart = remember(month) { month.atDay(1).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli() }
     val monthEnd = remember(month) { month.plusMonths(1).atDay(1).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli() }
     val transactionsFlow = remember(db, monthStart, monthEnd) {
@@ -196,6 +304,7 @@ private fun Dashboard(openInbox: () -> Unit) {
                 "Overview",
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold,
+                modifier = Modifier.semantics { heading() },
             )
             Text(
                 "$monthLabel · your local-first ledger",
@@ -204,12 +313,12 @@ private fun Dashboard(openInbox: () -> Unit) {
         }
         if (transactionsState == null) {
             item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = Elevated),
+                LedgerCard(
                     modifier = Modifier.testTag("dashboard_loading"),
+                    contentPadding = 22.dp,
                 ) {
                     Row(
-                        Modifier.fillMaxWidth().padding(22.dp),
+                        Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -220,56 +329,43 @@ private fun Dashboard(openInbox: () -> Unit) {
             }
         } else {
             item {
-                Card(colors = CardDefaults.cardColors(containerColor = Elevated)) {
-                Column(
-                    Modifier.fillMaxWidth().padding(22.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
-                ) {
+                LedgerHeroCard(modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        "Spent this month",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        "MONTHLY SPEND",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.78f),
                     )
                     Text(
                         money(summary.totalExpenseMinor),
                         style = MaterialTheme.typography.displaySmall,
                         fontWeight = FontWeight.Bold,
-                        color = Expense,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
                         modifier = Modifier.testTag("dashboard_month_expense"),
                     )
-                    HorizontalDivider(color = Surface)
-                    Row(
+                    FlowRow(
                         Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        Column {
-                            Text(
-                                "Income",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Text(
-                                money(summary.totalIncomeMinor),
-                                color = Income,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                        }
-                        Column(horizontalAlignment = Alignment.End) {
-                            Text(
-                                "Net flow",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Text(
-                                money(summary.netMinor),
-                                color = if (summary.netMinor >= 0) Income else Expense,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                        }
+                        LedgerMetricTile(
+                            label = "Income",
+                            value = money(summary.totalIncomeMinor),
+                            valueColor = Income,
+                            modifier = Modifier.weight(1f).widthIn(min = 120.dp),
+                        )
+                        LedgerMetricTile(
+                            label = "Net flow",
+                            value = money(summary.netMinor),
+                            valueColor = if (summary.netMinor >= 0) Income else Expense,
+                            modifier = Modifier.weight(1f).widthIn(min = 120.dp),
+                        )
                     }
                     Text(
                         "${summary.transactionCount} confirmed transactions",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f),
                     )
                 }
-            }
             }
             if (summary.topExpenseCategories.isNotEmpty()) {
                 item {
@@ -277,13 +373,14 @@ private fun Dashboard(openInbox: () -> Unit) {
                         "Top categories",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
+                        modifier = Modifier.semantics { heading() },
                     )
                 }
                 items(
                     summary.topExpenseCategories,
                     key = { "dashboard_category_${it.category}" },
                 ) { category ->
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    LedgerCard(contentPadding = 14.dp) {
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -303,21 +400,25 @@ private fun Dashboard(openInbox: () -> Unit) {
                             },
                             modifier = Modifier.fillMaxWidth(),
                             color = ChartAccent,
-                            trackColor = Surface,
+                            trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
                         )
                     }
                 }
             }
             item {
-                Row(
+                FlowRow(
                     Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     Text(
                         "Recent this month",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .weight(1f)
+                            .widthIn(min = 160.dp)
+                            .semantics { heading() },
                     )
                     TextButton(onClick = openInbox) {
                         Text("Review inbox")
@@ -361,7 +462,12 @@ private fun Inbox() {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
-            Text("Review inbox", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "Review inbox",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.semantics { heading() },
+            )
             Text("Captured notifications stay on-device until you confirm.", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (recordsState == null) {
@@ -378,12 +484,21 @@ private fun Inbox() {
         } else if (pending.isEmpty()) item {
             Text("Inbox is clear.", color = MaterialTheme.colorScheme.onSurfaceVariant)
         } else items(pending, key = { it.id }) { rec ->
-            Card(
+            LedgerCard(
                 modifier = Modifier.testTag("inbox_item_${rec.sourceRef}"),
-                colors = CardDefaults.cardColors(containerColor = Elevated),
+                contentPadding = 16.dp,
             ) {
-                Column(Modifier.padding(16.dp)) {
-                    Text(rec.merchant ?: rec.title, fontWeight = FontWeight.SemiBold)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer) {
+                            Icon(
+                                Icons.Rounded.Notifications,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(8.dp).size(18.dp),
+                            )
+                        }
+                        Text(rec.merchant ?: rec.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    }
                     Text(
                         rec.body,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -400,7 +515,11 @@ private fun Inbox() {
                             modifier = Modifier.testTag("suspected_repost_${rec.sourceRef}"),
                         )
                     }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    FlowRow(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         TextButton(onClick = { dismissing = rec }) {
                             Text(if (rec.suspectedDuplicateOf != null) "Discard repost" else "Dismiss")
                         }
@@ -423,7 +542,6 @@ private fun Inbox() {
                             Text(if (rec.reviewRequired) "Review capture" else "Add expense")
                         }
                     }
-                }
             }
         }
     }
@@ -502,26 +620,93 @@ private fun NotificationReviewDialog(
     }
     var description by rememberSaveable(record.id) { mutableStateOf(record.title) }
     var category by rememberSaveable(record.id) { mutableStateOf("Uncategorized") }
-    var account by rememberSaveable(record.id) { mutableStateOf(record.bank) }
+    var account by rememberSaveable(record.id) {
+        mutableStateOf(
+            when (record.bank) {
+                "BSI" -> "BSI"
+                "LIVIN_MANDIRI" -> "Mandiri"
+                "JAGO" -> "Jago"
+                else -> ""
+            },
+        )
+    }
+    var accountMenuExpanded by rememberSaveable(record.id) { mutableStateOf(false) }
     var kind by rememberSaveable(record.id) {
         mutableStateOf(if (record.direction == "CREDIT") "income" else "expense")
     }
+    var selfTransfer by rememberSaveable(record.id) { mutableStateOf(false) }
     var validationError by rememberSaveable(record.id) { mutableStateOf<String?>(null) }
     var showDatePicker by rememberSaveable(record.id) { mutableStateOf(false) }
 
-    AlertDialog(
+    val scrollState = rememberScrollState()
+    val canonicalAccounts = listOf("BSI", "Mandiri", "Jago", "Cash")
+
+    Dialog(
         onDismissRequest = onDismiss,
-        title = { Text("Review captured transaction") },
-        text = {
-            Column(
-                Modifier
-                    .heightIn(max = 480.dp)
-                    .verticalScroll(rememberScrollState())
-                    .imePadding(),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.92f)
+                .padding(horizontal = 20.dp)
+                .imePadding()
+                .testTag("review_dialog"),
+            shape = MaterialTheme.shapes.extraLarge,
+            color = MaterialTheme.colorScheme.surfaceContainer,
+            tonalElevation = 8.dp,
+            shadowElevation = 12.dp,
+        ) {
+            Column(Modifier.fillMaxSize()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 18.dp),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Surface(
+                        shape = MaterialTheme.shapes.medium,
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Rounded.ReceiptLong,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(11.dp).size(24.dp),
+                        )
+                    }
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text(
+                            "Review transaction",
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.semantics { heading() },
+                        )
+                        Text(
+                            "Verify the capture before it enters your ledger.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .background(MaterialTheme.colorScheme.surfaceContainerLow),
+                ) {
+                    Column(
+                        Modifier
+                            .fillMaxSize()
+                            .verticalScroll(scrollState)
+                            .padding(horizontal = 24.dp, vertical = 18.dp)
+                            .padding(bottom = 32.dp)
+                            .testTag("review_scroll_content"),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
                 Text(
-                    "Confirm the notification parser got these details right.",
+                    "Captured notification",
+                    style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 if (record.suspectedDuplicateOf != null) {
@@ -533,7 +718,7 @@ private fun NotificationReviewDialog(
                 }
                 Text(
                     record.body,
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 OutlinedTextField(
@@ -549,20 +734,58 @@ private fun NotificationReviewDialog(
                     modifier = Modifier.fillMaxWidth(),
                     testTag = "review_amount",
                 )
-                Text("Type", style = MaterialTheme.typography.labelLarge)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(
-                        selected = kind == "expense",
-                        onClick = { kind = "expense" },
-                        label = { Text("Expense") },
-                        modifier = Modifier.testTag("review_kind_expense"),
+                Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                    Text("Transaction type", style = MaterialTheme.typography.labelLarge)
+                    Row(
+                        Modifier.fillMaxWidth().selectableGroup(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        ReviewKindChoice(
+                            label = "Expense",
+                            icon = Icons.Rounded.SouthEast,
+                            selected = kind == "expense",
+                            accent = Expense,
+                            tag = "review_kind_expense",
+                            onClick = { kind = "expense" },
+                            modifier = Modifier.weight(1f),
+                        )
+                        ReviewKindChoice(
+                            label = "Income",
+                            icon = Icons.Rounded.NorthEast,
+                            selected = kind == "income",
+                            accent = Income,
+                            tag = "review_kind_income",
+                            onClick = { kind = "income" },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("review_self_transfer")
+                        .toggleable(
+                            value = selfTransfer,
+                            role = Role.Checkbox,
+                            onValueChange = { selfTransfer = it },
+                        ),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Checkbox(
+                        checked = selfTransfer,
+                        onCheckedChange = null,
                     )
-                    FilterChip(
-                        selected = kind == "income",
-                        onClick = { kind = "income" },
-                        label = { Text("Income") },
-                        modifier = Modifier.testTag("review_kind_income"),
-                    )
+                    Column(Modifier.padding(top = 10.dp)) {
+                        Text(
+                            "Own-account transfer",
+                            style = MaterialTheme.typography.labelLarge,
+                        )
+                        Text(
+                            "Use this only when the money moved between your own accounts. The email watcher will balance both legs; only any admin fee counts as spending.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
                 LedgerDateField(
                     occurredOn,
@@ -584,13 +807,46 @@ private fun NotificationReviewDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("review_category"),
                 )
-                OutlinedTextField(
-                    account,
-                    { account = it },
-                    label = { Text("Account") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().testTag("review_account"),
-                )
+                ExposedDropdownMenuBox(
+                    expanded = accountMenuExpanded,
+                    onExpandedChange = { accountMenuExpanded = !accountMenuExpanded },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    OutlinedTextField(
+                        value = account,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("Account") },
+                        trailingIcon = {
+                            ExposedDropdownMenuDefaults.TrailingIcon(expanded = accountMenuExpanded)
+                        },
+                        leadingIcon = { Icon(Icons.Rounded.AccountBalanceWallet, contentDescription = null) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor()
+                            .testTag("review_account"),
+                    )
+                    ExposedDropdownMenu(
+                        expanded = accountMenuExpanded,
+                        onDismissRequest = { accountMenuExpanded = false },
+                    ) {
+                        canonicalAccounts.forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(option) },
+                                onClick = {
+                                    account = option
+                                    accountMenuExpanded = false
+                                },
+                                leadingIcon = if (account == option) {
+                                    { Icon(Icons.Rounded.Check, contentDescription = null) }
+                                } else null,
+                                modifier = Modifier.testTag(
+                                    "review_account_${option.lowercase(Locale.ROOT)}",
+                                ),
+                            )
+                        }
+                    }
+                }
                 (validationError ?: externalError)?.let {
                     Text(
                         it,
@@ -600,47 +856,93 @@ private fun NotificationReviewDialog(
                             .semantics { liveRegion = LiveRegionMode.Assertive },
                     )
                 }
-            }
-        },
-        confirmButton = {
-            Button(
-                enabled = !saving,
-                modifier = Modifier.testTag("review_save"),
-                onClick = {
-                    val amountIdr = amount.toLongOrNull()
-                    val validDate = runCatching { LocalDate.parse(occurredOn) }.isSuccess
-                    if (
-                        merchant.isBlank() || amountIdr == null || amountIdr <= 0 ||
-                        !validDate || description.isBlank() || category.isBlank() ||
-                        account.isBlank()
-                    ) {
-                        validationError =
-                            "Enter a merchant, positive amount, ISO date, description, category, and account."
-                    } else {
-                        validationError = null
-                        onConfirm(
-                            NotificationConfirmationDraft(
-                                merchant = merchant.trim(),
-                                amountIdr = amountIdr,
-                                occurredOn = occurredOn,
-                                description = description.trim(),
-                                category = category.trim(),
-                                account = account.trim(),
-                                kind = kind,
-                            ),
+                    }
+                    if (scrollState.value > 0) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(18.dp)
+                                .align(Alignment.TopCenter)
+                                .background(
+                                    Brush.verticalGradient(
+                                        listOf(MaterialTheme.colorScheme.surfaceContainerLow, Color.Transparent),
+                                    ),
+                                )
+                                .testTag("review_top_scroll_cue"),
                         )
                     }
-                },
-            ) {
-                Text(if (saving) "Saving…" else "Save transaction")
+                    if (scrollState.value < scrollState.maxValue) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(22.dp)
+                                .align(Alignment.BottomCenter)
+                                .background(
+                                    Brush.verticalGradient(
+                                        listOf(Color.Transparent, MaterialTheme.colorScheme.surfaceContainerLow),
+                                    ),
+                                )
+                                .testTag("review_bottom_scroll_cue"),
+                        )
+                    }
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.primary.copy(alpha = 0.42f))
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    tonalElevation = 10.dp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .shadow(8.dp)
+                        .testTag("review_sticky_footer"),
+                ) {
+                    FlowRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .navigationBarsPadding()
+                            .padding(horizontal = 20.dp, vertical = 14.dp),
+                        horizontalArrangement = Arrangement.End,
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        TextButton(onClick = onDismiss, enabled = !saving) {
+                            Text("Cancel")
+                        }
+                        Button(
+                            enabled = !saving,
+                            modifier = Modifier.testTag("review_save"),
+                            onClick = {
+                                val amountIdr = amount.toLongOrNull()
+                                val validDate = runCatching { LocalDate.parse(occurredOn) }.isSuccess
+                                if (
+                                    merchant.isBlank() || amountIdr == null || amountIdr <= 0 ||
+                                    !validDate || description.isBlank() || category.isBlank() ||
+                                    account.isBlank()
+                                ) {
+                                    validationError =
+                                        "Enter a merchant, positive amount, ISO date, description, category, and account."
+                                } else {
+                                    validationError = null
+                                    onConfirm(
+                                        NotificationConfirmationDraft(
+                                            merchant = merchant.trim(),
+                                            amountIdr = amountIdr,
+                                            occurredOn = occurredOn,
+                                            description = description.trim(),
+                                            category = category.trim(),
+                                            account = account.trim(),
+                                            kind = kind,
+                                            selfTransfer = selfTransfer,
+                                        ),
+                                    )
+                                }
+                            },
+                        ) {
+                            Text(if (saving) "Saving…" else "Save transaction")
+                        }
+                    }
+                }
             }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !saving) {
-                Text("Cancel")
-            }
-        },
-    )
+        }
+    }
     if (showDatePicker) {
         LedgerDatePickerDialog(
             currentValue = occurredOn,
@@ -648,6 +950,41 @@ private fun NotificationReviewDialog(
             onDismiss = { showDatePicker = false },
             testTag = "review_date",
         )
+    }
+}
+
+@Composable
+private fun ReviewKindChoice(
+    label: String,
+    icon: ImageVector,
+    selected: Boolean,
+    accent: Color,
+    tag: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier
+            .heightIn(min = 56.dp)
+            .selectable(selected = selected, onClick = onClick, role = Role.RadioButton)
+            .testTag(tag)
+            .semantics(mergeDescendants = true) { contentDescription = "$label transaction type" },
+        shape = MaterialTheme.shapes.medium,
+        color = if (selected) accent.copy(alpha = 0.16f)
+        else MaterialTheme.colorScheme.surfaceContainerHigh,
+        border = BorderStroke(
+            if (selected) 1.5.dp else 1.dp,
+            if (selected) accent else MaterialTheme.colorScheme.outlineVariant,
+        ),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(20.dp))
+            Text(label, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+        }
     }
 }
 
@@ -681,16 +1018,17 @@ private fun Transactions(openDetail: (TransactionEntity) -> Unit) {
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
         item {
-            Row(
+            FlowRow(
                 Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Column {
                     Text(
                         "Transactions",
                         style = MaterialTheme.typography.headlineMedium,
                         fontWeight = FontWeight.Bold,
+                        modifier = Modifier.semantics { heading() },
                     )
                     Text(
                         if (transactionsState == null) "Loading local ledger…"
@@ -742,9 +1080,10 @@ private fun Transactions(openDetail: (TransactionEntity) -> Unit) {
             )
         }
         item {
-            Row(
+            FlowRow(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 TransactionKind.entries.forEach { option ->
                     FilterChip(
@@ -860,7 +1199,11 @@ private fun Transactions(openDetail: (TransactionEntity) -> Unit) {
 }
 
 @Composable
-private fun SettingsScreen(openDiagnostics: () -> Unit) {
+private fun SettingsScreen(
+    selectedPalette: LedgerThemePalette,
+    onPaletteSelected: (LedgerThemePalette) -> Unit,
+    openDiagnostics: () -> Unit,
+) {
     val context = LocalContext.current
     val settings = remember { LedgerSettingsStore.read(context) }
     val allowCleartext = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
@@ -886,9 +1229,83 @@ private fun SettingsScreen(openDiagnostics: () -> Unit) {
         )
         LedgerCard {
             LedgerSectionHeader(
+                title = "Appearance",
+                subtitle = "Choose a polished palette. Changes apply immediately and stay selected on this device.",
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                LedgerThemePalette.entries.forEach { palette ->
+                    val selected = selectedPalette == palette
+                    Surface(
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 82.dp)
+                            .selectable(
+                                selected = selected,
+                                onClick = { onPaletteSelected(palette) },
+                                role = Role.RadioButton,
+                            )
+                            .testTag("theme_${palette.storageValue}")
+                            .semantics(mergeDescendants = true) {
+                                contentDescription = "${palette.label} theme"
+                            },
+                        shape = MaterialTheme.shapes.medium,
+                        color = if (selected) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surfaceContainerHigh,
+                        border = BorderStroke(
+                            if (selected) 1.5.dp else 1.dp,
+                            if (selected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.outlineVariant,
+                        ),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(7.dp),
+                        ) {
+                            Row(horizontalArrangement = Arrangement.spacedBy((-5).dp)) {
+                                Box(Modifier.size(22.dp).background(palette.previewPrimary, CircleShape))
+                                Box(
+                                    Modifier
+                                        .size(22.dp)
+                                        .background(palette.previewSecondary, CircleShape)
+                                        .border(2.dp, MaterialTheme.colorScheme.surfaceContainerHigh, CircleShape),
+                                )
+                            }
+                            Text(
+                                palette.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        LedgerCard {
+            LedgerSectionHeader(
                 title = "Server connection",
                 subtitle = if (allowCleartext) "HTTPS is required in release builds; HTTP is available only for local debug testing." else "Use an HTTPS endpoint for your private ledger.",
             )
+            message?.let {
+                Text(
+                    it,
+                    color = if (messageIsError) Expense
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("settings_message")
+                        .semantics {
+                            liveRegion = if (messageIsError) LiveRegionMode.Assertive
+                            else LiveRegionMode.Polite
+                        },
+                )
+            }
             OutlinedTextField(
                 baseUrl,
                 { baseUrl = it },
@@ -965,19 +1382,6 @@ private fun SettingsScreen(openDiagnostics: () -> Unit) {
             ) {
                 Text(if (testingConnection) "Testing connection…" else "Test connection")
             }
-            message?.let {
-                Text(
-                    it,
-                    color = if (messageIsError) Expense
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .testTag("settings_message")
-                        .semantics {
-                            liveRegion = if (messageIsError) LiveRegionMode.Assertive
-                            else LiveRegionMode.Polite
-                        },
-                )
-            }
         }
         LedgerCard {
             LedgerSectionHeader(
@@ -996,7 +1400,11 @@ private fun SettingsScreen(openDiagnostics: () -> Unit) {
 
 @Composable
 private fun TransactionRow(tx: TransactionEntity, onClick: (() -> Unit)? = null) {
-    val tint = if (tx.amountMinor < 0) Expense else Income
+    val tint = when {
+        tx.ledgerRole == "self_transfer_principal" -> MaterialTheme.colorScheme.primary
+        tx.amountMinor < 0 -> Expense
+        else -> Income
+    }
     val modifier = Modifier
         .fillMaxWidth()
         .testTag("transaction_item_${tx.id}")
@@ -1039,6 +1447,10 @@ private fun TransactionEntity.toDetailSnapshot(): String = JSONObject()
     .put("occurredAt", occurredAt)
     .put("syncState", syncState)
     .put("serverUpdatedAt", serverUpdatedAt)
+    .put("kind", kind)
+    .put("ledgerRole", ledgerRole)
+    .put("transferBundleId", transferBundleId)
+    .put("transferLeg", transferLeg)
     .toString()
 
 private fun detailSnapshotToTransaction(snapshot: String?): TransactionEntity? = runCatching {
@@ -1054,6 +1466,10 @@ private fun detailSnapshotToTransaction(snapshot: String?): TransactionEntity? =
         occurredAt = value.getLong("occurredAt"),
         syncState = value.optString("syncState", "pending"),
         serverUpdatedAt = value.optString("serverUpdatedAt").takeIf { it.isNotBlank() && it != "null" },
+        kind = value.optString("kind", "expense"),
+        ledgerRole = value.optString("ledgerRole", "ordinary"),
+        transferBundleId = value.optString("transferBundleId").takeIf { it.isNotBlank() && it != "null" },
+        transferLeg = value.optString("transferLeg").takeIf { it.isNotBlank() && it != "null" },
     )
 }.getOrNull()
 
@@ -1168,9 +1584,17 @@ private fun TransactionDetail(transactionId: String, onBack: () -> Unit) {
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(verticalAlignment = Alignment.Top) {
             IconButton(onClick = ::requestBack, modifier = Modifier.testTag("transaction_back")) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Back") }
-            Text("Transaction details", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text(
+                "Transaction details",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(top = 8.dp)
+                    .semantics { heading() },
+            )
         }
         if (current == null) {
             if (observation is TransactionObservation.Loading) {

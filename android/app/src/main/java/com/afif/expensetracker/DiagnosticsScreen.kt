@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package com.afif.expensetracker
 
 import android.content.Context
@@ -6,18 +8,15 @@ import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -37,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -53,7 +53,8 @@ import com.afif.expensetracker.sync.EmailFailure
 import com.afif.expensetracker.sync.OperationalHealth
 import com.afif.expensetracker.sync.ReconciliationStatus
 import com.afif.expensetracker.sync.SyncStatus
-import com.afif.expensetracker.ui.theme.Elevated
+import com.afif.expensetracker.ui.components.LedgerCard
+import com.afif.expensetracker.ui.components.LedgerSectionHeader
 import com.afif.expensetracker.ui.theme.Ink
 import com.afif.expensetracker.ui.theme.Income
 import com.afif.expensetracker.ui.theme.Warning
@@ -117,40 +118,44 @@ fun DiagnosticsScreen(onBack: () -> Unit = {}) {
                     "Notification diagnostics",
                     style = androidx.compose.material3.MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { heading() },
                 )
             }
             Text("Use this screen while validating bank notifications on a real device. Captured content stays on this device.", color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(8.dp))
-            SyncDiagnosticsCard(context)
-            Spacer(Modifier.height(8.dp))
-            OperationalHealthCard(context)
-            Spacer(Modifier.height(8.dp))
-            Card(modifier = Modifier.fillMaxWidth().testTag("notification_access_status"), colors = CardDefaults.cardColors(containerColor = Elevated)) {
-                Column(Modifier.padding(16.dp)) {
-                    Text(
-                        if (enabled) "Notification access enabled" else "Notification access is disabled",
-                        color = if (enabled) Income else Warning,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                    )
-                    Text("Ledgerly must be allowed to read notifications locally.", color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant)
-                    OutlinedButton(modifier = Modifier.testTag("open_notification_access"), onClick = { context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }) { Text("Open notification access") }
-                }
+        }
+        item { OperationalHealthCard(context) }
+        item { SyncDiagnosticsCard(context) }
+        item {
+            LedgerCard(modifier = Modifier.fillMaxWidth().testTag("notification_access_status")) {
+                LedgerSectionHeader(
+                    title = "Device capture",
+                    subtitle = "Supported bank alerts stay local until you confirm them.",
+                )
+                Text(
+                    if (enabled) "Notification access enabled" else "Notification access is disabled",
+                    color = if (enabled) Income else Warning,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                )
+                OutlinedButton(
+                    modifier = Modifier.fillMaxWidth().testTag("open_notification_access"),
+                    onClick = { context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) },
+                ) { Text("Open notification access") }
             }
         }
-        item { Text("Supported bank apps", style = androidx.compose.material3.MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
+        item { LedgerSectionHeader("Supported bank apps", "Only allowlisted packages can enter the review inbox.") }
         items(supportedBanks) { bank ->
-            Card(
+            LedgerCard(
                 modifier = Modifier.fillMaxWidth().testTag("supported_bank_${bank.packageName}"),
-                colors = CardDefaults.cardColors(containerColor = Elevated),
+                contentPadding = 14.dp,
             ) {
-                Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                    Text(bank.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text(bank.packageName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+                Text(bank.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(bank.packageName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        item { HorizontalDivider(); Text("Recent captures", style = androidx.compose.material3.MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
+        item { LedgerSectionHeader("Recent captures", "Review status and restore dismissed captures.") }
         if (records.isEmpty()) item { Text("No supported notifications captured yet.", color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant) }
         items(records, key = { it.id }) { record ->
             CaptureRow(record) {
@@ -282,13 +287,22 @@ private fun OperationalHealthCard(context: Context) {
     }
     androidx.compose.runtime.LaunchedEffect(baseUrl, token) { refresh() }
 
-    Card(
+    LedgerCard(
         modifier = Modifier.fillMaxWidth().testTag("operational_health"),
-        colors = CardDefaults.cardColors(containerColor = Elevated),
+        contentPadding = 16.dp,
     ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Operational health", style = androidx.compose.material3.MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    "Operational health",
+                    style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f).semantics { heading() },
+                )
                 OutlinedButton(
                     onClick = ::refresh,
                     enabled = !loading,
@@ -338,7 +352,10 @@ private fun OperationalHealthCard(context: Context) {
                     ) {
                         Text("${operation.kind} · ${operation.attempts} attempts", color = Warning)
                         operation.lastError?.let { Text(sanitizeSyncError(it), color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
                             OutlinedButton(
                                 onClick = { retryLocal(operation) },
                                 modifier = Modifier.testTag("local_sync_retry_${operation.id}"),
@@ -364,7 +381,11 @@ private fun OperationalHealthCard(context: Context) {
                     }
                 }
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            FlowRow(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
                 Text(
                     reconciliation?.let {
                         if (it.clean) "Ledger and Notion match"
@@ -372,6 +393,7 @@ private fun OperationalHealthCard(context: Context) {
                     } ?: "Reconciliation not run",
                     color = if (reconciliation?.clean == false) Warning else MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier
+                        .weight(1f)
                         .testTag("reconciliation_status")
                         .semantics { liveRegion = LiveRegionMode.Polite },
                 )
@@ -477,10 +499,19 @@ private fun SyncDiagnosticsCard(context: Context) {
     }
 
     androidx.compose.runtime.LaunchedEffect(baseUrl, token) { refresh() }
-    Card(modifier = Modifier.fillMaxWidth().testTag("sync_diagnostics"), colors = CardDefaults.cardColors(containerColor = Elevated)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween) {
-                Text("Ledger sync", style = androidx.compose.material3.MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+    LedgerCard(modifier = Modifier.fillMaxWidth().testTag("sync_diagnostics"), contentPadding = 16.dp) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    "Ledger sync",
+                    style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f).semantics { heading() },
+                )
                 OutlinedButton(onClick = ::refresh, enabled = !loading, modifier = Modifier.testTag("sync_refresh")) { Text("Refresh") }
             }
             if (loading) androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.testTag("sync_loading"))
@@ -539,8 +570,8 @@ private fun SyncDiagnosticsCard(context: Context) {
 private fun CaptureRow(record: NotificationRecord, onRestore: () -> Unit) {
     val parseStatus = if (record.amountIdr != null && record.merchant != null && !record.reviewRequired) "Parsed" else "Needs review"
     val syncStatus = when (record.status) { "confirmed" -> "Confirmed locally"; "dismissed" -> "Dismissed"; else -> "Awaiting review" }
-    Card(modifier = Modifier.fillMaxWidth().testTag("diagnostic_capture_${record.id}"), colors = CardDefaults.cardColors(containerColor = Elevated)) {
-        Column(Modifier.padding(14.dp)) {
+    LedgerCard(modifier = Modifier.fillMaxWidth().testTag("diagnostic_capture_${record.id}"), contentPadding = 14.dp) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(record.merchant ?: record.title, fontWeight = FontWeight.SemiBold)
             Text(record.body, color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant)
             Text("${record.bank} • $parseStatus • $syncStatus", color = if (record.status == "confirmed") Income else Warning)

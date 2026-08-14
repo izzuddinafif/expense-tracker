@@ -15,6 +15,8 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
     private val client = OkHttpClient()
     @Volatile var lastError: String? = null
         private set
+    @Volatile var deferred: Boolean = false
+        private set
 
     private fun rememberHttpFailure(response: okhttp3.Response) {
         val detail = when (response.code) {
@@ -47,11 +49,17 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
     }
 
     fun push(payload: String): TransactionEntity? {
+        deferred = false
         val url = baseUrl.trimEnd('/') + "/api/v1/transactions"
         val request = Request.Builder().url(url)
             .header("Authorization", "Bearer $deviceToken")
             .post(payload.toRequestBody("application/json".toMediaType())).build()
         return client.newCall(request).execute().use {
+            if (it.code == 202) {
+                deferred = true
+                lastError = "HTTP 202: Waiting for the bank email to confirm this self-transfer."
+                return@use null
+            }
             if (!it.isSuccessful) {
                 rememberHttpFailure(it)
                 return@use null
@@ -367,16 +375,25 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
         val amount = value.getLong("amount_idr")
         val occurredAt = LocalDate.parse(value.getString("occurred_on"))
             .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val amountMinor = when (kind) {
+            "expense" -> -amount
+            "income" -> amount
+            else -> if (value.optString("transfer_leg") == "outgoing" || value.optString("description").contains("(keluar)")) -amount else amount
+        }
         return TransactionEntity(
             id = value.getString("id"),
             merchant = value.optString("merchant").ifBlank { value.optString("description", "Transaction") },
-            amountMinor = if (kind == "expense") -amount else amount,
+            amountMinor = amountMinor,
             description = value.optString("description"),
             category = value.optString("subcategory").ifBlank { value.optString("category", "Uncategorized") },
             account = value.optString("account"),
             occurredAt = occurredAt,
             syncState = "synced",
             serverUpdatedAt = value.optString("updated_at").takeIf { it.isNotBlank() && it != "null" },
+            kind = kind,
+            ledgerRole = value.optString("ledger_role", "ordinary"),
+            transferBundleId = value.optString("transfer_bundle_id").takeIf { it.isNotBlank() && it != "null" },
+            transferLeg = value.optString("transfer_leg").takeIf { it.isNotBlank() && it != "null" },
         )
     }
 }

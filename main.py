@@ -7,6 +7,7 @@ import socket
 from logging.handlers import RotatingFileHandler
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -36,6 +37,10 @@ from keyboards import (
 from models import NotionCache, ExpenseEntry, IncomeEntry
 from notion import NotionClient, _url_to_id
 from notion_sync import NotionSyncWorker
+from operations import (
+    TELEGRAM_WEBHOOK_CHECK_INTERVAL_SECONDS,
+    record_telegram_webhook_check,
+)
 from budget_commands import BudgetCommandService
 from local_budgets import BudgetStore
 from local_query import LocalQueryService
@@ -110,6 +115,83 @@ class ResilientBot(Bot):
         raise RuntimeError("Telegram API call failed without an exception")
 
 
+async def _delete_setup_token_message(msg: Message, user_id: int) -> None:
+    """Best-effort removal of a credential-bearing Telegram message."""
+    try:
+        await msg.delete()
+    except Exception as exc:
+        # Keep an audit signal without logging the message or token contents.
+        log.warning(
+            "Could not delete setup token message for user %s (%s)",
+            user_id,
+            type(exc).__name__,
+        )
+
+
+async def _discover_setup_databases(
+    msg: Message,
+    user_id: int,
+    db: Database,
+    initialize_user: Callable[[int], Awaitable[object]],
+) -> None:
+    """Run database discovery while keeping credential details out of logs."""
+    user = await db.get_user(user_id)
+    if not user:
+        await msg.answer("❌ Terjadi kesalahan. Ketik /setup untuk mulai ulang.")
+        return
+
+    await db.set_user_setup_step(user_id, "discovering")
+    try:
+        temp_client = NotionClient(notion_token=user.notion_token, db_ids={})
+        db_ids = await temp_client.discover_databases()
+        await temp_client.aclose()
+    except Exception as exc:
+        # Exception messages from remote clients may contain request details.
+        # Record only the class so a token can never leak into application logs.
+        error_name = type(exc).__name__
+        log.error("Discovery failed for user %s (%s)", user_id, error_name)
+        fail_step = "await_token" if user.setup_step != "migrated" else "migrated"
+        await msg.answer(
+            f"❌ Gagal menemukan database ({error_name}).\n\n"
+            "Pastikan kamu sudah membagikan halaman template ke integration. "
+            + (
+                "Ketik /start untuk coba lagi."
+                if user.setup_step == "migrated"
+                else "Ketik token lagi untuk retry, atau /setup untuk mulai ulang."
+            ),
+            parse_mode="Markdown",
+        )
+        await db.set_user_setup_step(user_id, fail_step)
+        return
+
+    await db.upsert_user(user_id, setup_step="done", **db_ids)
+    await msg.answer(
+        "✅ *Setup selesai!*\n\n"
+        "Semua database berhasil ditemukan. Sekarang kamu bisa:\n"
+        "📸 Kirim foto struk → otomatis ekstrak & catat\n"
+        "💬 Ketik deskripsi pengeluaran → langsung dicatat\n"
+        "💰 Catat pemasukan\n"
+        "❓ Tanya pengeluaran\n\n"
+        "Ketik /help untuk bantuan lengkap.",
+        parse_mode="Markdown",
+    )
+    await initialize_user(user_id)
+
+
+async def _accept_setup_token(
+    msg: Message,
+    user_id: int,
+    token: str,
+    db: Database,
+    initialize_user: Callable[[int], Awaitable[object]],
+) -> None:
+    """Persist a setup token, remove its message, then start discovery."""
+    await db.upsert_user(user_id, notion_token=token, setup_step="discovering")
+    await _delete_setup_token_message(msg, user_id)
+    await msg.answer("🔍 Mencari database Notion di workspace kamu...")
+    await _discover_setup_databases(msg, user_id, db, initialize_user)
+
+
 async def main() -> None:
     config = load_config()
     if config.webhook_domain and len(config.webhook_secret) < 32:
@@ -171,6 +253,7 @@ async def main() -> None:
     auto_confirm_task: asyncio.Task | None = None  # background task handle for graceful shutdown
     notion_sync_task: asyncio.Task | None = None
     app_heartbeat_task: asyncio.Task | None = None
+    webhook_monitor_task: asyncio.Task | None = None
 
     def _parse_cb(data: str, idx: int = 1) -> int | None:
         try:
@@ -468,13 +551,11 @@ async def main() -> None:
             if not text.startswith(("ntn_", "secret_")):
                 await msg.answer("❌ Token tidak valid. Harus diawali `ntn_` atau `secret_`. Coba lagi:", parse_mode="Markdown")
                 return
-            await db.upsert_user(user_id, notion_token=text, setup_step="discovering")
-            await msg.answer("🔍 Mencari database Notion di workspace kamu...")
-            await _do_discovery(msg, user_id)
+            await _accept_setup_token(msg, user_id, text, db, get_user_notion)
             return
 
         if step == "discovering":
-            await _do_discovery(msg, user_id)
+            await _discover_setup_databases(msg, user_id, db, get_user_notion)
             return
 
         if step == "migrated":
@@ -484,53 +565,11 @@ async def main() -> None:
                 "🔍 Mencari database Notion di workspace kamu...",
                 parse_mode="Markdown",
             )
-            await _do_discovery(msg, user_id)
+            await _discover_setup_databases(msg, user_id, db, get_user_notion)
             return
 
         # step == "done" — shouldn't reach here, but just in case
         await msg.answer("✅ Setup sudah selesai! Ketik /help untuk bantuan.")
-
-    async def _do_discovery(msg: Message, user_id: int) -> None:
-        """Run database discovery for a user."""
-        user = await db.get_user(user_id)
-        if not user:
-            await msg.answer("❌ Terjadi kesalahan. Ketik /setup untuk mulai ulang.")
-            return
-
-        await db.set_user_setup_step(user_id, "discovering")
-        try:
-            temp_client = NotionClient(notion_token=user.notion_token, db_ids={})
-            db_ids = await temp_client.discover_databases()
-            await temp_client.aclose()
-        except Exception as e:
-            log.error(f"Discovery failed for user {user_id}: {e}")
-            fail_step = "await_token" if user.setup_step != "migrated" else "migrated"
-            await msg.answer(
-                f"❌ Gagal menemukan database:\n`{e}`\n\n"
-                "Pastikan kamu sudah membagikan halaman template ke integration. "
-                + (
-                    "Ketik /start untuk coba lagi."
-                    if user.setup_step == "migrated"
-                    else "Ketik token lagi untuk retry, atau /setup untuk mulai ulang."
-                ),
-                parse_mode="Markdown",
-            )
-            await db.set_user_setup_step(user_id, fail_step)
-            return
-
-        await db.upsert_user(user_id, setup_step="done", **db_ids)
-        await msg.answer(
-            "✅ *Setup selesai!*\n\n"
-            "Semua database berhasil ditemukan. Sekarang kamu bisa:\n"
-            "📸 Kirim foto struk → otomatis ekstrak & catat\n"
-            "💬 Ketik deskripsi pengeluaran → langsung dicatat\n"
-            "💰 Catat pemasukan\n"
-            "❓ Tanya pengeluaran\n\n"
-            "Ketik /help untuk bantuan lengkap.",
-            parse_mode="Markdown",
-        )
-        # Initialize the user's Notion client and cache
-        await get_user_notion(user_id)
 
     async def _process_next_photo(user_id: int, owner: str) -> None:
         while True:
@@ -905,6 +944,7 @@ async def main() -> None:
                 ("app_loop", "App"),
                 ("notion_sync", "Notion worker"),
                 ("gmail", "Gmail"),
+                ("telegram_webhook", "Telegram webhook"),
                 ("backup", "Backup"),
             ):
                 worker = health["workers"].get(name)
@@ -2717,6 +2757,8 @@ async def main() -> None:
             notion_sync_task.cancel()
         if app_heartbeat_task:
             app_heartbeat_task.cancel()
+        if webhook_monitor_task:
+            webhook_monitor_task.cancel()
         if watch_over_task:
             watch_over_task.cancel()
         # Allow cancelled tasks to process their CancelledError
@@ -2726,6 +2768,7 @@ async def main() -> None:
                 auto_confirm_task,
                 notion_sync_task,
                 app_heartbeat_task,
+                webhook_monitor_task,
                 watch_over_task,
             ] if t),
             return_exceptions=True,
@@ -2743,6 +2786,28 @@ async def main() -> None:
         from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
         webhook_url = f"{config.webhook_domain.rstrip('/')}{config.webhook_path}"
+
+        async def _webhook_monitor() -> None:
+            while True:
+                try:
+                    result = await record_telegram_webhook_check(
+                        bot,
+                        db.record_operational_state,
+                        expected_url=webhook_url,
+                    )
+                    if not result["success"]:
+                        log.warning("Telegram webhook health degraded: %s", result["error"])
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # Do not let monitoring or its durable health write stop the bot.
+                    # Exception messages may contain connection details, so log only
+                    # the class name here.
+                    log.warning(
+                        "Telegram webhook monitor iteration failed (%s)",
+                        type(exc).__name__,
+                    )
+                await asyncio.sleep(TELEGRAM_WEBHOOK_CHECK_INTERVAL_SECONDS)
 
         async def on_startup(bot: Bot) -> None:
             await bot.set_webhook(
@@ -2777,7 +2842,11 @@ async def main() -> None:
         await runner.setup()
         site = web.TCPSite(runner, host="0.0.0.0", port=config.port)
         await site.start()
-        log.info("Webhook server listening on 0.0.0.0:%s, webhook URL: %s", config.port, webhook_url)
+        webhook_monitor_task = asyncio.create_task(_webhook_monitor())
+        log.info(
+            "Webhook server listening on 0.0.0.0:%s for configured HTTPS origin",
+            config.port,
+        )
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
         registered_signals: list[signal.Signals] = []

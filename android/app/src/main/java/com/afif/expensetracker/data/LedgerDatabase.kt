@@ -15,7 +15,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SyncCheckpoint::class,
         SyncRunLock::class,
     ],
-    version = 10,
+    version = 12,
     exportSchema = false,
 )
 abstract class LedgerDatabase : RoomDatabase() {
@@ -58,9 +58,23 @@ abstract class LedgerDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE ingestion_queue ADD COLUMN direction TEXT NOT NULL DEFAULT 'UNKNOWN'")
             }
         }
-        private val MIGRATION_9_10 = object : Migration(9, 10) {
+        internal val MIGRATION_9_10 = object : Migration(9, 10) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE transactions ADD COLUMN serverUpdatedAt TEXT")
+            }
+        }
+        internal val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE ingestion_queue ADD COLUMN platformIdentityRef TEXT")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_ingestion_queue_platformIdentityRef ON ingestion_queue(platformIdentityRef)")
+            }
+        }
+        internal val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE transactions ADD COLUMN kind TEXT NOT NULL DEFAULT 'expense'")
+                db.execSQL("ALTER TABLE transactions ADD COLUMN ledgerRole TEXT NOT NULL DEFAULT 'ordinary'")
+                db.execSQL("ALTER TABLE transactions ADD COLUMN transferBundleId TEXT")
+                db.execSQL("ALTER TABLE transactions ADD COLUMN transferLeg TEXT")
             }
         }
         @Volatile private var instance: LedgerDatabase? = null
@@ -69,7 +83,7 @@ abstract class LedgerDatabase : RoomDatabase() {
                 context,
                 LedgerDatabase::class.java,
                 "ledgerly.db",
-            ).addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10).build().also { instance = it }
+            ).addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12).build().also { instance = it }
         }
     }
 }

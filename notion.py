@@ -36,6 +36,10 @@ DB_NAME_MAP = {
 }
 
 
+class NotionTerminalError(RuntimeError):
+    """A deterministic Notion contract failure that retries cannot repair."""
+
+
 class NotionClient:
     def __init__(self, notion_token: str, db_ids: dict[str, str]) -> None:
         self._headers = {
@@ -43,6 +47,9 @@ class NotionClient:
             "Notion-Version": NOTION_VERSION,
         }
         self._db_ids = db_ids
+        self._transaction_preflights: dict[
+            tuple[str, str], tuple[str | None, bool]
+        ] = {}
         self._http = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
 
     @classmethod
@@ -190,19 +197,56 @@ class NotionClient:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 400:
                 raise
-            raise RuntimeError(
+            raise NotionTerminalError(
                 f"Notion database {database_id} must have a rich-text "
                 f"'{TRANSACTION_ID_PROPERTY}' property for idempotent sync"
             ) from exc
         if not pages:
             return None, True
         if len(pages) > 1:
-            raise RuntimeError(
+            raise NotionTerminalError(
                 f"Multiple Notion pages in database {database_id} have "
                 f"Transaction ID {transaction_id!r}; refusing to choose one"
             )
         page = pages[0]
         return page.get("url") or page.get("id"), True
+
+    def _transaction_database_id(self, kind: str) -> str:
+        db_key = {"expense": "expenses_ds", "income": "income_ds"}.get(kind)
+        if db_key is None:
+            raise NotionTerminalError(
+                f"unsupported Notion transaction kind: {kind}"
+            )
+        database_id = self._db_ids.get(db_key)
+        if not database_id:
+            raise NotionTerminalError(
+                f"Notion database configuration is missing: {db_key}"
+            )
+        return database_id
+
+    async def preflight_transaction(self, kind: str, transaction_id: str) -> None:
+        """Validate the idempotency schema before loading relation taxonomy.
+
+        The lookup result is retained for the immediately following upsert, so
+        the cheap schema check does not add a duplicate request on healthy jobs.
+        """
+        database_id = self._transaction_database_id(kind)
+        result = await self._find_by_transaction_id(database_id, transaction_id)
+        preflights = getattr(self, "_transaction_preflights", None)
+        if preflights is None:
+            preflights = {}
+            self._transaction_preflights = preflights
+        preflights[(database_id, transaction_id)] = result
+
+    async def _transaction_lookup(
+        self, database_id: str, transaction_id: str
+    ) -> tuple[str | None, bool]:
+        preflights = getattr(self, "_transaction_preflights", None)
+        if preflights is not None:
+            result = preflights.pop((database_id, transaction_id), None)
+            if result is not None:
+                return result
+        return await self._find_by_transaction_id(database_id, transaction_id)
 
     async def _find_by_exact_title(
         self, database_id: str, title: str
@@ -217,7 +261,7 @@ class NotionClient:
         )
         matches = [page for page in pages if self._extract_title(page) == title]
         if len(matches) > 1:
-            raise RuntimeError(
+            raise NotionTerminalError(
                 f"Multiple Notion pages in database {database_id} have title "
                 f"{title!r}; refusing to choose one"
             )
@@ -415,8 +459,9 @@ class NotionClient:
     ) -> str:
         """Create an expense unless this local transaction was delivered."""
         async with _transaction_locks.setdefault(transaction_id, asyncio.Lock()):
-            existing, supported = await self._find_by_transaction_id(
-                self._db_ids["expenses_ds"], transaction_id
+            database_id = self._transaction_database_id("expense")
+            existing, supported = await self._transaction_lookup(
+                database_id, transaction_id
             )
             if existing:
                 log.info("Notion expense already exists for transaction %s", transaction_id)
@@ -429,7 +474,7 @@ class NotionClient:
                     recurring_page_url,
                 )
             return await self._create_or_reconcile(
-                self._db_ids["expenses_ds"],
+                database_id,
                 transaction_id,
                 lambda: self.log_expense(
                     entry,
@@ -457,8 +502,9 @@ class NotionClient:
     ) -> str:
         """Create income unless this local transaction was delivered."""
         async with _transaction_locks.setdefault(transaction_id, asyncio.Lock()):
-            existing, supported = await self._find_by_transaction_id(
-                self._db_ids["income_ds"], transaction_id
+            database_id = self._transaction_database_id("income")
+            existing, supported = await self._transaction_lookup(
+                database_id, transaction_id
             )
             if existing:
                 log.info("Notion income already exists for transaction %s", transaction_id)
@@ -466,7 +512,7 @@ class NotionClient:
                     existing, entry, owner, cache, transaction_id
                 )
             return await self._create_or_reconcile(
-                self._db_ids["income_ds"],
+                database_id,
                 transaction_id,
                 lambda: self.log_income(
                     entry,
@@ -864,11 +910,9 @@ class NotionClient:
         if notion_page_id:
             await self.archive_page(notion_page_id)
             return notion_page_id
-        db_key = {"expense": "expenses_ds", "income": "income_ds"}.get(kind)
-        if db_key is None:
-            raise ValueError(f"unsupported Notion transaction kind: {kind}")
+        database_id = self._transaction_database_id(kind)
         page_url, _supported = await self._find_by_transaction_id(
-            self._db_ids[db_key], transaction_id
+            database_id, transaction_id
         )
         if not page_url:
             log.info("No Notion page found for voided transaction %s", transaction_id)

@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package com.afif.expensetracker.budget
 
 import androidx.compose.foundation.background
@@ -19,6 +21,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -49,12 +53,14 @@ fun BudgetScreen(onOpenSettings: () -> Unit = {}) {
     val baseUrl = settings.baseUrl
     val token = settings.token
     if (baseUrl.isBlank() || token.isBlank()) {
-        BudgetMessage(
-            "Connect the ledger first",
-            "Add your API base URL and device token in Settings.",
-            actionLabel = "Open Settings",
-            action = onOpenSettings,
-        )
+        Box(Modifier.fillMaxSize().background(Ink).padding(20.dp)) {
+            BudgetMessage(
+                "Connect the ledger first",
+                "Add your API base URL and device token in Settings.",
+                actionLabel = "Open Settings",
+                action = onOpenSettings,
+            )
+        }
         return
     }
     val repository = remember(baseUrl, token) { BudgetRepository(LedgerApi(baseUrl, token)) }
@@ -105,21 +111,44 @@ fun BudgetScreen(onOpenSettings: () -> Unit = {}) {
     val rows = report.orEmpty()
     val editing = editingCategory?.let { category -> rows.firstOrNull { it.category == category } }
     val deleteTarget = deleteCategory?.let { category -> rows.firstOrNull { it.category == category } }
-    LazyColumn(Modifier.fillMaxSize().background(Ink).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    LazyColumn(
+        Modifier.fillMaxSize().background(Ink),
+        contentPadding = PaddingValues(20.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
         item {
-            Text("Budgets", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "Budgets",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.semantics { heading() },
+            )
             Text("Server-authoritative monthly guardrails", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(12.dp))
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                IconButton(onClick = { changeMonth(month.minusMonths(1)) }, modifier = Modifier.testTag("budget_previous_month")) { Icon(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "Previous month") }
-                Text(
-                    month.format(DateTimeFormatter.ofPattern("MMMM yyyy", Locale.ENGLISH))
-                        .replaceFirstChar { it.uppercase() },
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.testTag("budget_month"),
-                )
-                IconButton(onClick = { changeMonth(month.plusMonths(1)) }, modifier = Modifier.testTag("budget_next_month")) { Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Next month") }
+            Spacer(Modifier.height(10.dp))
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                shape = MaterialTheme.shapes.large,
+                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    IconButton(onClick = { changeMonth(month.minusMonths(1)) }, modifier = Modifier.testTag("budget_previous_month")) { Icon(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "Previous month") }
+                    Text(
+                        month.format(DateTimeFormatter.ofPattern("MMMM yyyy", Locale.ENGLISH))
+                            .replaceFirstChar { it.uppercase() },
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("budget_month")
+                            .semantics { heading() },
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    )
+                    IconButton(onClick = { changeMonth(month.plusMonths(1)) }, modifier = Modifier.testTag("budget_next_month")) { Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Next month") }
+                }
             }
         }
         if (loading) item { LinearProgressIndicator(Modifier.fillMaxWidth().testTag("budget_loading"), color = MaterialTheme.colorScheme.primary) }
@@ -140,9 +169,29 @@ fun BudgetScreen(onOpenSettings: () -> Unit = {}) {
 @Composable private fun BudgetCard(budget: MonthlyBudget, edit: () -> Unit, delete: () -> Unit) {
     val bar = when (budget.status) { "over" -> Expense; "warning" -> Warning; else -> Income }
     LedgerCard(modifier = Modifier.testTag("budget_${budget.category}"), contentPadding = 16.dp) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { Text(budget.category, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)); TextButton(onClick = edit, modifier = Modifier.testTag("budget_edit_${budget.category}")) { Text("Edit") }; IconButton(onClick = delete, modifier = Modifier.testTag("budget_delete_${budget.category}")) { Icon(Icons.Rounded.DeleteOutline, "Delete") } }
+        FlowRow(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                budget.category,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f).widthIn(min = 120.dp),
+            )
+            TextButton(onClick = edit, modifier = Modifier.testTag("budget_edit_${budget.category}")) { Text("Edit") }
+            IconButton(
+                onClick = delete,
+                modifier = Modifier
+                    .testTag("budget_delete_${budget.category}")
+                    .semantics { contentDescription = "Delete ${budget.category} budget" },
+            ) {
+                Icon(Icons.Rounded.DeleteOutline, contentDescription = null)
+            }
+        }
         Text("${budgetMoney(budget.spentIdr)} of ${budgetMoney(budget.budgetIdr)}", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        LinearProgressIndicator(progress = { (budget.percentage / 100.0).coerceIn(0.0, 1.0).toFloat() }, modifier = Modifier.fillMaxWidth(), color = bar, trackColor = Surface)
+        LinearProgressIndicator(progress = { (budget.percentage / 100.0).coerceIn(0.0, 1.0).toFloat() }, modifier = Modifier.fillMaxWidth(), color = bar, trackColor = MaterialTheme.colorScheme.surfaceContainerHighest)
         Text(if (budget.remainingIdr >= 0) "${budgetMoney(budget.remainingIdr)} remaining" else "${budgetMoney(-budget.remainingIdr)} over budget", color = bar, fontWeight = FontWeight.SemiBold)
     }
 }

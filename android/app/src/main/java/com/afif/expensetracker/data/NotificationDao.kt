@@ -16,7 +16,34 @@ interface NotificationDao {
     fun observeByStatus(status: String, limit: Int): Flow<List<NotificationRecord>>
     @Query("SELECT * FROM ingestion_queue WHERE id = :id") suspend fun findById(id: Long): NotificationRecord?
     @Query("SELECT * FROM ingestion_queue WHERE sourceRef = :sourceRef") suspend fun findBySourceRef(sourceRef: String): NotificationRecord?
+    @Query("SELECT * FROM ingestion_queue WHERE platformIdentityRef = :platformIdentityRef")
+    suspend fun findByPlatformIdentityRef(platformIdentityRef: String): NotificationRecord?
     @Query("SELECT * FROM ingestion_queue WHERE packageName = :packageName AND receivedAt >= :receivedAfter ORDER BY receivedAt DESC LIMIT :limit")
     suspend fun findRecentForPackage(packageName: String, receivedAfter: Long, limit: Int): List<NotificationRecord>
+    @Query(
+        """
+        UPDATE ingestion_queue SET
+            title = :title,
+            body = :body,
+            amountIdr = :amountIdr,
+            merchant = :merchant,
+            bank = :bank,
+            direction = :direction,
+            occurredOn = :occurredOn,
+            reviewRequired = :reviewRequired
+        WHERE id = :id AND status = 'pending'
+        """,
+    )
+    suspend fun refreshPendingCapture(
+        id: Long,
+        title: String,
+        body: String,
+        amountIdr: Long?,
+        merchant: String?,
+        bank: String,
+        direction: String,
+        occurredOn: String?,
+        reviewRequired: Boolean,
+    ): Int
     @Query("UPDATE ingestion_queue SET status = :status WHERE id = :id") suspend fun updateStatus(id: Long, status: String)
 }

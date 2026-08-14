@@ -1,5 +1,6 @@
-import sqlite3
+import hashlib
 import json
+import sqlite3
 
 import pytest
 
@@ -10,6 +11,7 @@ from scripts.sqlite_backup import (
     main,
     record_backup_status,
     restore_database,
+    validate_backup_metadata,
 )
 
 
@@ -46,6 +48,66 @@ def test_restore_refuses_existing_target_without_explicit_flag(tmp_path):
     restore_database(backup, target, allow_existing=True)
     with sqlite3.connect(target) as conn:
         assert conn.execute("SELECT value FROM values_table").fetchone()[0] == "restored"
+
+
+def test_restore_requires_metadata_unless_legacy_override_is_explicit(tmp_path):
+    source = tmp_path / "legacy.sqlite3"
+    target = tmp_path / "target.sqlite3"
+    make_db(source, "legacy")
+
+    with pytest.raises(BackupError, match="metadata does not exist"):
+        restore_database(source, target)
+    with pytest.warns(RuntimeWarning, match="legacy backup without metadata"):
+        restore_database(source, target, allow_legacy_without_metadata=True)
+
+    with sqlite3.connect(target) as conn:
+        assert conn.execute("SELECT value FROM values_table").fetchone()[0] == "legacy"
+
+
+@pytest.mark.parametrize("field", ["size_bytes", "sha256"])
+def test_restore_rejects_mismatched_metadata_even_with_legacy_override(tmp_path, field):
+    source = tmp_path / "source.sqlite3"
+    make_db(source)
+    backup = backup_database(source, tmp_path / "backups")
+    metadata_path = backup.with_suffix(backup.suffix + ".json")
+    metadata = json.loads(metadata_path.read_text())
+    metadata[field] = metadata[field] + 1 if field == "size_bytes" else "0" * 64
+    metadata_path.write_text(json.dumps(metadata))
+
+    with pytest.raises(BackupError, match="size mismatch|SHA-256 mismatch"):
+        restore_database(
+            backup,
+            tmp_path / "target.sqlite3",
+            allow_legacy_without_metadata=True,
+        )
+
+
+def test_metadata_validation_rejects_invalid_fields(tmp_path):
+    source = tmp_path / "source.sqlite3"
+    make_db(source)
+    backup = backup_database(source, tmp_path / "backups")
+    metadata_path = backup.with_suffix(backup.suffix + ".json")
+    metadata = json.loads(metadata_path.read_text())
+    metadata["sha256"] = "not-a-digest"
+    metadata_path.write_text(json.dumps(metadata))
+
+    with pytest.raises(BackupError, match="invalid backup metadata sha256"):
+        validate_backup_metadata(backup)
+
+
+def test_verify_cli_reports_validated_digest_and_size(tmp_path, capsys):
+    source = tmp_path / "source.sqlite3"
+    make_db(source)
+    backup = backup_database(source, tmp_path / "backups")
+
+    assert main(["verify", "--source", str(backup)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result == {
+        "backup": str(backup),
+        "sha256": hashlib.sha256(backup.read_bytes()).hexdigest(),
+        "size_bytes": backup.stat().st_size,
+        "verified": True,
+    }
 
 
 def test_cli_help_and_missing_source(capsys, tmp_path):
@@ -138,3 +200,60 @@ def test_offsite_status_overrides_local_success_health(tmp_path):
     assert row[0]
     assert row[1] == "remote checksum mismatch"
     assert json.loads(row[2])["offsite_host"] == "backup.example"
+
+
+def test_offsite_status_fails_when_authoritative_state_cannot_be_persisted(tmp_path):
+    source = tmp_path / "source.sqlite3"
+    make_db(source)
+
+    with pytest.raises(BackupError, match="authoritative off-site backup status"):
+        record_backup_status(
+            source,
+            tmp_path / "backup.sqlite3",
+            success=True,
+            metadata={"offsite_host": "backup.example"},
+        )
+
+
+def test_offsite_status_cli_persists_and_reports_verified_artifact(tmp_path, capsys):
+    source = tmp_path / "source.sqlite3"
+    make_db(source)
+    with sqlite3.connect(source) as conn:
+        conn.execute(
+            "CREATE TABLE operational_state ("
+            "name TEXT PRIMARY KEY,last_attempt_at TEXT,last_success_at TEXT,"
+            "last_error TEXT,metadata_json TEXT NOT NULL,updated_at TEXT NOT NULL)"
+        )
+    backup = tmp_path / "backups" / "source-20260814T000000000000Z.sqlite3"
+
+    assert main(
+        [
+            "offsite-status",
+            "--source",
+            str(source),
+            "--destination",
+            str(backup),
+            "--success",
+            "--offsite-host",
+            "backup.example",
+            "--offsite-path",
+            "/srv/ledgerly",
+            "--backup-sha256",
+            "a" * 64,
+            "--backup-size-bytes",
+            "8192",
+        ]
+    ) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "destination": str(backup),
+        "offsite_host": "backup.example",
+        "status": "success",
+    }
+    with sqlite3.connect(source) as conn:
+        metadata = json.loads(
+            conn.execute(
+                "SELECT metadata_json FROM operational_state WHERE name='backup'"
+            ).fetchone()[0]
+        )
+    assert metadata["sha256"] == "a" * 64
+    assert metadata["size_bytes"] == 8192
