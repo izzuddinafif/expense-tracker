@@ -71,6 +71,9 @@ class NotificationConfirmationStore(private val database: LedgerDatabase) {
                 syncState = "pending",
                 kind = values.kind,
                 ledgerRole = if (values.selfTransfer) "self_transfer_principal" else "ordinary",
+                source = "bank_notification",
+                sourceRef = record.sourceRef,
+                evidenceCount = 1,
             )
         )
         // The notification status gate above makes this insert idempotent while

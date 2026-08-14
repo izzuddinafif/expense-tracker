@@ -51,6 +51,86 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
         }
     }
 
+    /** Fetch the authoritative balance and net-worth snapshot; it is never inferred from local transactions. */
+    fun portfolio(): PortfolioSnapshot? {
+        val request = Request.Builder()
+            .url(baseUrl.trimEnd('/') + "/api/v1/portfolio")
+            .header("Authorization", "Bearer $deviceToken")
+            .get()
+            .build()
+        return client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                rememberHttpFailure(response)
+                return@use null
+            }
+            runCatching { parsePortfolioSnapshot(JSONObject(response.body?.string().orEmpty())) }
+                .onFailure { lastError = "Could not read the portfolio response." }
+                .getOrNull()
+                ?.also { lastError = null }
+        }
+    }
+
+    fun assets(): List<LedgerAsset>? {
+        val request = Request.Builder()
+            .url(baseUrl.trimEnd('/') + "/api/v1/assets")
+            .header("Authorization", "Bearer $deviceToken")
+            .get()
+            .build()
+        return client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                rememberHttpFailure(response)
+                return@use null
+            }
+            runCatching { parseAssetsResponse(JSONObject(response.body?.string().orEmpty())) }
+                .onFailure { lastError = "Could not read the assets response." }
+                .getOrNull()
+                ?.also { lastError = null }
+        }
+    }
+
+    fun createAsset(payload: JSONObject): LedgerAsset? = mutateAsset("/api/v1/assets", "POST", payload)
+
+    fun updateAsset(assetId: String, payload: JSONObject): LedgerAsset? =
+        mutateAsset("/api/v1/assets/${URLEncoder.encode(assetId, Charsets.UTF_8.name())}", "PATCH", payload)
+
+    fun deleteAsset(assetId: String): Boolean {
+        val request = Request.Builder()
+            .url(baseUrl.trimEnd('/') + "/api/v1/assets/${URLEncoder.encode(assetId, Charsets.UTF_8.name())}")
+            .header("Authorization", "Bearer $deviceToken")
+            .delete()
+            .build()
+        return client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                rememberHttpFailure(response)
+                false
+            } else {
+                lastError = null
+                true
+            }
+        }
+    }
+
+    private fun mutateAsset(path: String, method: String, payload: JSONObject): LedgerAsset? {
+        val requestBody = payload.toString().toRequestBody("application/json".toMediaType())
+        val request = Request.Builder()
+            .url(baseUrl.trimEnd('/') + path)
+            .header("Authorization", "Bearer $deviceToken")
+            .method(method, requestBody)
+            .build()
+        return client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                rememberHttpFailure(response)
+                return@use null
+            }
+            runCatching {
+                val root = JSONObject(response.body?.string().orEmpty())
+                parseLedgerAsset(root.optJSONObject("asset") ?: root)
+            }.onFailure { lastError = "Could not read the saved asset." }
+                .getOrNull()
+                ?.also { lastError = null }
+        }
+    }
+
     fun push(payload: String): TransactionEntity? {
         deferred = false
         keepReview = false
@@ -376,7 +456,7 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
         )
     }
 
-    private fun parseTransaction(value: JSONObject): TransactionEntity {
+    internal fun parseTransaction(value: JSONObject): TransactionEntity {
         val kind = value.getString("kind")
         val amount = value.getLong("amount_idr")
         val occurredAt = LocalDate.parse(value.getString("occurred_on"))
@@ -400,6 +480,9 @@ class LedgerApi(private val baseUrl: String, private val deviceToken: String) {
             ledgerRole = value.optString("ledger_role", "ordinary"),
             transferBundleId = value.optString("transfer_bundle_id").takeIf { it.isNotBlank() && it != "null" },
             transferLeg = value.optString("transfer_leg").takeIf { it.isNotBlank() && it != "null" },
+            source = value.optString("source", "unknown"),
+            sourceRef = value.optString("source_ref").takeIf { it.isNotBlank() && it != "null" },
+            evidenceCount = value.optInt("evidence_count", 0).coerceAtLeast(0),
         )
     }
 }

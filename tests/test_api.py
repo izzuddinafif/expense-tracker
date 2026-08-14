@@ -533,7 +533,7 @@ async def test_email_failures_are_visible_and_retryable(api_client):
 
 
 @pytest.mark.asyncio
-async def test_android_self_transfer_reuses_email_canonical_record(api_client):
+async def test_android_self_transfer_without_reference_reuses_unique_email_record(api_client):
     client, db = api_client
     canonical, _ = await db.create_confirmed_external_transaction(
         7,
@@ -577,7 +577,7 @@ async def test_android_self_transfer_reuses_email_canonical_record(api_client):
 
 
 @pytest.mark.asyncio
-async def test_android_self_transfer_waits_then_retries_after_email(api_client):
+async def test_android_self_transfer_without_reference_remains_pending_after_email(api_client):
     client, db = api_client
     headers = {
         "Authorization": "Bearer test-device-token",
@@ -618,14 +618,17 @@ async def test_android_self_transfer_waits_then_retries_after_email(api_client):
         transfer_leg="incoming",
     )
     retried = await client.post("/api/v1/transactions", headers=headers, json=payload)
-    assert retried.status == 200
+    # A separately inserted canonical row is not enough to promote an already
+    # staged capture; the email worker's atomic self-transfer path performs the
+    # supported correlation.
+    assert retried.status == 202
     body = await retried.json()
     assert body["created"] is False
-    assert body["transaction"]["id"] == canonical["id"]
+    assert body["transaction"]["id"] != canonical["id"]
 
 
 @pytest.mark.asyncio
-async def test_android_self_transfer_rejects_ambiguous_email_matches(api_client):
+async def test_android_self_transfer_without_reference_does_not_fuzzy_match(api_client):
     client, db = api_client
     for suffix in ("a", "b"):
         await db.create_confirmed_external_transaction(
@@ -658,8 +661,8 @@ async def test_android_self_transfer_rejects_ambiguous_email_matches(api_client)
         },
     )
 
-    assert response.status == 409
-    assert (await response.json())["error"] == "self_transfer_match_ambiguous"
+    assert response.status == 202
+    assert (await response.json())["created"] is True
 
 
 @pytest.mark.asyncio

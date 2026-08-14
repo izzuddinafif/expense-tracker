@@ -1150,6 +1150,29 @@ class NotionClient:
             })
         return result
 
+    async def fetch_accounts(self) -> list[dict]:
+        """Fetch the live Accounts database formulas used by the portfolio API."""
+        pages = await self._query_db(self._db_ids["accounts_ds"])
+
+        def number(props: dict, name: str) -> float | int | None:
+            prop = props.get(name, {})
+            if prop.get("type") == "formula":
+                return (prop.get("formula") or {}).get("number")
+            return prop.get("number")
+
+        result = []
+        for page in pages:
+            props = page.get("properties", {})
+            result.append({
+                "title": self._extract_title(page),
+                "type": (props.get("Type", {}).get("select") or {}).get("name", ""),
+                "initial_amount_idr": number(props, "Initial Amount"),
+                "current_balance_idr": number(props, "Current Balance"),
+                "total_income_idr": number(props, "Total Income"),
+                "total_expenses_idr": number(props, "Total Expenses"),
+            })
+        return result
+
     async def fetch_budgets(self, cache: NotionCache | None = None) -> list[dict]:
         """Fetch all entries from the Budget database."""
         sub_id_to_name: dict[str, str] | None = None

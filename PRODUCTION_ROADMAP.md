@@ -15,7 +15,9 @@ outbox age, and backups. Conversational expense queries, statistics, search,
 exports, and monthly budgets now read the confirmed SQLite ledger. Assets and
 net-worth remain explicitly Notion-backed. Remaining structural debt is
 concentrated in the large `main.py`, legacy workflow tables, and long-term
-retention/pagination.
+retention/pagination. Expanded portfolio/assets and deduplication work is in
+progress only: do not mark it complete until its implementation and regression
+coverage have landed in this branch.
 
 ## Target Architecture
 
@@ -301,18 +303,35 @@ the production API. Remaining roadmap work is non-blocking product evolution:
 
 1. continue extracting handlers/services from `main.py` and validate budget
    totals/categories against real usage data;
-2. keep Assets/net-worth synchronization Notion-backed until a local asset
-   model is introduced.
+2. keep Assets/net-worth synchronization Notion-backed until the in-progress
+   local portfolio/assets model and tests land;
+3. treat in-progress deduplication changes as incomplete until their code and
+   regression coverage land; retain the existing conservative review path in
+   the meantime.
 
 The API 35 emulator suite is currently green at 23/23, the Android JVM suite
 at 62/62, and focused backend regressions at 217/217. The HTTPS-enforcing
-release variant has been assembled locally; the handoff artifact is currently
-signed with the Android debug key because the configured Ledgerly release
-keystore password is not present in this workspace, so it must be re-signed
-with that keystore before stable updates are distributed. The Coolify Ledgerly application is
-healthy at `https://ledgerly.izzudd.in/livez`; the production deployment is
-updated only after the current commit is pushed and the post-deploy health,
-webhook, email-watcher, outbox, and backup checks pass.
+release variant has been assembled locally, but the artifact in this workspace
+is signed with the Android debug key. The external Ledgerly release-keystore
+password is not available here, so signing and stable-update distribution are
+gated: do not claim a stable release until the external keystore is supplied
+and `scripts/build_ledgerly_release.sh` verifies a non-debug certificate,
+versionCode, and SHA-256. The Coolify Ledgerly application must be verified
+after deployment with `scripts/verify_ledgerly_production.sh`; historical
+`/livez` success is not evidence of current production health.
+
+### Release and implementation handoff gates
+
+- [x] Fail-closed release build helper and non-secret SG verification helper
+  are documented in this repository.
+- [ ] The operator supplies the existing external release-keystore password
+  and builds an APK that verifies with a non-debug certificate.
+- [ ] The signed APK's SHA-256 and versionCode are recorded before sideload
+  distribution; no debug-signed APK is treated as a stable update.
+- [ ] In-progress portfolio/assets and deduplication implementation, including
+  regression coverage, lands in this branch before it is marked complete.
+- [ ] An SG post-deploy run of the production verification helper passes and
+  is retained as operational evidence.
 
 Physical BSI/Mandiri/Jago notification delivery is now accepted based on the
 real-device validation above; the parser and notification-queue paths remain

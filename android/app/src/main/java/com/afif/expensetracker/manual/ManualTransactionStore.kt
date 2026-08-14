@@ -130,7 +130,7 @@ class ManualTransactionStore(
         return Validated(description, merchant, occurredOn, category, account, occurredAt, if (kind == "expense") -draft.amountIdr else draft.amountIdr, draft.amountIdr, kind)
     }
 
-    private fun entity(id: String, value: Validated) = TransactionEntity(id, value.merchant, value.signedAmount, value.description, category = value.category, account = value.account, occurredAt = value.occurredAt, syncState = "pending")
+    private fun entity(id: String, value: Validated) = TransactionEntity(id, value.merchant, value.signedAmount, value.description, category = value.category, account = value.account, occurredAt = value.occurredAt, syncState = "pending", source = "manual", sourceRef = id, evidenceCount = 1)
 
     private fun payload(id: String, value: Validated) = JSONObject().put("source", "manual").put("kind", value.kind).put("amount_idr", value.amountIdr).put("occurred_on", value.occurredOn).put("description", value.description).put("merchant", value.merchant).put("subcategory", value.category).put("account", value.account).put("source_ref", id).put("confirm", true).toString()
 

@@ -7,6 +7,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.afif.expensetracker.data.LedgerDatabase
 import com.afif.expensetracker.data.LedgerSettingsStore
+import com.afif.expensetracker.data.PortfolioSnapshotCache
 import com.afif.expensetracker.data.SyncCheckpoint
 import com.afif.expensetracker.data.SyncOperation
 import kotlinx.coroutines.Dispatchers
@@ -112,6 +113,11 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         val feedResult = runCatching { consumeChangeFeed(db, api, ownerToken, generation, feed) }
             .onFailure { Log.w(TAG, "Canonical change feed failed", it) }
         if (feedResult.isFailure) return Result.retry()
+        // Keep the offline dashboard projection current after a successful reconciliation.
+        // A portfolio refresh failure must not turn an otherwise completed transaction sync into a retry.
+        runCatching {
+            api.portfolio()?.let { PortfolioSnapshotCache(applicationContext).save(baseUrl, it) }
+        }.onFailure { Log.w(TAG, "Portfolio refresh after sync failed", it) }
         return if (retryNeeded) Result.retry() else Result.success()
     }
 

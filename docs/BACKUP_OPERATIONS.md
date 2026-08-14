@@ -77,6 +77,11 @@ the newest off-site copy to a new path and follow
 for 26 hours. Do not synchronize a live SQLite database file directly; copy
 only completed backup artifacts.
 
+After a Coolify deployment or SG restart, use
+[`PRODUCTION_VERIFICATION.md`](PRODUCTION_VERIFICATION.md) to capture the
+non-secret liveness, mount, backup-timer, and resource-limit evidence. It does
+not replace the scheduled backup or the monthly restore drill.
+
 Because Coolify's supported custom Docker option list excludes resource-limit
 flags for this application type, SG also runs a host timer that reapplies and
 asserts the production envelope after deploys and restarts:

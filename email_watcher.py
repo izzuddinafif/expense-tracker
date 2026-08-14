@@ -912,6 +912,7 @@ class EmailWatcher:
                     )
                     if not float(entry.amount).is_integer():
                         raise ValueError("IDR ledger amounts must be whole rupiah")
+                    evidence = _extract_self_transfer_evidence(subject, body)
                     row, created = await self._db.create_confirmed_external_transaction(
                         target_id,
                         kind="expense",
@@ -924,6 +925,7 @@ class EmailWatcher:
                         source="bank_email",
                         source_ref=f"gmail:{uid}:expense",
                         metadata={"email_uid": uid, "sender": sender},
+                        bank_reference=evidence[1] if evidence else None,
                     )
                     # The SQLite ledger/outbox commit is durable. Mark the email
                     # processed before best-effort budget and Telegram side effects.

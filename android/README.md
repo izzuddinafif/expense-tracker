@@ -21,21 +21,44 @@ and sync Gradle. Run:
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-For a local signed release artifact, keep the keystore and passwords outside
-the repository and provide them only through the environment:
+## Release signing and sideload distribution
+
+The existing Ledgerly release keystore is external to this repository. Its
+private key and alias establish the stable Android update identity: every
+production APK must retain the same application ID, signing certificate, and a
+higher `versionCode` than the installed release. Do not generate a replacement
+keystore for an update path; Android will reject it as a different app.
+
+Use the release helper only from a trusted operator machine. It requires all
+four inputs explicitly, never prompts, and never prints either password:
 
 ```bash
-export LEDGERLY_SIGNING_STORE_FILE="$HOME/.config/ledgerly/android-release.keystore"
-export LEDGERLY_SIGNING_STORE_PASSWORD='use-your-local-secret'
-export LEDGERLY_SIGNING_KEY_ALIAS='ledgerly'
-export LEDGERLY_SIGNING_KEY_PASSWORD="$LEDGERLY_SIGNING_STORE_PASSWORD"
-./gradlew --no-daemon --max-workers=1 \
-  -Pkotlin.compiler.execution.strategy=in-process \
-  :app:assembleRelease
+export LEDGERLY_SIGNING_STORE_FILE=/absolute/path/to/existing-ledgerly-release.keystore
+read -r -s -p 'Keystore password: ' STORE_PASSWORD; printf '\n'; export STORE_PASSWORD
+read -r -p 'Key alias: ' KEY_ALIAS; export KEY_ALIAS
+read -r -s -p 'Key password: ' KEY_PASSWORD; printf '\n'; export KEY_PASSWORD
+scripts/build_ledgerly_release.sh
 ```
 
-If signing variables are absent, `assembleRelease` remains useful as an
-unsigned CI/build verification artifact; distribution builds must set all four.
+The helper maps these inputs to the Android build only for its Gradle child,
+forces a fresh constrained build (`--max-workers=1`, in-process Kotlin,
+`-Xmx384m`, SerialGC), runs `apksigner verify`, rejects `CN=Android Debug`,
+reads the APK `versionCode`, and prints the APK SHA-256. Archive that output
+with the release notes. Recalculate the recipient copy with `sha256sum` and
+compare it to the reported digest before installing.
+
+The release APK currently present in this workspace is debug-signed and is not
+a stable distribution artifact. A stable release cannot be claimed until the
+external keystore password is available and the helper completes with a
+non-debug certificate.
+
+Debug and release builds share the same package name but have different
+signers. A device with the debug build cannot install the production APK as an
+in-place update, and the reverse is also true. For the first production
+install, either use a clean device or explicitly uninstall the debug app first
+(`adb uninstall com.afif.expensetracker`), understanding that uninstalling
+removes its local Room data and queued work. Thereafter, install only APKs
+verified by the helper and signed by the same release certificate.
 
 ## Emulator E2E tests
 

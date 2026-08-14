@@ -215,7 +215,7 @@ async def test_confirming_a_transfer_principal_never_queues_notion(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_android_first_outgoing_is_promoted_without_duplicate_principal(tmp_path):
+async def test_android_first_outgoing_without_reference_reuses_unique_email_leg(tmp_path):
     db = await Database.connect(str(tmp_path / "android-outgoing.db"))
     try:
         capture = await android_capture(
@@ -229,7 +229,6 @@ async def test_android_first_outgoing_is_promoted_without_duplicate_principal(tm
         bundle = await email_bundle(db, uid="outgoing-no-evidence", with_evidence=False)
         assert bundle["outgoing"]["id"] == capture.transaction["id"]
         assert bundle["outgoing"]["source"] == "android_notification"
-        assert bundle["outgoing"]["ledger_role"] == "self_transfer_principal"
         count = await (
             await db._conn.execute(
                 "SELECT COUNT(*) FROM transactions WHERE kind='expense' "

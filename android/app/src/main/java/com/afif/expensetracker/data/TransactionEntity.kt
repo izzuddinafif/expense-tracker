@@ -21,4 +21,8 @@ data class TransactionEntity(
     val ledgerRole: String = "ordinary",
     val transferBundleId: String? = null,
     val transferLeg: String? = null,
+    /** Origin metadata from the authoritative ledger; references are retained for reconciliation only. */
+    val source: String = "unknown",
+    val sourceRef: String? = null,
+    val evidenceCount: Int = 0,
 )

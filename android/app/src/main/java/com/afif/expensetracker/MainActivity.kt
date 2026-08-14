@@ -74,6 +74,9 @@ import com.afif.expensetracker.settings.SettingsValidationResult
 import com.afif.expensetracker.settings.validateSettings
 import com.afif.expensetracker.sync.SyncScheduler
 import com.afif.expensetracker.sync.LedgerApi
+import com.afif.expensetracker.portfolio.AssetsScreen
+import com.afif.expensetracker.portfolio.PortfolioOverview
+import com.afif.expensetracker.portfolio.formatIdr
 import com.afif.expensetracker.transactions.TransactionKind
 import com.afif.expensetracker.transactions.filterTransactions
 import com.afif.expensetracker.transactions.groupTransactions
@@ -118,7 +121,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private fun money(minor: Long): String = NumberFormat.getCurrencyInstance(Locale("id", "ID")).apply { maximumFractionDigits = 0 }.format(minor)
+private fun money(minor: Long): String = formatIdr(minor)
 
 @Composable
 internal fun rememberDashboardMonth(
@@ -183,7 +186,10 @@ private fun LedgerApp(
             modifier = Modifier.padding(padding),
         ) {
             composable("dashboard") {
-                Dashboard { nav.navigate("inbox") }
+                Dashboard(
+                    openInbox = { nav.navigate("inbox") },
+                    openAssets = { nav.navigate("assets") },
+                )
             }
             composable("inbox") {
                 Inbox()
@@ -208,6 +214,9 @@ private fun LedgerApp(
             }
             composable("diagnostics") {
                 DiagnosticsScreen(onBack = { nav.popBackStack() })
+            }
+            composable("assets") {
+                AssetsScreen(onBack = { nav.popBackStack() })
             }
         }
     }
@@ -277,7 +286,7 @@ private fun LedgerBottomNavigation(
 }
 
 @Composable
-private fun Dashboard(openInbox: () -> Unit) {
+private fun Dashboard(openInbox: () -> Unit, openAssets: () -> Unit) {
     val db = LedgerDatabase.get(LocalContext.current)
     val month = rememberDashboardMonth()
     val monthStart = remember(month) { month.atDay(1).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli() }
@@ -310,6 +319,9 @@ private fun Dashboard(openInbox: () -> Unit) {
                 "$monthLabel · your local-first ledger",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+        item {
+            PortfolioOverview(onOpenAssets = openAssets)
         }
         if (transactionsState == null) {
             item {
@@ -1422,7 +1434,22 @@ private fun TransactionRow(tx: TransactionEntity, onClick: (() -> Unit)? = null)
     LedgerCard(modifier = modifier, contentPadding = 0.dp) {
         ListItem(
             headlineContent = { Text(tx.merchant, fontWeight = FontWeight.SemiBold) },
-            supportingContent = { Text(tx.category) },
+            supportingContent = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(tx.category)
+                    Surface(
+                        shape = MaterialTheme.shapes.small,
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                    ) {
+                        Text(
+                            tx.provenance().label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                        )
+                    }
+                }
+            },
             trailingContent = {
                 Text(
                     money(tx.amountMinor),
@@ -1451,6 +1478,9 @@ private fun TransactionEntity.toDetailSnapshot(): String = JSONObject()
     .put("ledgerRole", ledgerRole)
     .put("transferBundleId", transferBundleId)
     .put("transferLeg", transferLeg)
+    .put("source", source)
+    .put("sourceRef", sourceRef)
+    .put("evidenceCount", evidenceCount)
     .toString()
 
 private fun detailSnapshotToTransaction(snapshot: String?): TransactionEntity? = runCatching {
@@ -1470,6 +1500,9 @@ private fun detailSnapshotToTransaction(snapshot: String?): TransactionEntity? =
         ledgerRole = value.optString("ledgerRole", "ordinary"),
         transferBundleId = value.optString("transferBundleId").takeIf { it.isNotBlank() && it != "null" },
         transferLeg = value.optString("transferLeg").takeIf { it.isNotBlank() && it != "null" },
+        source = value.optString("source", "unknown"),
+        sourceRef = value.optString("sourceRef").takeIf { it.isNotBlank() && it != "null" },
+        evidenceCount = value.optInt("evidenceCount", 0).coerceAtLeast(0),
     )
 }.getOrNull()
 
@@ -1607,6 +1640,16 @@ private fun TransactionDetail(transactionId: String, onBack: () -> Unit) {
                 Text("Transaction not found", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
+            LedgerCard(modifier = Modifier.fillMaxWidth()) {
+                val provenance = current.provenance()
+                Text("Provenance", style = MaterialTheme.typography.titleSmall)
+                Text(provenance.label, fontWeight = FontWeight.SemiBold)
+                Text(
+                    provenance.detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             OutlinedTextField(description, { description = it }, label = { Text("Description") }, enabled = canMutate, modifier = Modifier.fillMaxWidth().testTag("transaction_description"))
             OutlinedTextField(merchant, { merchant = it }, label = { Text("Merchant") }, singleLine = true, enabled = canMutate, modifier = Modifier.fillMaxWidth().testTag("transaction_merchant"))
             LedgerIdrAmountField(amount, { amount = it }, modifier = Modifier.fillMaxWidth(), testTag = "transaction_amount", enabled = canMutate)
