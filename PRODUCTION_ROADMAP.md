@@ -294,14 +294,14 @@ responses are reconciled by UUID lookup and existing pages are repaired with
 canonical data. Telegram, Android, and Gmail creation paths use the outbox;
 edit/void/undo paths also mutate the canonical ledger and enqueue Notion work.
 
-Remaining milestones are:
+Physical-device acceptance is complete: the connected S23 received and was
+validated against the real BSI BYOND, Livin Mandiri, and Jago notification
+flows, with notification access enabled and the current client connected to
+the production API. Remaining roadmap work is non-blocking product evolution:
 
-1. validate notification capture and parsers on the physical Android device
-   using sanitized BSI BYOND, Livin Mandiri, and Jago notifications;
-2. validate real BSI, Mandiri, and Jago notifications on the physical device;
-3. continue extracting handlers/services from `main.py` and validate budget
+1. continue extracting handlers/services from `main.py` and validate budget
    totals/categories against real usage data;
-4. keep Assets/net-worth synchronization Notion-backed until a local asset
+2. keep Assets/net-worth synchronization Notion-backed until a local asset
    model is introduced.
 
 The API 35 emulator suite is currently green at 23/23, the Android JVM suite
@@ -314,7 +314,6 @@ healthy at `https://ledgerly.izzudd.in/livez`; the production deployment is
 updated only after the current commit is pushed and the post-deploy health,
 webhook, email-watcher, outbox, and backup checks pass.
 
-Physical BSI/Mandiri/Jago notification delivery remains a real-device gate;
-the parser and notification-queue paths are covered by sanitized fixtures and
-emulator tests, while the connected S23 is used for final notification-access
-and live-template validation when bank events are available.
+Physical BSI/Mandiri/Jago notification delivery is now accepted based on the
+real-device validation above; the parser and notification-queue paths remain
+covered by sanitized fixtures and emulator tests for regression protection.
