@@ -473,6 +473,18 @@ def register_api_routes(
             return web.json_response({"error": "not_found"}, status=404)
         return web.json_response({"retried": True, "uid": uid})
 
+    async def dismiss_email_failure(request: web.Request) -> web.Response:
+        denied = await require_auth(request)
+        if denied is not None:
+            return denied
+        uid = request.match_info["uid"]
+        if not uid or len(uid) > 255:
+            return web.json_response({"error": "invalid UID"}, status=400)
+        dismissed = await db.dismiss_email_processing_failure(uid)
+        if not dismissed:
+            return web.json_response({"error": "not_found"}, status=404)
+        return web.json_response({"dismissed": True, "uid": uid})
+
     def public_budget(row: dict[str, Any]) -> dict[str, Any]:
         return {
             "month": row["month"],
@@ -545,6 +557,7 @@ def register_api_routes(
     app.router.add_post("/api/v1/sync/retry", retry_sync)
     app.router.add_get("/api/v1/email-failures", email_failures)
     app.router.add_post("/api/v1/email-failures/{uid}/retry", retry_email_failure)
+    app.router.add_post("/api/v1/email-failures/{uid}/dismiss", dismiss_email_failure)
     app.router.add_get("/api/v1/budgets", list_budgets)
     app.router.add_put("/api/v1/budgets", set_budget)
     app.router.add_delete("/api/v1/budgets", delete_budget)

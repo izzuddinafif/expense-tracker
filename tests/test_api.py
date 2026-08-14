@@ -249,6 +249,28 @@ async def test_transaction_can_be_edited_and_voided(api_client):
 
 
 @pytest.mark.asyncio
+async def test_api_can_dismiss_terminal_email_failure(api_client):
+    client, db = api_client
+    await db.record_email_processing_failure(
+        "stale-email-1",
+        "noreply@example.com",
+        "routing: stale account",
+    )
+    headers = {"Authorization": "Bearer test-device-token"}
+    dismissed = await client.post(
+        "/api/v1/email-failures/stale-email-1/dismiss", headers=headers
+    )
+    assert dismissed.status == 200
+    assert await dismissed.json() == {"dismissed": True, "uid": "stale-email-1"}
+    assert await db.get_email_failure_summary() == {
+        "retrying": 0,
+        "degraded": 0,
+        "terminal": 0,
+    }
+    assert "stale-email-1" in await db.get_email_excluded_uids()
+
+
+@pytest.mark.asyncio
 async def test_api_rejects_independent_self_transfer_mutations(api_client):
     client, db = api_client
     bundle = await db.create_confirmed_self_transfer(

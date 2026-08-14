@@ -833,6 +833,36 @@ class Database:
         await self._conn.commit()
         return cur.rowcount > 0
 
+    @_serialize_write
+    async def dismiss_email_processing_failure(self, uid: str) -> bool:
+        """Acknowledge a terminal email failure without retrying its UID."""
+        uid = str(uid).strip()
+        if not uid:
+            return False
+        now = datetime.now(timezone.utc).isoformat()
+        await self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = await (
+                await self._conn.execute(
+                    "SELECT sender FROM email_processing_failures WHERE uid=?", (uid,)
+                )
+            ).fetchone()
+            if row is None:
+                await self._conn.rollback()
+                return False
+            await self._conn.execute(
+                "INSERT OR REPLACE INTO processed_emails(uid,sender,processed_at) VALUES (?,?,?)",
+                (uid, row["sender"], now),
+            )
+            await self._conn.execute(
+                "DELETE FROM email_processing_failures WHERE uid=?", (uid,)
+            )
+            await self._conn.commit()
+            return True
+        except Exception:
+            await self._conn.rollback()
+            raise
+
     async def get_email_failure_summary(self) -> dict[str, int]:
         cur = await self._conn.execute(
             "SELECT "
