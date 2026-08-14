@@ -305,9 +305,11 @@ Remaining milestones are:
    model is introduced.
 
 The API 35 emulator suite is currently green at 23/23, the Android JVM suite
-at 62/62, and focused backend regressions at 216/216. The release artifact has
-been assembled locally and must remain signed with the configured Ledgerly
-release keystore before distribution. The Coolify Ledgerly application is
+at 62/62, and focused backend regressions at 217/217. The HTTPS-enforcing
+release variant has been assembled locally; the handoff artifact is currently
+signed with the Android debug key because the configured Ledgerly release
+keystore password is not present in this workspace, so it must be re-signed
+with that keystore before stable updates are distributed. The Coolify Ledgerly application is
 healthy at `https://ledgerly.izzudd.in/livez`; the production deployment is
 updated only after the current commit is pushed and the post-deploy health,
 webhook, email-watcher, outbox, and backup checks pass.
